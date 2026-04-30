@@ -318,8 +318,9 @@
   - 触发方式为 `workflow_dispatch`
   - 运行环境为 `windows-latest`
   - Python 版本固定为 `3.11`
+  - `actions/setup-python` 已启用 `pip` 缓存并绑定 `requirements.txt`
   - 直接复用现有 `package.bat`
-  - 构建成功后上传 `dist_release_ascii/fx_toolbox` 为 artifact
+  - 构建成功后通过 `actions/upload-artifact@v7` 上传 `dist_release_ascii/fx_toolbox` 为 artifact
 - 后续若继续维护 GitHub 发布能力，默认顺序应为：
   1. 先更新 `requirements.txt`
   2. 再确认 `package.bat` / `fx_toolbox.spec`

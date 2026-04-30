@@ -1,5 +1,10 @@
 # 最近变更
 
+## 2026-05-01 00:02:48 | repo
+- 摘要：将 GitHub 打包工作流升级为缓存依赖并使用新版 artifact action
+- 文件：.github/workflows/build-windows-exe.yml, memory/architecture.md
+- 说明：在 build-windows-exe.yml 中为 actions/setup-python@v6 启用 pip 缓存并绑定 requirements.txt，同时将 actions/upload-artifact 从 v4 升级为 v7。这样既减少重复安装耗时，也避免新建仓库工作流直接停留在旧版 action 上。
+
 ## 2026-05-01 00:00:54 | repo
 - 摘要：补齐 GitHub 首页说明、依赖清单与 Windows 自动打包工作流
 - 文件：README.md, requirements.txt, .github/workflows/build-windows-exe.yml, memory/architecture.md
