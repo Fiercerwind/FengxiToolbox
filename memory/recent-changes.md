@@ -1,5 +1,10 @@
 # 最近变更
 
+## 2026-05-01 00:00:54 | repo
+- 摘要：补齐 GitHub 首页说明、依赖清单与 Windows 自动打包工作流
+- 文件：README.md, requirements.txt, .github/workflows/build-windows-exe.yml, memory/architecture.md
+- 说明：新增 README.md 作为 GitHub 首页主说明；新增 requirements.txt，固定当前已验证依赖版本；新增 GitHub Actions 手动工作流 build-windows-exe.yml，在 windows-latest + Python 3.11 上复用 package.bat 构建并上传 dist_release_ascii/fx_toolbox artifact。原 README.txt 继续保留给打包产物分发。
+
 ## 2026-04-30 23:36:18 | repo
 - 摘要：接入 GitHub 远端并完成首次推送
 - 文件：memory/architecture.md

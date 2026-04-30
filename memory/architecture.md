@@ -304,6 +304,28 @@
   - `package.bat`
   - `tmp_ocr_diag/*.json`
   - `_internal` 下是否重新混入了上述运行库
+## 2026-05-01 GitHub 仓库协作层补强
+- 仓库根目录现已新增 `README.md`，作为 GitHub 首页主说明文档；原有 `README.txt` 继续保留给打包产物随包分发使用。
+- `README.md` 当前覆盖的重点包括：
+  - 功能总览
+  - 源码运行方式
+  - Windows 打包方式
+  - 测试入口
+  - 项目结构
+  - 维护约束
+- 仓库根目录现已新增 `requirements.txt`，使用当前本机已验证可导入/可打包的一组固定版本依赖，供源码运行与 CI 构建复用。
+- 仓库现已新增 `.github/workflows/build-windows-exe.yml`：
+  - 触发方式为 `workflow_dispatch`
+  - 运行环境为 `windows-latest`
+  - Python 版本固定为 `3.11`
+  - 直接复用现有 `package.bat`
+  - 构建成功后上传 `dist_release_ascii/fx_toolbox` 为 artifact
+- 后续若继续维护 GitHub 发布能力，默认顺序应为：
+  1. 先更新 `requirements.txt`
+  2. 再确认 `package.bat` / `fx_toolbox.spec`
+  3. 最后再调整 Actions 工作流
+- 这层改动只属于仓库协作与发布层，不涉及业务代码回归；默认无需触碰稳定区 `批量压缩` / `添加水印`。
+
 ## 2026-04-30 Git 仓库初始化与上传准备
 - 项目根目录现已执行 `git init -b main`，后续工作可以基于本地 Git 历史推进。
 - 新增仓库级 `.gitignore`，当前明确忽略：
