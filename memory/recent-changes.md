@@ -1,5 +1,10 @@
 # 最近变更
 
+## 2026-04-30 23:36:18 | repo
+- 摘要：接入 GitHub 远端并完成首次推送
+- 文件：memory/architecture.md
+- 说明：远端仓库确认为 Fiercerwind/FengxiToolbox。已验证 SSH 不可作为当前默认链路：22 端口连接关闭，443 端口可达但公钥未获接受。随后切换 origin 为 HTTPS，并成功执行 git push -u origin main；本地首个提交 2a48666 已进入 GitHub 私有仓库，main 已建立跟踪关系。
+
 ## 2026-04-30 23:23:23 | repo
 - 摘要：初始化本地 Git 仓库并建立首个 .gitignore 上传基线
 - 文件：.gitignore, memory/architecture.md

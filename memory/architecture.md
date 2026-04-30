@@ -317,8 +317,7 @@
 - 本机当前已确认：
   - `git` 可用
   - `gh` CLI 不可用
-  - 存在本地 SSH key，但本轮环境下 `ssh -T git@github.com` 未建立可用会话，因此真正推送前仍需确认远端地址与认证路径
-- 后续若继续做 GitHub 发布，优先顺序应为：
-  1. 先完成本地首个提交
-  2. 再确认远端仓库 URL / 账号归属
-  3. 最后再执行 `git remote add origin ...` 与 `git push`
+  - SSH 到 GitHub 当前不可用：22 端口连接被关闭，443 端口可连通但目标账号未接受本机公钥
+  - HTTPS 远端可用，已成功配置 `origin -> https://github.com/Fiercerwind/FengxiToolbox.git`
+- 本地首个提交 `2a48666` 已成功推送到 GitHub 私有仓库 `Fiercerwind/FengxiToolbox`，`main` 分支已建立跟踪关系。
+- 后续继续发布时，默认基线路径就是当前 `origin/main`，无需再次初始化仓库；优先直接 `git status` -> `git add/commit` -> `git push`。
