@@ -2793,6 +2793,222 @@ def _patch_pdf_ocr_mode():
 _patch_pdf_ocr_mode()
 
 
+def _iter_widget_tree(widget):
+    if widget is None:
+        return
+    yield widget
+    try:
+        children = widget.winfo_children()
+    except Exception:
+        children = []
+    for child in children:
+        yield from _iter_widget_tree(child)
+
+
+def _find_watermark_skip_switch(root_widget):
+    for widget in _iter_widget_tree(root_widget):
+        if not isinstance(widget, customtkinter.CTkSwitch):
+            continue
+        try:
+            label = str(widget.cget("text") or "")
+        except Exception:
+            continue
+        if "-" not in label:
+            continue
+        if "文件名" in label or "结尾" in label:
+            return widget
+    return None
+
+
+def _get_watermark_filename_rule(app):
+    skip_var = getattr(app, "wm_skip_hyphen_var", None)
+    if skip_var is None:
+        return None
+    try:
+        enabled = bool(skip_var.get())
+    except Exception:
+        enabled = False
+    if not enabled:
+        return None
+
+    mode_var = getattr(app, "wm_skip_name_position_var", None)
+    marker_var = getattr(app, "wm_skip_name_text_var", None)
+
+    try:
+        mode_label = str(mode_var.get() or "结尾").strip() if mode_var is not None else "结尾"
+    except Exception:
+        mode_label = "结尾"
+    try:
+        marker_text = str(marker_var.get() or "").strip() if marker_var is not None else ""
+    except Exception:
+        marker_text = ""
+
+    if not marker_text:
+        marker_text = "-"
+    mode = "prefix" if mode_label == "开头" else "suffix"
+    return mode, marker_text
+
+
+def _watermark_filename_matches_rule(name_no_ext, mode, marker):
+    normalized_name = str(name_no_ext or "")
+    normalized_marker = str(marker or "")
+    if not normalized_name or not normalized_marker:
+        return False
+    if mode == "prefix":
+        return normalized_name.startswith(normalized_marker)
+    return normalized_name.endswith(normalized_marker)
+
+
+def _patch_watermark_filename_rule_ui():
+    try:
+        original_init_watermark_ui = FengxiToolboxApp.init_watermark_ui
+        original_collect_input_files = FengxiToolboxApp.collect_input_files
+        original_run_process = FengxiToolboxApp.run_process
+    except Exception as exc:
+        _debug(f"patch_watermark_filename_rule:missing:{exc}")
+        return
+
+    if getattr(original_init_watermark_ui, "__fx_watermark_filename_rule_patch__", False):
+        return
+
+    def patched_init_watermark_ui(self):
+        original_init_watermark_ui(self)
+        if getattr(self, "_fx_wm_filename_rule_ui_ready", False):
+            return
+        try:
+            self.wm_skip_name_position_var = tkinter.StringVar(value="结尾")
+            self.wm_skip_name_text_var = tkinter.StringVar(value="-")
+
+            skip_switch = _find_watermark_skip_switch(getattr(self, "tab_wm", None))
+            controls_parent = getattr(skip_switch, "master", None) if skip_switch is not None else None
+            controls_row = customtkinter.CTkFrame(
+                controls_parent if controls_parent is not None else self.tab_wm,
+                fg_color="transparent",
+            )
+
+            if skip_switch is not None:
+                try:
+                    skip_switch.configure(text="按文件名规则跳过")
+                except Exception:
+                    pass
+                controls_row.pack(after=skip_switch, fill="x", padx=0, pady=(2, 8))
+            else:
+                controls_row.grid(row=99, column=0, columnspan=2, sticky="ew", padx=18, pady=(4, 8))
+
+            combo_style = {}
+            try:
+                combo_style = self._get_combo_style()
+            except Exception:
+                combo_style = {}
+
+            customtkinter.CTkLabel(
+                controls_row,
+                text="匹配位置",
+                text_color=globals().get("COLOR_TEXT_SOFT"),
+                font=customtkinter.CTkFont(size=11),
+            ).pack(side="left", padx=(0, 8))
+
+            customtkinter.CTkOptionMenu(
+                controls_row,
+                variable=self.wm_skip_name_position_var,
+                values=["结尾", "开头"],
+                width=92,
+                **combo_style,
+            ).pack(side="left", padx=(0, 8))
+
+            customtkinter.CTkEntry(
+                controls_row,
+                width=150,
+                textvariable=self.wm_skip_name_text_var,
+                placeholder_text="-",
+            ).pack(side="left", padx=(0, 8))
+
+            customtkinter.CTkLabel(
+                controls_row,
+                text="留空默认 -",
+                text_color=globals().get("COLOR_TEXT_SOFT"),
+                font=customtkinter.CTkFont(size=11),
+            ).pack(side="left")
+        except Exception as exc:
+            _debug(f"patch_watermark_filename_rule:init_ui_error:{exc}")
+        self._fx_wm_filename_rule_ui_ready = True
+
+    def patched_collect_input_files(self, input_folder, task_type):
+        files = original_collect_input_files(self, input_folder, task_type)
+        if task_type != "watermark":
+            return files
+
+        rule = getattr(self, "_fx_wm_filename_rule_runtime", None)
+        if not rule:
+            return files
+
+        mode, marker = rule
+        filtered_files = []
+        skipped_files = []
+        for path in files:
+            try:
+                name_no_ext = os.path.splitext(os.path.basename(str(path)))[0]
+            except Exception:
+                filtered_files.append(path)
+                continue
+            if _watermark_filename_matches_rule(name_no_ext, mode, marker):
+                skipped_files.append(path)
+            else:
+                filtered_files.append(path)
+
+        if skipped_files:
+            try:
+                direction = "开头" if mode == "prefix" else "结尾"
+                preview = ", ".join(os.path.basename(item) for item in skipped_files[:5])
+                if len(skipped_files) > 5:
+                    preview = f"{preview} 等 {len(skipped_files)} 个文件"
+                self.log(f"⏭️ [智能水印] 已跳过文件名{direction}为“{marker}”的文件：{preview}")
+            except Exception:
+                pass
+        return filtered_files
+
+    def patched_run_process(self, input_folder, task_type):
+        if task_type != "watermark":
+            return original_run_process(self, input_folder, task_type)
+
+        rule = _get_watermark_filename_rule(self)
+        if not rule:
+            return original_run_process(self, input_folder, task_type)
+
+        skip_var = getattr(self, "wm_skip_hyphen_var", None)
+        previous_runtime_rule = getattr(self, "_fx_wm_filename_rule_runtime", None)
+        previous_skip_value = None
+        restore_skip_value = False
+        try:
+            self._fx_wm_filename_rule_runtime = rule
+            if skip_var is not None:
+                try:
+                    previous_skip_value = skip_var.get()
+                    skip_var.set(False)
+                    restore_skip_value = True
+                except Exception as exc:
+                    _debug(f"patch_watermark_filename_rule:disable_builtin_skip_error:{exc}")
+            return original_run_process(self, input_folder, task_type)
+        finally:
+            self._fx_wm_filename_rule_runtime = previous_runtime_rule
+            if restore_skip_value and skip_var is not None:
+                try:
+                    skip_var.set(previous_skip_value)
+                except Exception:
+                    pass
+
+    patched_init_watermark_ui.__fx_watermark_filename_rule_patch__ = True
+    patched_collect_input_files.__fx_watermark_filename_rule_patch__ = True
+    patched_run_process.__fx_watermark_filename_rule_patch__ = True
+    FengxiToolboxApp.init_watermark_ui = patched_init_watermark_ui
+    FengxiToolboxApp.collect_input_files = patched_collect_input_files
+    FengxiToolboxApp.run_process = patched_run_process
+    _debug("patch_watermark_filename_rule:installed")
+
+
+_patch_watermark_filename_rule_ui()
+
+
 def _patch_remove_wm_output_ui():
     try:
         original_init_remove_wm_ui = FengxiToolboxApp.init_remove_wm_ui

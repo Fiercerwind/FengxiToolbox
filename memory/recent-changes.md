@@ -1,5 +1,10 @@
 # 最近变更
 
+## 2026-05-02 21:25:54 | watermark
+- 摘要：稳定区批量水印新增可配置文件名跳过规则
+- 文件：Fengxi_Toolbox.py, memory/categories/watermark-and-remove.md
+- 说明：按用户要求仅调整稳定区批量水印的文件名跳过规则，不改动运行时主体 fengxi_runtime.bin。保持旧行为兼容：默认仍为跳过文件名去扩展名后以 '-' 结尾的文件；新增 UI 允许选择按开头或结尾匹配，并输入自定义字符/字符串。实现位于 Fengxi_Toolbox.py 的加载器层补丁：通过包装 init_watermark_ui/collect_input_files/run_process，仅对 watermark 任务生效；运行时会临时关闭内建固定 '-' 结尾判断，再使用新的可配置规则过滤输入文件。该补丁属于稳定区外围补丁，避免影响其他任务类型。
+
 ## 2026-05-02 21:03:30 | repo
 - 摘要：建立 GitHub 定时同步与 3.0 标签发布链路
 - 文件：VERSION, CHANGELOG.md, README.md, README.txt, tools/fx_git_sync.ps1, tools/register_github_sync_task.ps1, tools/unregister_github_sync_task.ps1, tools/fx_release_version.ps1, .github/workflows/publish-release.yml, memory.md, memory/load-order.md, memory/categories/repo-sync-release.md
