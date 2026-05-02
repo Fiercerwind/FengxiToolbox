@@ -4,6 +4,8 @@
 
 风兮工具箱是一个面向 Windows 桌面环境的本地批处理工具箱，聚焦办公资料整理、文档处理、音视频转换与文件管理。项目当前以中文桌面 GUI 为主，优先服务“本地批量处理、结果可回看、操作可恢复”的日常工作流。
 
+当前发布版本：`3.0.0`
+
 ## 当前能力
 
 - 批量添加水印
@@ -24,6 +26,7 @@
 - 多后端 OCR：当前架构保留多后端切换能力，避免锁死单一路线
 - 打包友好：仓库已包含 PyInstaller 配置与 Windows 打包脚本
 - 记忆驱动维护：项目内置 `agent.md`、`memory.md` 与蒸馏记忆机制，方便后续会话快速恢复上下文
+- GitHub 回退友好：仓库支持定时同步、手动打包和标签发布
 
 ## 运行环境
 
@@ -59,13 +62,70 @@ dist_release_ascii\fx_toolbox\
 dist_release_ascii\fx_toolbox\fx_toolbox.exe
 ```
 
-## GitHub Actions 自动打包
+## GitHub 定期同步
+
+### 手动同步
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\fx_git_sync.ps1
+```
+
+这个脚本会：
+
+- 自动检测当前分支
+- 自动提交所有未忽略的本地改动
+- 在需要时先 `pull --rebase`
+- 再推送到 GitHub 对应分支
+
+默认自动提交信息格式为：
+
+```text
+chore(sync): auto backup 2026-05-02 21:30:00 +08:00
+```
+
+### 注册定时任务
+
+默认推荐每天 `21:30` 自动同步一次：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\register_github_sync_task.ps1 -DailyAt 21:30
+```
+
+如果要删除这个计划任务：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\unregister_github_sync_task.ps1
+```
+
+## GitHub Actions
+
+### 手动打包
 
 仓库已提供 Windows 手动打包工作流：
 
 - 入口：`Actions -> Build Windows EXE`
-- 方式：手动触发 `workflow_dispatch`
+- 方式：手动触发
 - 产物：上传 `dist_release_ascii/fx_toolbox` 目录为 artifact
+
+### 标签发布
+
+仓库已提供基于 Git 标签的自动发布工作流：
+
+- 触发方式：推送 `v*` 标签
+- 发布内容：自动构建 Windows 目录包、压缩为 zip、创建或更新 GitHub Release
+- 发布说明来源：[CHANGELOG.md](CHANGELOG.md)
+
+创建新版本标签的推荐方式：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\fx_release_version.ps1 -Version 3.0.0
+```
+
+## 版本与发布
+
+- 当前版本文件：[VERSION](VERSION)
+- 版本变更记录：[CHANGELOG.md](CHANGELOG.md)
+- 当前正式版本目标：`v3.0.0`
 
 ## 测试与回归
 
@@ -89,16 +149,20 @@ python full_debug_test.py
 ## 项目结构
 
 ```text
-Fengxi_Toolbox.py              # 加载器层、补丁层、UI 与调度增强
-fengxi_runtime.bin             # 封装后的主体运行时逻辑
-tools/fx_pdf_ocr.py            # OCR 搜索版 PDF 引擎与后端探测
-tools/fx_workspace_tools.py    # 备份、记忆、蒸馏与日志工具
-assets/                        # 背景图、赞助码、应用图标等资源
-memory/                        # 架构、约束、近期改动、分类记忆与研究记录
-package.bat                    # Windows 打包入口
-fx_toolbox.spec                # PyInstaller 发布配置
-smoke_test.py                  # 快速回归
-full_debug_test.py             # 全功能增强自检
+Fengxi_Toolbox.py                   # 加载器层、补丁层、UI 与调度增强
+fengxi_runtime.bin                  # 封装后的主体运行时逻辑
+tools/fx_pdf_ocr.py                 # OCR 搜索版 PDF 引擎与后端探测
+tools/fx_workspace_tools.py         # 备份、记忆、蒸馏与日志工具
+tools/fx_git_sync.ps1               # 本机 GitHub 自动同步脚本
+tools/register_github_sync_task.ps1 # 注册计划任务
+tools/fx_release_version.ps1        # 创建并推送版本标签
+assets/                             # 背景图、赞助码、应用图标等资源
+memory/                             # 架构、约束、近期改动、分类记忆与研究记录
+.github/workflows/                  # 打包与发布工作流
+package.bat                         # Windows 打包入口
+fx_toolbox.spec                     # PyInstaller 发布配置
+smoke_test.py                       # 快速回归
+full_debug_test.py                  # 全功能增强自检
 ```
 
 ## 维护约束

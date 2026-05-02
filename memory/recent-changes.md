@@ -1,5 +1,10 @@
 # 最近变更
 
+## 2026-05-02 21:03:30 | repo
+- 摘要：建立 GitHub 定时同步与 3.0 标签发布链路
+- 文件：VERSION, CHANGELOG.md, README.md, README.txt, tools/fx_git_sync.ps1, tools/register_github_sync_task.ps1, tools/unregister_github_sync_task.ps1, tools/fx_release_version.ps1, .github/workflows/publish-release.yml, memory.md, memory/load-order.md, memory/categories/repo-sync-release.md
+- 说明：新增 VERSION 与 CHANGELOG.md 作为 3.0 发布基线；README.md/README.txt 更新为 3.0 说明；新增 fx_git_sync.ps1 自动提交推送脚本、计划任务注册/移除脚本、版本标签发布脚本；新增 publish-release.yml，在推送 v* 标签后自动打包并通过 GitHub Release API 创建或更新正式版本。2026-05-02 已在当前机器成功注册计划任务 FengxiToolbox Auto Sync to GitHub，默认每天 21:30 自动同步。另修复多个脚本在参数默认值阶段直接依赖 PSScriptRoot 导致的默认 RepoRoot 解析失败。
+
 ## 2026-05-01 00:02:48 | repo
 - 摘要：将 GitHub 打包工作流升级为缓存依赖并使用新版 artifact action
 - 文件：.github/workflows/build-windows-exe.yml, memory/architecture.md

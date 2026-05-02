@@ -1,0 +1,54 @@
+# GitHub 同步与发布
+
+## 2026-05-02 当前基线
+- 当前远端仓库：`origin -> https://github.com/Fiercerwind/FengxiToolbox.git`
+- 当前默认分支：`main`
+- 当前发布版本基线：
+  - 展示版本：`3.0`
+  - 标签版本：`v3.0.0`
+  - 版本文件：`VERSION`
+  - 发布说明：`CHANGELOG.md`
+
+## 定时同步
+- 本机自动同步脚本：`tools/fx_git_sync.ps1`
+- 该脚本会：
+  - 自动检测当前分支
+  - 自动提交所有未忽略改动
+  - 在远端领先时先 `pull --rebase`
+  - 最后执行 `git push`
+- 默认自动提交信息前缀：`chore(sync): auto backup`
+- 计划任务注册脚本：`tools/register_github_sync_task.ps1`
+- 计划任务移除脚本：`tools/unregister_github_sync_task.ps1`
+- 2026-05-02 已在当前机器成功注册计划任务 `FengxiToolbox Auto Sync to GitHub`
+- 当前默认计划：每天 `21:30` 自动同步一次
+
+## 版本发布
+- 版本标签发布脚本：`tools/fx_release_version.ps1`
+- 该脚本要求：
+  - 工作区必须干净
+  - 版本号必须是 `X.Y.Z`
+  - 本地与远端都不存在同名标签
+- 成功后会创建并推送 `vX.Y.Z` 注释标签
+
+## GitHub Actions
+- 手动打包工作流：`.github/workflows/build-windows-exe.yml`
+  - 用于手动构建 Windows 目录版 EXE
+- 正式发布工作流：`.github/workflows/publish-release.yml`
+  - 触发方式：推送 `v*` 标签
+  - 流程：安装依赖 -> 复用 `package.bat` 打包 -> 压缩产物 -> 调用 GitHub Release API 创建或更新正式版本 -> 上传 zip 资产
+  - 发布说明来源：`CHANGELOG.md` 中对应版本段落
+
+## 稳健性约束
+- 这套 GitHub 同步/发布方案只应作用于仓库协作层，不应顺带改动稳定业务区。
+- 脚本默认根目录解析不能依赖参数默认值阶段的 `$PSScriptRoot`。
+- 已确认需要在脚本正文中解析默认 `RepoRoot` 的脚本：
+  - `tools/fx_git_sync.ps1`
+  - `tools/register_github_sync_task.ps1`
+  - `tools/fx_release_version.ps1`
+
+## 推荐操作顺序
+1. 本地完成功能修改并验证。
+2. 使用手动同步脚本或等待定时同步，把改动推到 GitHub。
+3. 更新 `VERSION` 与 `CHANGELOG.md`。
+4. 执行 `powershell -ExecutionPolicy Bypass -File tools\fx_release_version.ps1 -Version X.Y.Z`。
+5. 等待 `Publish Release` 工作流构建并生成 GitHub Release。

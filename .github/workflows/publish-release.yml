@@ -1,0 +1,201 @@
+name: Publish Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: meta
+        shell: pwsh
+        run: |
+          $tagName = "${env:GITHUB_REF_NAME}"
+          if ([string]::IsNullOrWhiteSpace($tagName)) {
+            throw "Missing tag name from GITHUB_REF_NAME."
+          }
+
+          $version = $tagName.TrimStart("v")
+          $releaseName = "风兮工具箱 $version"
+          $assetName = "fengxi-toolbox-$version-windows.zip"
+
+          "tag_name=$tagName" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "release_name=$releaseName" >> $env:GITHUB_OUTPUT
+          "asset_name=$assetName" >> $env:GITHUB_OUTPUT
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build onedir package
+        shell: cmd
+        run: |
+          set FX_NO_PAUSE=1
+          call package.bat
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist_release_ascii/fx_toolbox/fx_toolbox.exe")) {
+            throw "Expected build output not found: dist_release_ascii/fx_toolbox/fx_toolbox.exe"
+          }
+
+      - name: Create release zip
+        shell: pwsh
+        run: |
+          $assetName = "${{ steps.meta.outputs.asset_name }}"
+          $outputDir = Join-Path $env:GITHUB_WORKSPACE "dist_release_ascii"
+          $packageDir = Join-Path $outputDir "fx_toolbox"
+          $zipPath = Join-Path $outputDir $assetName
+
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+
+          Compress-Archive -Path $packageDir -DestinationPath $zipPath -Force
+
+      - name: Create or update GitHub release
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $repo = $env:GITHUB_REPOSITORY
+          $tagName = "${{ steps.meta.outputs.tag_name }}"
+          $version = "${{ steps.meta.outputs.version }}"
+          $releaseName = "${{ steps.meta.outputs.release_name }}"
+          $assetName = "${{ steps.meta.outputs.asset_name }}"
+          $assetPath = Join-Path $env:GITHUB_WORKSPACE "dist_release_ascii\$assetName"
+          $changelogPath = Join-Path $env:GITHUB_WORKSPACE "CHANGELOG.md"
+
+          function Get-ReleaseBody {
+            param(
+              [string]$Version,
+              [string]$Path
+            )
+
+            if (-not (Test-Path $Path)) {
+              return "Release $Version"
+            }
+
+            $lines = Get-Content $Path -Encoding UTF8
+            $capturing = $false
+            $section = New-Object System.Collections.Generic.List[string]
+
+            foreach ($line in $lines) {
+              if ($line -match ("^##\s+" + [regex]::Escape($Version) + "\b")) {
+                $capturing = $true
+                continue
+              }
+
+              if ($capturing -and $line -match "^##\s+") {
+                break
+              }
+
+              if ($capturing) {
+                $section.Add($line)
+              }
+            }
+
+            $body = ($section -join "`n").Trim()
+            if ([string]::IsNullOrWhiteSpace($body)) {
+              return "Release $Version"
+            }
+
+            return $body
+          }
+
+          $headers = @{
+            Authorization = "Bearer $env:GITHUB_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+            "User-Agent" = "FengxiToolbox-Release-Workflow"
+          }
+
+          $releaseBody = Get-ReleaseBody -Version $version -Path $changelogPath
+          $release = $null
+
+          try {
+            $release = Invoke-RestMethod `
+              -Method Get `
+              -Uri "https://api.github.com/repos/$repo/releases/tags/$tagName" `
+              -Headers $headers
+
+            $payload = @{
+              name = $releaseName
+              body = $releaseBody
+              draft = $false
+              prerelease = $false
+            } | ConvertTo-Json
+
+            $release = Invoke-RestMethod `
+              -Method Patch `
+              -Uri "https://api.github.com/repos/$repo/releases/$($release.id)" `
+              -Headers $headers `
+              -ContentType "application/json" `
+              -Body $payload
+          } catch {
+            $statusCode = $null
+            if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+              $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+
+            if ($statusCode -ne 404) {
+              throw
+            }
+
+            $payload = @{
+              tag_name = $tagName
+              target_commitish = $env:GITHUB_SHA
+              name = $releaseName
+              body = $releaseBody
+              draft = $false
+              prerelease = $false
+            } | ConvertTo-Json
+
+            $release = Invoke-RestMethod `
+              -Method Post `
+              -Uri "https://api.github.com/repos/$repo/releases" `
+              -Headers $headers `
+              -ContentType "application/json" `
+              -Body $payload
+          }
+
+          $existingAsset = @($release.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1)
+          if ($existingAsset) {
+            Invoke-RestMethod `
+              -Method Delete `
+              -Uri "https://api.github.com/repos/$repo/releases/assets/$($existingAsset.id)" `
+              -Headers $headers | Out-Null
+          }
+
+          $uploadUrl = $release.upload_url -replace '\{\?name,label\}$', ''
+          $escapedName = [System.Uri]::EscapeDataString($assetName)
+
+          Invoke-WebRequest `
+            -Method Post `
+            -Uri "$uploadUrl?name=$escapedName" `
+            -Headers $headers `
+            -ContentType "application/zip" `
+            -InFile $assetPath | Out-Null
