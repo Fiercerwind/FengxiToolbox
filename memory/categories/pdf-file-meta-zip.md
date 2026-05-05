@@ -6,11 +6,18 @@
   - `merge`
   - `split`
   - `encrypt`
+  - `compress`
   - `ocr`
 - 现状：
   - `split`、`encrypt` 可走单文件处理路径。
   - `merge` 必须走 `run_process()` 内的专用单线程分支。
   - 已在加载器层补丁中强制 `merge` 进入单线程。
+  - `compress` 由加载器层补丁接管 `run_process()`，不走运行时原生分支。
+  - `compress` 使用 PyMuPDF 做 PDF 对象清理、deflate、对象流压缩，并可选择内嵌图片重压缩/降采样。
+  - `compress` 当前参数：
+    - PDF 压缩程度：`轻度` / `标准` / `强力`
+    - 图片压缩程度：`保留原图` / `轻度` / `标准` / `强力`
+  - `compress` 输出命名为 `原文件名_压缩.pdf`，同名时追加序号。
   - `ocr` 由加载器层补丁接管 `run_process()`，不走运行时原生分支。
   - `ocr` 当前由风兮自有 OCR 工作流实现，底层使用通用开源 OCR 引擎，不再依赖第三方整套软件目录。
   - `ocr` 默认模型目录优先使用 `assets/ocr_models/rapidocr`，否则退回 `%LOCALAPPDATA%\FengxiToolbox\ocr_models\rapidocr`，也支持环境变量 `FX_OCR_MODEL_ROOT` 覆盖。
@@ -37,6 +44,11 @@
     - 右侧显示紧凑版 OCR 配置卡片
     - 右侧状态展示当前采用紧凑摘要，避免多行状态文本把底部开关挤出可见区
   - PDF 页面的 OCR 配置区优先通过 `Fengxi_Toolbox.py` 的加载器层布局补丁调整，不改 OCR 业务执行链路。
+  - 2026-05-05 起，PDF 页面改为“左侧功能入口 + 右侧当前功能设置面板”：
+    - 左侧只显示合并、拆分、加密、压缩、OCR 五个入口
+    - 右侧只显示当前选中功能的配置
+    - 密码输入和删除源文件作为 PDF 页共享控件继续保留
+    - 这样避免 OCR 与压缩等参数同时堆在一个页面导致看不全
 
 ## OCR 实现说明
 - OCR 引擎模块：`tools/fx_pdf_ocr.py`

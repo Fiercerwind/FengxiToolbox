@@ -14,6 +14,29 @@
   - 不能绕开 `_tighten_layout(...)`，否则窗口若被外部直接显示，侧栏可能还停留在占位态
 - 本轮复测中，`setup_sidebar` 的累计耗时从约 `1.505s` 降到约 `0.183s`；同轮新进程里整体启动约 `3.78s -> 3.07s`。
 
+## 2026-05-05 快速关闭补丁
+- 用户反馈打包版点击关闭后窗口很久才消失。
+- 排查发现默认水印页的文件名规则补丁中，`CTkOptionMenu` 误用了 `CTkComboBox` 支持的 `border_width` / `border_color` 参数。
+- 这会导致下拉控件半初始化，窗口销毁时抛出 `_variable` 缺失异常，并拖慢关闭。
+- 当前修复：
+  - 新增 `_get_option_menu_style(...)`，只把 `CTkOptionMenu` 支持的样式参数传入水印规则下拉框。
+  - 新增 `_install_fast_close_protocol(...)` 与 `_request_fast_close(...)`。
+  - 点击窗口关闭时先设置 `stop_event=True` 并 `withdraw()` 隐藏窗口，再异步 `quit()` / `destroy()`。
+- 目标是让用户点击关闭后窗口立即消失，即使后台 Tk 控件树清理仍需要一点时间。
+- 当前回归：`full_debug_test.py` 的 `app_fast_close_hides_first`，验证关闭请求约毫秒级隐藏并进入销毁流程。
+
+## 2026-05-05 水印页可视高度优化
+- 用户截图反馈默认水印页中间出现一条明显黑色横带，挤压下方功能框，导致右侧参数区底部控件显示不全。
+- 当前判断为外壳布局与水印页固定请求高度共同造成：
+  - `main_panel` 与 `bottom_bar` 之间原有外壳背景间隙会露出黑色横带。
+  - 默认水印页左右两列卡片原始请求高度约 `692px`，在常见 1360x768 视窗下可视高度不足。
+  - 底部进度/按钮/日志区请求高度偏大，继续压缩主功能区。
+- 当前修复仍只在加载器层做 UI 布局补丁，不改水印业务处理：
+  - 将 `watermark -> tab_wm` 加入 `TAB_LAYOUT_ATTRS`，让默认水印页也走 `_tighten_single_tab_layout(...)`。
+  - `_apply_shell_layout_tightening(...)` 收紧顶部栏、主区域和底部栏外距，移除主区域与底部栏之间的黑色间隙。
+  - `_tighten_watermark_tab_layout(...)` 直接收紧 `tab_wm` 左右两列，压缩文本框、参数行、字体下拉框和三组滑块的垂直占位。
+  - 在 1360x768 窗口模拟测量中，水印页可视高度从约 `577px` 提升到约 `664px`，右侧三组滑块完整显示。
+
 ## 2026-04-25 懒加载布局收敛
 - 这轮启动/切页性能优化继续坚持“优先改 `Fengxi_Toolbox.py` 加载器层，不碰 `fengxi_runtime.bin`，不动稳定的添加水印/批量压缩业务”。
 - `_tighten_layout(...)` 已拆成三层：
@@ -344,3 +367,30 @@
   - HTTPS 远端可用，已成功配置 `origin -> https://github.com/Fiercerwind/FengxiToolbox.git`
 - 本地首个提交 `2a48666` 已成功推送到 GitHub 私有仓库 `Fiercerwind/FengxiToolbox`，`main` 分支已建立跟踪关系。
 - 后续继续发布时，默认基线路径就是当前 `origin/main`，无需再次初始化仓库；优先直接 `git status` -> `git add/commit` -> `git push`。
+
+## 2026-05-05 水印页黑色横条与底部占位修复
+- 用户反馈默认水印页中部有一条黑色横条，导致下方功能框显示不全。
+- 根因确认仍属于外壳布局问题，不是添加水印业务逻辑：主窗口背景为 `#000000`，`top_bar` / `main_panel` / `bottom_bar` 间距露出时形成黑线；同时底部栏在高 DPI 下实际占位过高，压缩了水印页主区域。
+- 当前修复仍只在 `Fengxi_Toolbox.py` 加载器层处理：
+  - `_apply_shell_layout_tightening()` 将窗口和 `main_panel` 背景统一为 `COLOR_CARD_ALT`，避免布局缝隙露黑。
+  - 取消 `bottom_bar.grid_propagate(False)` 的硬固定高度，改为自然紧凑高度。
+  - 收紧顶部栏、进度条、操作按钮区和日志框的高度/外边距。
+- 复测 1360x768 窗口：底部栏实际高度约从 `246px` 降到 `149px`，水印主面板可视高度约从 `746px` 提升到 `871px`，右侧水印参数控件完整显示并有余量。
+- 稳定区提醒：本次没有改 `watermark` 任务处理逻辑、智能水印规则执行逻辑或批量压缩业务逻辑。
+
+## 2026-05-05 底部栏高度恢复
+- 用户确认上一轮压缩后底部操作/日志区过小，需要恢复原来的底部高度。
+- 当前处理：保留“窗口/主面板背景统一为 `COLOR_CARD_ALT` 以消除黑色横条”的修复，只恢复底部栏高度策略。
+- `_apply_shell_layout_tightening()` 中 `bottom_bar` 恢复 `height=164` + `grid_propagate(False)`，进度条/按钮/日志框恢复到原先较舒展的尺寸。
+- 1360x768 复测：`bottom_bar` 实际高度恢复到约 `246px`；`tab_wm` 可视高度约 `690px`，仍高于水印页右侧控件请求高度约 `671px`，控件应完整显示。
+- 稳定区提醒：本次仍只改 UI 外壳布局，不改添加水印业务逻辑。
+
+## 2026-05-05 底部运行信息框双倍高度
+- 用户要求将底部运行信息/日志框高度增加一倍。
+- 当前处理仍只在 `Fengxi_Toolbox.py` 加载器层做 UI 布局调整：
+  - `_apply_shell_layout_tightening()` 中 `bottom_bar.height` 从 `164` 增至 `228`。
+  - `bottom_bar` 第 2 行 `minsize` 从 `64` 增至 `128`。
+  - `log_box.configure(height=64)` 改为 `height=128`。
+- 高 DPI 下复测：日志框实际高度从约 `96px` 增至约 `192px`，符合“双倍高度”。
+- 为避免 1360x768 窗口下默认水印页右侧参数被裁切，同步微调 `_tighten_watermark_tab_layout()` 的右侧控件垂直间距和滑块组高度；只改 UI 排版，不改添加水印业务逻辑。
+- 复测：`right_panel` 请求高度约 `589px`，可视高度约 `594px`，右侧控件可完整显示。

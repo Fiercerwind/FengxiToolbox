@@ -119,6 +119,28 @@ def main():
     app.withdraw()
     record("app_init", True, "current_task=" + str(getattr(app, "current_task", None)))
 
+    close_probe = type("FastCloseProbe", (), {})()
+    close_destroy_called = []
+    close_withdraw_called = []
+    close_quit_called = []
+    close_probe.stop_event = False
+    close_probe.withdraw = lambda: close_withdraw_called.append(True)
+    close_probe.quit = lambda: close_quit_called.append(True)
+    close_probe.destroy = lambda: close_destroy_called.append(True)
+    close_probe.after = lambda delay, callback=None, *args: callback(*args) if callback else None
+    close_start = time.perf_counter()
+    mod._request_fast_close(close_probe)
+    close_elapsed = time.perf_counter() - close_start
+    record(
+        "app_fast_close_hides_first",
+        close_elapsed < 0.2
+        and close_probe.stop_event
+        and bool(close_withdraw_called)
+        and bool(close_quit_called)
+        and bool(close_destroy_called),
+        f"{close_elapsed:.4f}s",
+    )
+
     pdf_src = root / "sample.pdf"
     make_pdf(pdf_src, ["hello fengxi"])
     pkt = mod.create_watermark_packet("CONFIDENTIAL", "SmileySans-Oblique", 36, 0.2, 45)
@@ -134,6 +156,10 @@ def main():
     merged = root / "images.pdf"
     status = mod.merge_images_to_pdf([str(img1), str(img2)], str(merged))
     record("images_to_pdf", status == "SUCCESS" and merged.exists(), status)
+
+    single_img_pdf = root / "single_image.pdf"
+    status = mod._image_file_to_pdf(str(img1), str(single_img_pdf))
+    record("image_to_pdf_helper", status == "SUCCESS" and single_img_pdf.exists(), status)
 
     src = root / "stamp.txt"
     dst = root / "stamp_out.txt"
@@ -162,6 +188,25 @@ def main():
     reader = PdfReader(str(enc))
     record("pdf_encrypt", enc.exists() and reader.is_encrypted, "encrypted=" + str(reader.is_encrypted))
 
+    inp = root / "pdf_compress_in"
+    out = root / "pdf_compress_out"
+    inp.mkdir()
+    out.mkdir()
+    src = inp / "compress.pdf"
+    make_pdf(src, ["compress me"])
+    compressed = out / "compress_out.pdf"
+    status = mod.compress_pdf_file(str(src), str(compressed), "强力", "保留原图")
+    compressed_text = ""
+    try:
+        compressed_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(compressed)).pages)
+    except Exception:
+        compressed_text = ""
+    record(
+        "pdf_compress_helper",
+        status.startswith("SUCCESS") and compressed.exists() and "compress me" in compressed_text,
+        status,
+    )
+
     single_pdf = root / "single_input_encrypt.pdf"
     make_pdf(single_pdf, ["single file input"])
     app.current_task = "pdf"
@@ -172,6 +217,25 @@ def main():
     single_pdf_out = root / "【处理完成】结果文件夹" / "single_input_encrypt.pdf"
     single_pdf_ok = wait_for(lambda: single_pdf_out.exists()) and PdfReader(str(single_pdf_out)).is_encrypted
     record("single_file_input_pdf_encrypt", single_pdf_ok, single_pdf_out)
+
+    single_compress_pdf = root / "single_input_compress.pdf"
+    make_pdf(single_compress_pdf, ["single compress input"])
+    app.current_task = "pdf"
+    app.pdf_mode_var.set("compress")
+    if hasattr(app, "pdf_compress_level_var"):
+        app.pdf_compress_level_var.set("标准")
+    if hasattr(app, "pdf_image_compress_level_var"):
+        app.pdf_image_compress_level_var.set("保留原图")
+    app.run_process(str(single_compress_pdf), "pdf")
+    single_compress_out = root / "【处理完成】结果文件夹" / "single_input_compress_压缩.pdf"
+    single_compress_text = ""
+    if wait_for(lambda: single_compress_out.exists()):
+        single_compress_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(single_compress_out)).pages)
+    record(
+        "single_file_input_pdf_compress",
+        single_compress_out.exists() and "single compress input" in single_compress_text,
+        single_compress_out,
+    )
 
     inp = root / "img_in"
     out = root / "img_out"
@@ -190,6 +254,35 @@ def main():
     Image.new("RGB", (200, 100), "yellow").save(src)
     mod.FengxiToolboxApp.process_single_file(dummy, str(src), str(inp), str(out), "image", ("compress", False, "jpg", 0.5), [])
     record("image_compress", (out / "big.jpg").exists(), "ok")
+
+    img_pdf_root = root / "image_to_pdf_workflow"
+    img_pdf_root.mkdir()
+    Image.new("RGB", (80, 60), "red").save(img_pdf_root / "one.png")
+    Image.new("RGB", (80, 60), "blue").save(img_pdf_root / "two.jpg")
+    app.current_task = "image"
+    app.img_mode_var.set("to_pdf")
+    app.run_process(str(img_pdf_root), "image")
+    image_to_pdf_out = img_pdf_root / "【处理完成】结果文件夹" / "one.pdf"
+    image_to_pdf_out_2 = img_pdf_root / "【处理完成】结果文件夹" / "two.pdf"
+    record(
+        "image_to_pdf_workflow",
+        wait_for(lambda: image_to_pdf_out.exists() and image_to_pdf_out_2.exists()),
+        image_to_pdf_out,
+    )
+
+    img_merge_root = root / "image_merge_pdf_workflow"
+    img_merge_root.mkdir()
+    Image.new("RGB", (80, 60), "green").save(img_merge_root / "1.png")
+    Image.new("RGB", (80, 60), "yellow").save(img_merge_root / "2.jpg")
+    app.current_task = "image"
+    app.img_mode_var.set("merge_pdf")
+    app.run_process(str(img_merge_root), "image")
+    image_merge_pdf_out = img_merge_root / "【处理完成】结果文件夹" / "image_merge_pdf_workflow_图集合并.pdf"
+    record(
+        "image_merge_pdf_workflow",
+        wait_for(lambda: image_merge_pdf_out.exists()),
+        image_merge_pdf_out,
+    )
 
     for name, args, expected in [
         ("file_rename_add", ("rename", "add", "pre_", "_suf"), "pre_demo_suf.txt"),

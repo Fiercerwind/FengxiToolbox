@@ -27,9 +27,18 @@
 - 模式：
   - `convert`
   - `compress`
+  - `to_pdf`
+  - `merge_pdf`
 - 支持目标格式：
   - `JPG`
   - `PNG`
   - `BMP`
   - `WEBP`
-
+- 2026-05-05 新增图片 PDF 能力：
+  - `to_pdf`：每张图片生成一份同名 PDF
+  - `merge_pdf`：把输入图片按文件名顺序合并成一份 PDF
+  - 支持图片扩展名：`.jpg` / `.jpeg` / `.png` / `.bmp` / `.webp` / `.tif` / `.tiff`
+  - 两个新模式由 `Fengxi_Toolbox.py` 加载器层接管 `image` 任务，不修改 `fengxi_runtime.bin`
+  - `merge_pdf` 复用现有 `merge_images_to_pdf()` 底座
+  - 输出目录继续复用 `RESULT_FOLDER_NAME`
+  - 如果勾选图片页“处理后删除源文件”，新 PDF 模式成功后也会删除已处理源图

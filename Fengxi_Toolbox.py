@@ -1,6 +1,7 @@
 import ast
 import dis
 import inspect
+import io
 import marshal
 import importlib
 import importlib.util
@@ -46,6 +47,7 @@ LAZY_TAB_SPECS = {
     "file": {"init": "init_file_ui"},
 }
 TAB_LAYOUT_ATTRS = {
+    "watermark": "tab_wm",
     "remove_wm": "tab_rm_wm",
     "convert": "tab_cv",
     "audio": "tab_audio",
@@ -785,32 +787,63 @@ def _apply_shell_layout_tightening(app):
     if getattr(app, "_fx_shell_layout_tightened", False):
         return
 
+    shell_fill_color = globals().get("COLOR_CARD_ALT", "#303030")
+    try:
+        app.configure(fg_color=shell_fill_color)
+    except Exception:
+        pass
+
     app.sidebar_frame.configure(width=300)
     app.grid_columnconfigure(0, minsize=300, weight=0)
 
-    app.top_bar.grid_configure(pady=(18, 10))
-    app.main_panel.grid_configure(pady=(0, 12))
-    app.bottom_bar.grid_configure(pady=(0, 18))
+    app.top_bar.grid_configure(pady=(8, 0))
+    app.main_panel.grid_configure(pady=(0, 0))
+    app.bottom_bar.grid_configure(pady=(0, 8))
+    try:
+        app.main_panel.configure(fg_color=shell_fill_color)
+    except Exception:
+        pass
 
-    app.top_bar.configure(height=132)
-    app.btn_browse.configure(height=56, text="浏览文件/文件夹")
-    app.entry_path.configure(height=56)
+    app.top_bar.configure(height=92)
+    app.btn_browse.configure(height=40, text="浏览文件/文件夹")
+    app.entry_path.configure(height=40)
     for child in app.top_bar.winfo_children():
         if child is app.btn_browse:
-            child.grid_configure(pady=(6, 14), padx=(0, 20))
+            child.grid_configure(pady=(2, 8), padx=(0, 20))
         elif child is app.entry_path:
-            child.grid_configure(pady=(6, 14), padx=(24, 16))
+            child.grid_configure(pady=(2, 8), padx=(24, 16))
         else:
-            child.grid_configure(pady=(12, 0), padx=24)
+            child.grid_configure(pady=(6, 0), padx=24)
 
-    app.bottom_bar.configure(height=292)
+    app.bottom_bar.configure(height=228)
+    try:
+        app.bottom_bar.grid_propagate(False)
+        app.bottom_bar.grid_rowconfigure(2, weight=0, minsize=128)
+    except Exception:
+        pass
     for child in app.bottom_bar.winfo_children():
         if child is app.progress_bar:
-            child.grid_configure(pady=(16, 12), padx=24)
+            child.grid_configure(pady=(10, 8), padx=24)
         elif child is app.log_box:
-            child.grid_configure(pady=18, padx=30)
+            try:
+                child.configure(height=128)
+            except Exception:
+                pass
+            child.grid_configure(pady=(6, 8), padx=30, sticky="ew")
         else:
-            child.grid_configure(padx=30, pady=0)
+            try:
+                child.configure(height=42)
+            except Exception:
+                pass
+            for action_child in child.winfo_children():
+                try:
+                    if isinstance(action_child, customtkinter.CTkButton):
+                        action_child.configure(height=40)
+                    elif isinstance(action_child, customtkinter.CTkSwitch):
+                        action_child.configure(height=28)
+                except Exception:
+                    pass
+            child.grid_configure(padx=30, pady=0, sticky="ew")
 
     sidebar_children = app.sidebar_frame.winfo_children()
     if sidebar_children:
@@ -917,6 +950,9 @@ def _tighten_single_tab_layout(app, task_name):
         except Exception:
             pass
 
+    if task_name == "watermark" and children:
+        _tighten_watermark_tab_layout(app, tab)
+
     if task_name == "pdf" and children:
         pdf_card = children[0]
         pdf_sections = pdf_card.winfo_children()
@@ -962,6 +998,130 @@ def _tighten_single_tab_layout(app, task_name):
                 pass
 
     tab._fx_layout_tightened = True
+
+
+def _tighten_watermark_tab_layout(app, tab):
+    try:
+        tab.grid_rowconfigure(0, weight=1, minsize=0)
+        tab.grid_columnconfigure(0, weight=3, minsize=0)
+        tab.grid_columnconfigure(1, weight=2, minsize=0)
+    except Exception:
+        pass
+
+    panels = list(tab.winfo_children())
+    if len(panels) < 2:
+        return
+
+    left_panel, right_panel = panels[0], panels[1]
+    try:
+        left_panel.grid_configure(row=0, column=0, padx=(0, 14), pady=0, sticky="nsew")
+        right_panel.grid_configure(row=0, column=1, padx=0, pady=0, sticky="nsew")
+        right_panel.grid_configure(padx=0, pady=0, sticky="nsew")
+        left_panel.configure(height=520)
+        right_panel.configure(height=520)
+        left_panel.grid_rowconfigure(1, weight=1)
+        right_panel.grid_rowconfigure(10, weight=1)
+    except Exception:
+        pass
+
+    left_children = list(left_panel.winfo_children())
+    if len(left_children) >= 2:
+        try:
+            left_children[0].pack_configure(anchor="w", padx=24, pady=(18, 8))
+        except Exception:
+            pass
+        try:
+            left_children[1].configure(height=390)
+            left_children[1].pack_configure(fill="both", expand=True, padx=24, pady=(0, 18))
+        except Exception:
+            pass
+
+    right_children = list(right_panel.winfo_children())
+    for child in right_children:
+        try:
+            current = child.pack_info()
+        except Exception:
+            continue
+        side = current.get("side", None)
+        fill = current.get("fill", None)
+        expand = bool(int(current.get("expand", 0))) if str(current.get("expand", "0")).isdigit() else current.get("expand", False)
+        padx = current.get("padx", 0)
+        try:
+            child.pack_configure(side=side, fill=fill, expand=expand, padx=padx, pady=(0, 3))
+        except Exception:
+            pass
+
+    if right_children:
+        try:
+            right_children[0].configure(height=28)
+            right_children[0].pack_configure(anchor="w", padx=24, pady=(6, 1))
+        except Exception:
+            pass
+    for index in (1, 2):
+        if index < len(right_children):
+            try:
+                right_children[index].configure(height=28)
+                right_children[index].pack_propagate(False)
+                right_children[index].pack_configure(fill="x", padx=24, pady=(0, 1))
+                for radio in right_children[index].winfo_children():
+                    try:
+                        radio.configure(height=28)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    for index in (3, 5, 6, 7):
+        if index < len(right_children):
+            try:
+                right_children[index].configure(height=30)
+                right_children[index].pack_configure(anchor="w", padx=24, pady=(0, 1))
+            except Exception:
+                pass
+    if len(right_children) > 4:
+        try:
+            right_children[4].configure(height=38)
+            right_children[4].pack_configure(fill="x", padx=24, pady=(0, 2))
+        except Exception:
+            pass
+    for index in (8, 9, 10):
+        if index < len(right_children):
+            try:
+                right_children[index].configure(height=36)
+                right_children[index].pack_propagate(False)
+                right_children[index].pack_configure(fill="x", padx=24, pady=(0, 1))
+                slider_parts = list(right_children[index].winfo_children())
+                if slider_parts:
+                    try:
+                        slider_parts[0].configure(height=18)
+                        slider_parts[0].pack_propagate(False)
+                        slider_parts[0].pack_configure(fill="x", pady=(0, 0))
+                        for item in slider_parts[0].winfo_children():
+                            try:
+                                item.configure(height=18, font=customtkinter.CTkFont(size=11))
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                if len(slider_parts) > 1:
+                    try:
+                        slider_parts[1].configure(height=16)
+                        slider_parts[1].pack_configure(fill="x", pady=(0, 0))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    if len(right_children) > 11:
+        try:
+            right_children[11].configure(height=30)
+            right_children[11].pack_propagate(False)
+            right_children[11].pack_configure(fill="x", padx=24, pady=(0, 1))
+            for child in right_children[11].winfo_children():
+                try:
+                    child.configure(height=30)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
 def _tighten_layout(app, task_name=None):
@@ -1837,7 +1997,7 @@ def _estimate_progress_total_units(app, input_value, task_type):
             except Exception:
                 mode = ""
         pdf_count = sum(1 for item in all_files if str(item).lower().endswith(".pdf"))
-        if mode in {"merge", "split", "encrypt", "ocr"}:
+        if mode in {"merge", "split", "encrypt", "ocr", "compress"}:
             return pdf_count
 
     if task_type == "zip":
@@ -1848,6 +2008,11 @@ def _estimate_progress_total_units(app, input_value, task_type):
             except Exception:
                 mode = ""
         return _count_zip_progress_units(normalized, mode)
+
+    if task_type == "image":
+        mode = _get_image_pdf_mode(app)
+        if mode in {"to_pdf", "merge_pdf"}:
+            return max(1, len(_collect_image_to_pdf_files(app, normalized)))
 
     return len(all_files)
 
@@ -2420,6 +2585,332 @@ def _run_pdf_ocr_task(app, input_folder):
         app.log("\n🎉 [完成] OCR 搜索版 PDF 已全部生成！")
 
 
+PDF_COMPRESS_LEVELS = {
+    "轻度": {"garbage": 2, "clean": False, "deflate": True, "use_objstms": False, "compression_effort": 1},
+    "标准": {"garbage": 3, "clean": True, "deflate": True, "use_objstms": True, "compression_effort": 6},
+    "强力": {"garbage": 4, "clean": True, "deflate": True, "use_objstms": True, "compression_effort": 9},
+}
+
+PDF_IMAGE_COMPRESS_LEVELS = {
+    "保留原图": {"enabled": False, "quality": 95, "max_side": None},
+    "轻度": {"enabled": True, "quality": 85, "max_side": 2400},
+    "标准": {"enabled": True, "quality": 70, "max_side": 1800},
+    "强力": {"enabled": True, "quality": 55, "max_side": 1200},
+}
+
+
+def _get_pdf_compress_profile(app):
+    level_var = getattr(app, "pdf_compress_level_var", None)
+    image_var = getattr(app, "pdf_image_compress_level_var", None)
+    try:
+        level = str(level_var.get() or "标准").strip() if level_var is not None else "标准"
+    except Exception:
+        level = "标准"
+    try:
+        image_level = str(image_var.get() or "标准").strip() if image_var is not None else "标准"
+    except Exception:
+        image_level = "标准"
+    return (
+        level if level in PDF_COMPRESS_LEVELS else "标准",
+        image_level if image_level in PDF_IMAGE_COMPRESS_LEVELS else "标准",
+    )
+
+
+def _build_pdf_compress_output_path(src, output_folder):
+    source = Path(src)
+    target_dir = Path(output_folder)
+    target = target_dir / f"{source.stem}_压缩{source.suffix}"
+    counter = 2
+    while target.exists():
+        target = target_dir / f"{source.stem}_压缩_{counter}{source.suffix}"
+        counter += 1
+    return str(target)
+
+
+def _jpeg_bytes_from_pixmap(pixmap, quality, max_side):
+    from PIL import Image
+
+    if pixmap.alpha:
+        pixmap = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
+    else:
+        mode = "RGB" if pixmap.n < 4 else "CMYK"
+        pixmap = Image.frombytes(mode, (pixmap.width, pixmap.height), pixmap.samples)
+        if pixmap.mode != "RGB":
+            pixmap = pixmap.convert("RGB")
+
+    if max_side and max(pixmap.size) > max_side:
+        pixmap.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+
+    buffer = io.BytesIO()
+    pixmap.save(buffer, format="JPEG", quality=int(quality), optimize=True)
+    return buffer.getvalue()
+
+
+def _compress_pdf_images(doc, image_profile):
+    import fitz
+
+    if not image_profile.get("enabled"):
+        return 0
+
+    seen_xrefs = set()
+    changed = 0
+    quality = image_profile.get("quality", 70)
+    max_side = image_profile.get("max_side")
+    for page in doc:
+        for image_info in page.get_images(full=True):
+            xref = image_info[0]
+            if xref in seen_xrefs:
+                continue
+            seen_xrefs.add(xref)
+            try:
+                original = doc.extract_image(xref)
+                original_bytes = original.get("image", b"")
+                if not original_bytes:
+                    continue
+                pixmap = fitz.Pixmap(doc, xref)
+                if pixmap.width < 96 or pixmap.height < 96:
+                    continue
+                jpeg_bytes = _jpeg_bytes_from_pixmap(pixmap, quality, max_side)
+                if len(jpeg_bytes) >= len(original_bytes) * 0.98:
+                    continue
+                page.replace_image(xref, stream=jpeg_bytes)
+                changed += 1
+            except Exception as exc:
+                _debug(f"pdf_compress:image_skip:{xref}:{exc}")
+    return changed
+
+
+def compress_pdf_file(src, dst, compress_level="标准", image_level="标准", password=""):
+    import fitz
+
+    pdf_profile = PDF_COMPRESS_LEVELS.get(compress_level, PDF_COMPRESS_LEVELS["标准"])
+    image_profile = PDF_IMAGE_COMPRESS_LEVELS.get(image_level, PDF_IMAGE_COMPRESS_LEVELS["标准"])
+    doc = fitz.open(src)
+    try:
+        if doc.is_encrypted:
+            if not password or not doc.authenticate(password):
+                return "ERROR:PDF 已加密，密码不正确或未提供密码。"
+
+        image_changes = _compress_pdf_images(doc, image_profile)
+        save_kwargs = {
+            "garbage": pdf_profile["garbage"],
+            "clean": pdf_profile["clean"],
+            "deflate": pdf_profile["deflate"],
+            "deflate_images": True,
+            "deflate_fonts": True,
+            "use_objstms": pdf_profile["use_objstms"],
+            "compression_effort": pdf_profile["compression_effort"],
+        }
+        doc.save(dst, **save_kwargs)
+    finally:
+        doc.close()
+
+    if not os.path.exists(dst) or os.path.getsize(dst) <= 0:
+        return "ERROR:压缩输出文件未生成。"
+    return f"SUCCESS:{image_changes}"
+
+
+def _run_pdf_compress_task(app, input_folder):
+    normalized_input, input_root, output_folder = _resolve_result_output_folder(input_folder)
+    all_files = app.collect_input_files(normalized_input, "pdf")
+    pdf_files = [f for f in all_files if f.lower().endswith(".pdf")]
+    if not pdf_files:
+        app.log("⚠️ 未找到可压缩的 PDF 文件。")
+        return
+
+    os.makedirs(output_folder, exist_ok=True)
+    compress_level, image_level = _get_pdf_compress_profile(app)
+    password = ""
+    if getattr(app, "pdf_pwd_entry", None) is not None:
+        try:
+            password = app.pdf_pwd_entry.get().strip()
+        except Exception:
+            password = ""
+
+    tracker = _get_active_progress_tracker(app)
+    failed_list = []
+    total = len(pdf_files)
+    app.log(f"📉 [PDF 压缩] 共 {total} 个 PDF，压缩程度：{compress_level}，图片压缩：{image_level}")
+    for index, src in enumerate(pdf_files):
+        if getattr(app, "stop_event", False):
+            app.log("⏹️ [停止] PDF 压缩任务已被用户中止")
+            break
+        dst = _build_pdf_compress_output_path(src, output_folder)
+        should_count_completion = True
+        try:
+            before_size = os.path.getsize(src)
+            app.log(f"📄 [PDF 压缩] 正在处理：{os.path.basename(src)}")
+            status = compress_pdf_file(src, dst, compress_level, image_level, password=password)
+            if not status.startswith("SUCCESS"):
+                failed_list.append(f"{src}: {status}")
+                app.log(f"❌ [失败] {os.path.basename(src)}: {status}")
+                continue
+            after_size = os.path.getsize(dst)
+            ratio = 0 if before_size <= 0 else max(0, round((1 - after_size / before_size) * 100, 1))
+            image_changes = status.split(":", 1)[1] if ":" in status else "0"
+            app.log(f"✅ [PDF 压缩] {os.path.basename(dst)} | 减少 {ratio}% | 图片 {image_changes} 项")
+            if getattr(app, "pdf_delete_var", None) is not None:
+                try:
+                    if bool(app.pdf_delete_var.get()):
+                        os.remove(src)
+                        app.log(f"🗑️ 已删除源文件：{os.path.basename(src)}")
+                except Exception as exc:
+                    failed_list.append(f"{src}: 删除源文件失败: {exc}")
+        except Exception as exc:
+            failed_list.append(f"{src}: {exc}")
+            app.log(f"❌ [失败] {os.path.basename(src)}: {exc}")
+        finally:
+            if should_count_completion:
+                if tracker is not None:
+                    tracker.complete_units(1)
+                else:
+                    app.progress_bar.set((index + 1) / total)
+
+    if failed_list:
+        app.log("\n========= ❌ 失败清单 =========")
+        for item in failed_list:
+            app.log(f"• {item}")
+        report_path = _write_failed_report(output_folder, failed_list)
+        if report_path:
+            app.log(f"\n📄 [报告] 已生成报告: {report_path}")
+        app.log(f"PDF 压缩任务结束，但有 {len(failed_list)} 个文件处理失败。")
+    elif not getattr(app, "stop_event", False):
+        app.log("\n🎉 [完成] PDF 压缩已全部完成！")
+
+
+IMAGE_TO_PDF_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+
+
+def _collect_image_to_pdf_files(app, input_value):
+    normalized_input = _normalize_input_path_value(input_value)
+    if not normalized_input:
+        return []
+    if os.path.isfile(normalized_input):
+        suffix = Path(normalized_input).suffix.lower()
+        return [normalized_input] if suffix in IMAGE_TO_PDF_EXTS else []
+
+    try:
+        files = app.collect_input_files(normalized_input, "image")
+    except Exception:
+        files = []
+    image_files = [path for path in files if Path(str(path)).suffix.lower() in IMAGE_TO_PDF_EXTS]
+    return sorted(image_files, key=lambda item: os.path.basename(str(item)).lower())
+
+
+def _build_image_pdf_output_path(src, output_folder):
+    source = Path(src)
+    candidate = Path(output_folder) / f"{source.stem}.pdf"
+    counter = 2
+    while candidate.exists():
+        candidate = Path(output_folder) / f"{source.stem}_{counter}.pdf"
+        counter += 1
+    return str(candidate)
+
+
+def _image_file_to_pdf(src, dst):
+    image = PILImage.open(src)
+    try:
+        if image.mode in {"RGBA", "LA"}:
+            background = PILImage.new("RGB", image.size, (255, 255, 255))
+            alpha = image.getchannel("A") if "A" in image.getbands() else None
+            background.paste(image.convert("RGBA"), mask=alpha)
+            image = background
+        elif image.mode != "RGB":
+            image = image.convert("RGB")
+        image.save(dst, "PDF", resolution=100.0)
+    finally:
+        try:
+            image.close()
+        except Exception:
+            pass
+    if not os.path.exists(dst) or os.path.getsize(dst) <= 0:
+        return "ERROR:PDF 输出文件未生成"
+    return "SUCCESS"
+
+
+def _get_image_pdf_mode(app):
+    mode_var = getattr(app, "img_mode_var", None)
+    try:
+        return str(mode_var.get() or "").strip() if mode_var is not None else ""
+    except Exception:
+        return ""
+
+
+def _run_image_to_pdf_task(app, input_folder, merge=False):
+    normalized_input, input_root, output_folder = _resolve_result_output_folder(input_folder)
+    image_files = _collect_image_to_pdf_files(app, normalized_input)
+    if not image_files:
+        app.log("⚠️ 未找到可转 PDF 的图片文件。")
+        return
+    os.makedirs(output_folder, exist_ok=True)
+
+    tracker = _get_active_progress_tracker(app)
+    failed_list = []
+    should_delete = False
+    if getattr(app, "img_delete_var", None) is not None:
+        try:
+            should_delete = bool(app.img_delete_var.get())
+        except Exception:
+            should_delete = False
+
+    if merge:
+        output_name = f"{Path(input_root or normalized_input).name or 'images'}_图集合并.pdf"
+        dst = os.path.join(output_folder, output_name)
+        app.log(f"🧩 [多图合并PDF] 共 {len(image_files)} 张图片，正在合并...")
+        status = merge_images_to_pdf(image_files, dst)
+        if status != "SUCCESS" or not os.path.exists(dst):
+            failed_list.append(f"{normalized_input}: {status}")
+            app.log(f"❌ [失败] 多图合并 PDF: {status}")
+        else:
+            app.log(f"✅ [多图合并PDF] 已输出：{os.path.basename(dst)}")
+            if should_delete:
+                for src in image_files:
+                    try:
+                        os.remove(src)
+                    except Exception as exc:
+                        failed_list.append(f"{src}: 删除源文件失败: {exc}")
+        if tracker is not None:
+            tracker.complete_units(len(image_files))
+        else:
+            app.progress_bar.set(1)
+    else:
+        total = len(image_files)
+        app.log(f"📄 [图片转PDF] 共 {total} 张图片，逐张生成 PDF...")
+        for index, src in enumerate(image_files):
+            if getattr(app, "stop_event", False):
+                app.log("⏹️ [停止] 图片转 PDF 任务已被用户中止")
+                break
+            dst = _build_image_pdf_output_path(src, output_folder)
+            try:
+                status = _image_file_to_pdf(src, dst)
+                if status != "SUCCESS":
+                    failed_list.append(f"{src}: {status}")
+                    app.log(f"❌ [失败] {os.path.basename(src)}: {status}")
+                else:
+                    app.log(f"✅ [图片转PDF] {os.path.basename(src)} -> {os.path.basename(dst)}")
+                    if should_delete:
+                        os.remove(src)
+            except Exception as exc:
+                failed_list.append(f"{src}: {exc}")
+                app.log(f"❌ [失败] {os.path.basename(src)}: {exc}")
+            finally:
+                if tracker is not None:
+                    tracker.complete_units(1)
+                else:
+                    app.progress_bar.set((index + 1) / total)
+
+    if failed_list:
+        app.log("\n========= ❌ 失败清单 =========")
+        for item in failed_list:
+            app.log(f"• {item}")
+        report_path = _write_failed_report(output_folder, failed_list)
+        if report_path:
+            app.log(f"\n📄 [报告] 已生成报告: {report_path}")
+        app.log(f"图片转 PDF 任务结束，但有 {len(failed_list)} 个文件处理失败。")
+    elif not getattr(app, "stop_event", False):
+        app.log("\n🎉 [完成] 图片 PDF 任务已全部完成！")
+
+
 def _patch_pdf_ocr_mode():
     try:
         original_init_pdf_ui = FengxiToolboxApp.init_pdf_ui
@@ -2512,100 +3003,183 @@ def _patch_pdf_ocr_mode():
             content_row = customtkinter.CTkFrame(body, fg_color="transparent")
             content_row.pack(fill="both", expand=True, padx=0, pady=(4, 0))
 
-            base_panel = customtkinter.CTkFrame(content_row, fg_color="transparent", width=340)
-            base_panel.pack(side="left", fill="y", padx=(0, 16))
+            base_panel = customtkinter.CTkFrame(content_row, fg_color="transparent", width=250)
+            base_panel.pack(side="left", fill="y", padx=(0, 14))
             base_panel.pack_propagate(False)
 
-            ocr_panel_shell = customtkinter.CTkFrame(content_row, **self._get_panel_style())
-            ocr_panel_shell.pack(side="left", fill="both", expand=True)
+            detail_shell = customtkinter.CTkFrame(content_row, **self._get_panel_style())
+            detail_shell.pack(side="left", fill="both", expand=True)
+            detail_shell.grid_columnconfigure(0, weight=1)
+            detail_shell.grid_rowconfigure(0, weight=1)
 
-            customtkinter.CTkRadioButton(
+            nav_label = customtkinter.CTkLabel(
                 base_panel,
-                text=merge_text,
-                variable=self.pdf_mode_var,
-                value="merge",
-                **self._get_radio_style(),
-            ).pack(anchor="w", pady=(6, 6))
+                text="PDF 功能",
+                text_color="#E6EEF2",
+                font=customtkinter.CTkFont(size=14, weight="bold"),
+            )
+            nav_label.pack(anchor="w", pady=(4, 10))
 
-            customtkinter.CTkRadioButton(
-                base_panel,
-                text=split_text,
-                variable=self.pdf_mode_var,
-                value="split",
-                **self._get_radio_style(),
-            ).pack(anchor="w", pady=(0, 6))
+            mode_buttons = {}
 
-            customtkinter.CTkRadioButton(
-                base_panel,
-                text=encrypt_text,
-                variable=self.pdf_mode_var,
-                value="encrypt",
-                **self._get_radio_style(),
-            ).pack(anchor="w", pady=(0, 12))
+            def select_pdf_mode(mode):
+                try:
+                    self.pdf_mode_var.set(mode)
+                except Exception:
+                    pass
+                for key, button in mode_buttons.items():
+                    try:
+                        if key == mode:
+                            button.configure(fg_color="#7A695B", border_color="#D0B38A", text_color="#FFFFFF")
+                        else:
+                            button.configure(fg_color="transparent", border_color="#44515A", text_color="#DDE6EA")
+                    except Exception:
+                        pass
+                for key, panel in self._fx_pdf_detail_panels.items():
+                    try:
+                        if key == mode:
+                            panel.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+                            panel.tkraise()
+                        else:
+                            panel.grid_remove()
+                    except Exception:
+                        pass
+
+            def make_mode_button(mode, title, hint):
+                frame = customtkinter.CTkButton(
+                    base_panel,
+                    text=f"{title}\n{hint}",
+                    command=lambda selected=mode: select_pdf_mode(selected),
+                    height=54,
+                    anchor="w",
+                    corner_radius=8,
+                    border_width=1,
+                    fg_color="transparent",
+                    hover_color="#303030",
+                    border_color="#44515A",
+                    text_color="#DDE6EA",
+                    font=customtkinter.CTkFont(size=12),
+                )
+                frame.pack(fill="x", pady=(0, 7))
+                mode_buttons[mode] = frame
+
+            make_mode_button("merge", merge_text, "多份合成一份")
+            make_mode_button("split", split_text, "逐页拆分输出")
+            make_mode_button("encrypt", encrypt_text, "设置打开密码")
+            make_mode_button("compress", "PDF 压缩", "压缩体积和图片")
+            make_mode_button("ocr", "OCR 搜索版 PDF", "生成可搜索文字层")
+
+            shared_panel = customtkinter.CTkFrame(base_panel, fg_color="transparent")
+            shared_panel.pack(fill="x", pady=(6, 0))
 
             self.chk_delete = customtkinter.CTkSwitch(
-                base_panel,
+                shared_panel,
                 text=delete_text,
                 variable=self.pdf_delete_var,
                 **self._get_switch_style(),
             )
-            self.chk_delete.pack(anchor="w", pady=(0, 14))
+            self.chk_delete.pack(anchor="w", pady=(0, 10))
 
             customtkinter.CTkLabel(
-                base_panel,
+                shared_panel,
                 text=pwd_label_text,
                 text_color=COLOR_TEXT_SOFT,
-                font=customtkinter.CTkFont(size=12),
+                font=customtkinter.CTkFont(size=11),
             ).pack(anchor="w", pady=(0, 4))
 
             self.pdf_pwd_entry = customtkinter.CTkEntry(
-                base_panel,
+                shared_panel,
                 placeholder_text=pwd_placeholder,
                 **self._get_entry_style(),
             )
-            self.pdf_pwd_entry.pack(fill="x", pady=(0, 14))
+            self.pdf_pwd_entry.pack(fill="x")
             if pwd_value:
                 try:
                     self.pdf_pwd_entry.insert(0, pwd_value)
                 except Exception:
                     pass
 
-            customtkinter.CTkRadioButton(
-                base_panel,
-                text="OCR 搜索版 PDF",
-                variable=self.pdf_mode_var,
-                value="ocr",
-                **self._get_radio_style(),
-            ).pack(anchor="w", pady=(2, 6))
+            self.pdf_compress_level_var = tkinter.StringVar(value="标准")
+            self.pdf_image_compress_level_var = tkinter.StringVar(value="标准")
+            self._fx_pdf_detail_panels = {}
 
-            customtkinter.CTkLabel(
-                base_panel,
-                text="保留原页面画面，并叠加透明文字层生成可搜索 PDF。",
-                text_color=COLOR_TEXT_SOFT,
-                font=customtkinter.CTkFont(size=12),
-                justify="left",
-                wraplength=310,
-            ).pack(anchor="w", pady=(0, 6))
+            def create_detail_panel(key, title):
+                panel = customtkinter.CTkFrame(detail_shell, fg_color="transparent")
+                panel.grid_columnconfigure(0, weight=1)
+                customtkinter.CTkLabel(
+                    panel,
+                    text=title,
+                    text_color="#E6EEF2",
+                    font=customtkinter.CTkFont(size=15, weight="bold"),
+                    height=22,
+                ).pack(anchor="w", padx=8, pady=(0, 8))
+                self._fx_pdf_detail_panels[key] = panel
+                return panel
 
+            def add_panel_note(parent, text):
+                customtkinter.CTkLabel(
+                    parent,
+                    text=text,
+                    text_color=COLOR_TEXT_SOFT,
+                    font=customtkinter.CTkFont(size=12),
+                    justify="left",
+                    wraplength=620,
+                ).pack(anchor="w", fill="x", padx=8, pady=(0, 8))
+
+            merge_panel = create_detail_panel("merge", "PDF 合并")
+            add_panel_note(merge_panel, "把输入中的 PDF 按文件名顺序合并为一个 PDF。适合先把文件放进同一个文件夹后统一处理。")
+
+            split_panel = create_detail_panel("split", "PDF 拆分")
+            add_panel_note(split_panel, "把每份 PDF 按页面拆成单页文件，并在结果目录中按原文件名建立子文件夹。")
+
+            encrypt_panel = create_detail_panel("encrypt", "PDF 加密")
+            add_panel_note(encrypt_panel, "在左侧密码框填写打开密码后开始处理。密码框也兼容加密 PDF 的 OCR 和压缩读取。")
+
+            compress_panel = create_detail_panel("compress", "PDF 压缩")
+            add_panel_note(compress_panel, "PDF 压缩程度控制对象清理、字体和数据流压缩；图片压缩程度控制内嵌图片的重压缩和降采样。")
+            compress_grid = customtkinter.CTkFrame(compress_panel, fg_color="transparent")
+            compress_grid.pack(fill="x", padx=8, pady=(2, 10))
+            compress_grid.grid_columnconfigure(0, weight=1)
+            compress_grid.grid_columnconfigure(1, weight=1)
+
+            pdf_level_field = customtkinter.CTkFrame(compress_grid, fg_color="transparent")
+            pdf_level_field.grid(row=0, column=0, sticky="ew", padx=(0, 8))
             customtkinter.CTkLabel(
-                base_panel,
-                text="详细 OCR 参数在右侧配置区，可按后端和识别策略调优。",
+                pdf_level_field,
+                text="PDF 压缩程度：",
                 text_color=COLOR_TEXT_SOFT,
                 font=customtkinter.CTkFont(size=11),
-                justify="left",
-                wraplength=310,
             ).pack(anchor="w", pady=(0, 4))
+            customtkinter.CTkComboBox(
+                pdf_level_field,
+                values=list(PDF_COMPRESS_LEVELS.keys()),
+                variable=self.pdf_compress_level_var,
+                height=32,
+                **self._get_combo_style(),
+            ).pack(fill="x")
 
-            ocr_panel = customtkinter.CTkFrame(ocr_panel_shell, fg_color="transparent")
-            ocr_panel.pack(fill="both", expand=True, padx=8, pady=8)
-
+            image_level_field = customtkinter.CTkFrame(compress_grid, fg_color="transparent")
+            image_level_field.grid(row=0, column=1, sticky="ew")
             customtkinter.CTkLabel(
-                ocr_panel,
-                text="OCR 配置",
-                text_color="#E6EEF2",
-                font=customtkinter.CTkFont(size=14, weight="bold"),
-                height=20,
-            ).pack(anchor="w", padx=8, pady=(0, 4))
+                image_level_field,
+                text="图片压缩程度：",
+                text_color=COLOR_TEXT_SOFT,
+                font=customtkinter.CTkFont(size=11),
+            ).pack(anchor="w", pady=(0, 4))
+            customtkinter.CTkComboBox(
+                image_level_field,
+                values=list(PDF_IMAGE_COMPRESS_LEVELS.keys()),
+                variable=self.pdf_image_compress_level_var,
+                height=32,
+                **self._get_combo_style(),
+            ).pack(fill="x")
+
+            add_panel_note(
+                compress_panel,
+                "提示：如果 PDF 主要由扫描图片组成，调高图片压缩更有效；如果 PDF 主要是文字，PDF 压缩程度通常更关键。",
+            )
+
+            ocr_panel = create_detail_panel("ocr", "OCR 配置")
 
             customtkinter.CTkLabel(
                 ocr_panel,
@@ -2763,6 +3337,10 @@ def _patch_pdf_ocr_mode():
             ).pack(anchor="w", fill="x", padx=8, pady=(0, 2))
 
             self.pdf_ocr_backend_status_var.set("后端状态：按需检测，可直接运行 OCR；如需查看详细可用性再点刷新。")
+            try:
+                select_pdf_mode(self.pdf_mode_var.get())
+            except Exception:
+                select_pdf_mode("merge")
 
             self._fx_pdf_ocr_ui_ready = True
         except Exception as exc:
@@ -2771,7 +3349,16 @@ def _patch_pdf_ocr_mode():
     def patched_run_process(self, input_folder, task_type):
         if task_type == "pdf":
             try:
-                if getattr(self, "pdf_mode_var", None) is not None and self.pdf_mode_var.get() == "ocr":
+                pdf_mode = self.pdf_mode_var.get() if getattr(self, "pdf_mode_var", None) is not None else ""
+                if pdf_mode == "compress":
+                    try:
+                        _run_pdf_compress_task(self, input_folder)
+                    except Exception as exc:
+                        self.log(f"🔥 [严重错误] {exc}")
+                    finally:
+                        self.reset_ui()
+                    return
+                if pdf_mode == "ocr":
                     try:
                         _run_pdf_ocr_task(self, input_folder)
                     except Exception as exc:
@@ -2791,6 +3378,94 @@ def _patch_pdf_ocr_mode():
 
 
 _patch_pdf_ocr_mode()
+
+
+def _patch_image_pdf_modes():
+    try:
+        original_init_img_ui = FengxiToolboxApp.init_img_ui
+        original_run_process = FengxiToolboxApp.run_process
+    except Exception as exc:
+        _debug(f"patch_image_pdf_modes:missing:{exc}")
+        return
+
+    if getattr(original_init_img_ui, "__fx_image_pdf_patch__", False):
+        return
+
+    def patched_init_img_ui(self):
+        original_init_img_ui(self)
+        if getattr(self, "_fx_image_pdf_ui_ready", False):
+            return
+        try:
+            card = self.tab_img.winfo_children()[0]
+            body = card.winfo_children()[1]
+            children = list(body.winfo_children())
+            insert_after = children[2] if len(children) > 2 else None
+            pdf_modes_frame = customtkinter.CTkFrame(body, fg_color="transparent")
+            if insert_after is not None:
+                pdf_modes_frame.pack(after=insert_after, fill="x", pady=(0, 8))
+            else:
+                pdf_modes_frame.pack(fill="x", pady=(0, 8))
+
+            customtkinter.CTkRadioButton(
+                pdf_modes_frame,
+                text="图片转 PDF (Single Image PDF)",
+                variable=self.img_mode_var,
+                value="to_pdf",
+                **self._get_radio_style(),
+            ).pack(anchor="w", pady=(0, 6))
+
+            customtkinter.CTkRadioButton(
+                pdf_modes_frame,
+                text="多图合并 PDF (Merge Images PDF)",
+                variable=self.img_mode_var,
+                value="merge_pdf",
+                **self._get_radio_style(),
+            ).pack(anchor="w", pady=(0, 2))
+
+            customtkinter.CTkLabel(
+                pdf_modes_frame,
+                text="图片转 PDF 会为每张图片生成一个 PDF；多图合并 PDF 会按文件名顺序合成一份 PDF。",
+                text_color=COLOR_TEXT_SOFT,
+                font=customtkinter.CTkFont(size=11),
+                justify="left",
+                wraplength=560,
+            ).pack(anchor="w", fill="x", pady=(4, 0))
+            self._fx_image_pdf_ui_ready = True
+        except Exception as exc:
+            _debug(f"patch_image_pdf_modes:init_ui_error:{exc}")
+
+    def patched_run_process(self, input_folder, task_type):
+        if task_type == "image":
+            try:
+                image_mode = _get_image_pdf_mode(self)
+                if image_mode == "to_pdf":
+                    try:
+                        _run_image_to_pdf_task(self, input_folder, merge=False)
+                    except Exception as exc:
+                        self.log(f"🔥 [严重错误] {exc}")
+                    finally:
+                        self.reset_ui()
+                    return
+                if image_mode == "merge_pdf":
+                    try:
+                        _run_image_to_pdf_task(self, input_folder, merge=True)
+                    except Exception as exc:
+                        self.log(f"🔥 [严重错误] {exc}")
+                    finally:
+                        self.reset_ui()
+                    return
+            except Exception as exc:
+                _debug(f"patch_image_pdf_modes:run_process_error:{exc}")
+        return original_run_process(self, input_folder, task_type)
+
+    patched_init_img_ui.__fx_image_pdf_patch__ = True
+    patched_run_process.__fx_image_pdf_patch__ = True
+    FengxiToolboxApp.init_img_ui = patched_init_img_ui
+    FengxiToolboxApp.run_process = patched_run_process
+    _debug("patch_image_pdf_modes:installed")
+
+
+_patch_image_pdf_modes()
 
 
 def _iter_widget_tree(widget):
@@ -2818,6 +3493,27 @@ def _find_watermark_skip_switch(root_widget):
         if "文件名" in label or "结尾" in label:
             return widget
     return None
+
+
+def _get_option_menu_style(combo_style):
+    allowed_keys = {
+        "corner_radius",
+        "fg_color",
+        "button_color",
+        "button_hover_color",
+        "text_color",
+        "text_color_disabled",
+        "dropdown_fg_color",
+        "dropdown_hover_color",
+        "dropdown_text_color",
+        "font",
+        "dropdown_font",
+        "state",
+        "hover",
+        "dynamic_resizing",
+        "anchor",
+    }
+    return {key: value for key, value in dict(combo_style or {}).items() if key in allowed_keys}
 
 
 def _get_watermark_filename_rule(app):
@@ -2883,15 +3579,20 @@ def _patch_watermark_filename_rule_ui():
             controls_parent = getattr(skip_switch, "master", None) if skip_switch is not None else None
             controls_row = customtkinter.CTkFrame(
                 controls_parent if controls_parent is not None else self.tab_wm,
+                height=30,
                 fg_color="transparent",
             )
+            try:
+                controls_row.pack_propagate(False)
+            except Exception:
+                pass
 
             if skip_switch is not None:
                 try:
                     skip_switch.configure(text="按文件名规则跳过")
                 except Exception:
                     pass
-                controls_row.pack(after=skip_switch, fill="x", padx=0, pady=(2, 8))
+                controls_row.pack(after=skip_switch, fill="x", padx=0, pady=(0, 3))
             else:
                 controls_row.grid(row=99, column=0, columnspan=2, sticky="ew", padx=18, pady=(4, 8))
 
@@ -2900,12 +3601,14 @@ def _patch_watermark_filename_rule_ui():
                 combo_style = self._get_combo_style()
             except Exception:
                 combo_style = {}
+            option_menu_style = _get_option_menu_style(combo_style)
 
             customtkinter.CTkLabel(
                 controls_row,
                 text="匹配位置",
                 text_color=globals().get("COLOR_TEXT_SOFT"),
                 font=customtkinter.CTkFont(size=11),
+                height=30,
             ).pack(side="left", padx=(0, 8))
 
             customtkinter.CTkOptionMenu(
@@ -2913,12 +3616,14 @@ def _patch_watermark_filename_rule_ui():
                 variable=self.wm_skip_name_position_var,
                 values=["结尾", "开头"],
                 width=92,
-                **combo_style,
+                height=30,
+                **option_menu_style,
             ).pack(side="left", padx=(0, 8))
 
             customtkinter.CTkEntry(
                 controls_row,
                 width=150,
+                height=30,
                 textvariable=self.wm_skip_name_text_var,
                 placeholder_text="-",
             ).pack(side="left", padx=(0, 8))
@@ -2928,6 +3633,7 @@ def _patch_watermark_filename_rule_ui():
                 text="留空默认 -",
                 text_color=globals().get("COLOR_TEXT_SOFT"),
                 font=customtkinter.CTkFont(size=11),
+                height=30,
             ).pack(side="left")
         except Exception as exc:
             _debug(f"patch_watermark_filename_rule:init_ui_error:{exc}")
@@ -3196,6 +3902,7 @@ def _ensure_lazy_tab_initialized(app, task_name):
 
 
 def _show_ready_window(app):
+    _install_fast_close_protocol(app)
     try:
         app.update_idletasks()
     except Exception as exc:
@@ -3206,6 +3913,74 @@ def _show_ready_window(app):
         _debug("startup:window_shown")
     except Exception as exc:
         _debug(f"startup:window_show_error:{exc}")
+
+
+def _request_fast_close(app):
+    if getattr(app, "_fx_fast_close_started", False):
+        return
+    app._fx_fast_close_started = True
+    try:
+        app.stop_event = True
+    except Exception:
+        pass
+    try:
+        app.is_running = False
+    except Exception:
+        pass
+    try:
+        app.withdraw()
+        app.update_idletasks()
+        _debug("fast_close:window_hidden")
+    except Exception as exc:
+        _debug(f"fast_close:withdraw_error:{exc}")
+
+    def finish_destroy():
+        try:
+            app.quit()
+        except Exception:
+            pass
+        try:
+            app.destroy()
+            _debug("fast_close:destroy_done")
+        except Exception as exc:
+            _debug(f"fast_close:destroy_error:{exc}")
+            try:
+                os._exit(0)
+            except Exception:
+                pass
+
+    def force_exit_if_needed():
+        try:
+            if getattr(app, "_fx_fast_close_force_done", False):
+                return
+            app._fx_fast_close_force_done = True
+            _debug("fast_close:force_exit")
+            os._exit(0)
+        except Exception:
+            pass
+
+    try:
+        timer = threading.Timer(0.9, force_exit_if_needed)
+        timer.daemon = True
+        timer.start()
+    except Exception as exc:
+        _debug(f"fast_close:force_timer_error:{exc}")
+
+    try:
+        app.after_idle(finish_destroy)
+    except Exception:
+        finish_destroy()
+
+
+def _install_fast_close_protocol(app):
+    if getattr(app, "_fx_fast_close_protocol_ready", False):
+        return
+    try:
+        app.protocol("WM_DELETE_WINDOW", lambda target=app: _request_fast_close(target))
+        app._fx_fast_close_protocol_ready = True
+        _debug("fast_close:protocol_installed")
+    except Exception as exc:
+        _debug(f"fast_close:protocol_error:{exc}")
 
 
 def _patch_startup_performance():

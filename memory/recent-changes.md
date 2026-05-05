@@ -1,5 +1,40 @@
 # 最近变更
 
+## 2026-05-05 10:19:14 | ui
+- 摘要：底部运行信息框高度增加一倍
+- 文件：Fengxi_Toolbox.py, memory\architecture.md
+- 说明：将 bottom_bar 固定高度与日志框高度加大，日志框高 DPI 实际高度约从 96px 增至 192px；同步微调水印页右侧控件间距，保持小窗口下不裁切。未改水印业务逻辑。
+
+## 2026-05-05 10:11:35 | ui
+- 摘要：恢复底部栏原高度并保留黑线修复
+- 文件：Fengxi_Toolbox.py, memory\architecture.md
+- 说明：用户反馈底部操作/日志区过小；恢复 bottom_bar 固定高度和日志/按钮舒展尺寸，同时保留窗口与主面板背景统一，避免黑色横条复现。
+
+## 2026-05-05 10:01:08 | ui
+- 摘要：修复水印页黑色横条与下方功能框裁切
+- 文件：Fengxi_Toolbox.py, memory\architecture.md
+- 说明：统一主窗口与主面板背景，避免布局缝隙露出纯黑横条；取消底部栏固定高度并收紧顶部、进度、按钮、日志区域，使默认水印页获得更多可视高度。未改添加水印业务逻辑。
+
+## 2026-05-05 09:52:47 | ui
+- 摘要：优化水印页黑色横带与功能框显示不全
+- 文件：Fengxi_Toolbox.py, memory/architecture.md
+- 说明：根据用户截图，默认水印页主内容区与底部区域之间有黑色横带，并且右侧参数区底部滑块显示不全。修复仍限定在加载器层 UI 布局：将 watermark/tab_wm 加入 TAB_LAYOUT_ATTRS，让默认页也走布局收紧；收紧 top_bar/main_panel/bottom_bar 外距和底部日志/按钮区高度；新增/调整 _tighten_watermark_tab_layout() 直接压缩 tab_wm 左右两列、文本框、参数行、字体下拉框和三组滑块占位。1360x768 模拟测量中水印页可视高度从约 577px 提升到约 664px，黑色横带消失，右侧三组滑块完整显示。未改动水印业务处理逻辑。
+
+## 2026-05-05 09:18:20 | runtime
+- 摘要：修复打包版关闭窗口消失慢
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md
+- 说明：排查发现默认水印页文件名规则补丁中，CTkOptionMenu 误用了 CTkComboBox 的 border_width/border_color 样式参数，导致控件半初始化并在窗口销毁时抛出 _variable 缺失异常，关闭过程变慢。当前新增 _get_option_menu_style() 过滤 OptionMenu 参数，并新增 _install_fast_close_protocol()/_request_fast_close()：点击关闭时先设置 stop_event=True 并 withdraw() 立刻隐藏窗口，再异步 quit()/destroy() 清理。新增 full_debug_test 回归 app_fast_close_hides_first，验证关闭请求约毫秒级隐藏并进入销毁流程。
+
+## 2026-05-05 01:52:31 | image
+- 摘要：图片模块新增图片转PDF和多图合并PDF
+- 文件：Fengxi_Toolbox.py, smoke_test.py, full_debug_test.py, memory/categories/convert-audio-image.md
+- 说明：在 Fengxi_Toolbox.py 加载器层为 image 任务新增 to_pdf 与 merge_pdf 两个模式，不修改 fengxi_runtime.bin。图片页 UI 追加图片转 PDF和多图合并 PDF单选项；to_pdf 为每张图片生成同名 PDF，merge_pdf 按文件名排序复用 merge_images_to_pdf() 合成一份 PDF。两个模式支持 jpg/jpeg/png/bmp/webp/tif/tiff，输出继续使用 RESULT_FOLDER_NAME，成功后遵循 img_delete_var 删除源文件开关。新增 smoke_test 的 image_to_pdf，以及 full_debug_test 的 image_to_pdf_helper、image_to_pdf_workflow、image_merge_pdf_workflow 回归。
+
+## 2026-05-05 00:46:01 | pdf_file
+- 摘要：PDF 模块新增 PDF 压缩并改为功能入口式布局
+- 文件：Fengxi_Toolbox.py, smoke_test.py, full_debug_test.py, memory/categories/pdf-file-meta-zip.md
+- 说明：在 Fengxi_Toolbox.py 加载器层新增 pdf_mode=compress 工作流，不修改 fengxi_runtime.bin。PDF 压缩使用 PyMuPDF 做对象清理、deflate、对象流压缩，并提供 PDF 压缩程度（轻度/标准/强力）与图片压缩程度（保留原图/轻度/标准/强力）两个可选参数；输出为 原文件名_压缩.pdf。PDF 页 UI 改为左侧合并/拆分/加密/压缩/OCR 功能入口，右侧仅显示当前功能的配置面板，减少页面拥挤。新增 smoke_test 的 pdf_compress 和 full_debug_test 的 pdf_compress_helper、single_file_input_pdf_compress 回归。
+
 ## 2026-05-02 21:25:54 | watermark
 - 摘要：稳定区批量水印新增可配置文件名跳过规则
 - 文件：Fengxi_Toolbox.py, memory/categories/watermark-and-remove.md

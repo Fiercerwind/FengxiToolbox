@@ -53,6 +53,10 @@ def main():
     status = mod.merge_images_to_pdf([str(img1), str(img2)], str(merged))
     record("images_to_pdf", status == "SUCCESS" and merged.exists(), status)
 
+    single_img_pdf = root / "single_image.pdf"
+    status = mod._image_file_to_pdf(str(img1), str(single_img_pdf))
+    record("image_to_pdf", status == "SUCCESS" and single_img_pdf.exists(), status)
+
     src = root / "stamp.txt"
     dst = root / "stamp_out.txt"
     src.write_text("abc", encoding="utf-8")
@@ -85,6 +89,18 @@ def main():
     enc = out / "enc.pdf"
     reader = mod.PdfReader(str(enc))
     record("pdf_encrypt", enc.exists() and reader.is_encrypted, "encrypted=" + str(reader.is_encrypted))
+
+    inp = root / "pdf_compress_in"
+    out = root / "pdf_compress_out"
+    inp.mkdir()
+    out.mkdir()
+    src = inp / "compress.pdf"
+    c = canvas.Canvas(str(src))
+    c.drawString(100, 700, "compress me")
+    c.save()
+    compressed = out / "compress_out.pdf"
+    status = mod.compress_pdf_file(str(src), str(compressed), "标准", "保留原图")
+    record("pdf_compress", status.startswith("SUCCESS") and compressed.exists() and compressed.stat().st_size > 0, status)
 
     inp = root / "img_in"
     out = root / "img_out"
