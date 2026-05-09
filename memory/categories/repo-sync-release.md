@@ -30,6 +30,10 @@
   - 版本号必须是 `X.Y.Z`
   - 本地与远端都不存在同名标签
 - 成功后会创建并推送 `vX.Y.Z` 注释标签
+- 2026-05-09 补充约束：
+  - 如果仓库已公开，发布前要检查 README、LICENSE、NOTICE 和记忆文件中是否还带有本机用户名、绝对路径或其他不应公开的信息。
+  - 如果正式标签刚创建后才发现公开信息问题，可以先修正 `main`，再把同名正式标签重指向修正版提交，保证 GitHub Release 的源码快照同步干净。
+  - 如果 GitHub Release 页面只有源码快照，没有 Windows 发布包，需要补传 `dist_release_ascii/fengxi-toolbox-<version>-windows.zip` 这类 onedir 打包资产，不能只留 source code。
 
 ## GitHub Actions
 - 手动打包工作流：`.github/workflows/build-windows-exe.yml`
