@@ -1,5 +1,10 @@
 # 最近变更
 
+## 2026-05-09 23:00:08 | release
+- 摘要：发布基线提升到 4.0.0，并补齐 README、LICENSE、NOTICE 与 GitHub Release 口径
+- 文件：VERSION, README.md, README.txt, CHANGELOG.md, LICENSE, NOTICE, Fengxi_Toolbox.py, .github/workflows/publish-release.yml, agent.md, memory.md, memory/architecture.md, memory/categories/repo-sync-release.md
+- 说明：将 VERSION、README.md、README.txt、CHANGELOG.md、agent.md、memory.md、repo-sync-release 记忆与启动窗口标题统一提升到 4.0.0 / v4.0.0；新增自定义专有 LICENSE 和 NOTICE；GitHub Release 工作流名称改为 ASCII 的 Fengxi Toolbox <version>；保留 v3.0.0 为历史标签，不再复用。
+
 ## 2026-05-09 20:53:00 | ui
 - 摘要：清理品牌图标四角黑底，改为透明圆角，并同步重生 PNG/ICO
 - 文件：assets/fengxi_app_icon.png, assets/fengxi_app_icon.ico, dist_release_ascii/fx_toolbox/assets/fengxi_app_icon.png, dist_release_ascii/fx_toolbox/assets/fengxi_app_icon.ico

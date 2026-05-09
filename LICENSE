@@ -1,0 +1,85 @@
+Fengxi Toolbox Proprietary License 1.0
+
+Copyright (c) 2026 CHEER. All rights reserved.
+
+This repository is source-available, but it is not open source.
+No right is granted except as expressly stated in this license.
+
+1. Definitions
+
+"Software" means this repository, its source code, packaged binaries, assets,
+icons, documentation, release files, and any derivative or modified version of
+them.
+
+"Official Release" means an unmodified binary package published by the
+copyright owner through the official GitHub repository or another official
+distribution channel designated in writing by the copyright owner.
+
+2. Limited Permission
+
+You may:
+
+- view the source code through GitHub's normal repository features;
+- create a GitHub fork only for the purpose of submitting changes back to the
+  official repository;
+- download and run an Official Release, in unmodified form, for lawful
+  personal use or internal business use.
+
+3. Restrictions
+
+Except with prior written permission from the copyright owner, you may not:
+
+- copy, mirror, archive, or redistribute the Software, in source or binary
+  form, outside the limited permission above;
+- modify, adapt, translate, decompile, reverse engineer, or create derivative
+  works of the Software;
+- publish, sublicense, sell, rent, lease, host, bundle, or otherwise
+  commercialize the Software;
+- remove, alter, or hide copyright, attribution, license, or branding notices;
+- use the Software, source code, assets, UI design, workflow design, or brand
+  materials to create a competing or confusingly similar product;
+- use the name "风兮", "Fengxi Toolbox", project logos, icons, screenshots, or
+  other brand identifiers without prior written permission;
+- use the Software or repository contents as training data for a machine
+  learning model, except to the extent such restriction is prohibited by
+  applicable law.
+
+4. Contributions
+
+Unless the copyright owner agrees otherwise in writing, any contribution,
+patch, issue attachment, or pull request intentionally submitted for the
+Software grants the copyright owner a perpetual, worldwide, non-exclusive,
+royalty-free license to use, modify, distribute, relicense, and incorporate
+that contribution into the Software.
+
+5. Third-Party Components
+
+The Software may include or depend on third-party components that are licensed
+under their own terms. This license applies only to the original parts of the
+Software owned by the copyright owner and does not replace or limit any rights
+or obligations imposed by third-party licenses.
+
+6. Termination
+
+Any permission granted by this license terminates automatically if you violate
+any term of this license. Upon termination, you must stop using the Software
+and delete all copies in your possession or control, except where retention is
+required by law.
+
+7. Disclaimer
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. USE THE SOFTWARE AT YOUR
+OWN RISK.
+
+8. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE COPYRIGHT OWNER SHALL NOT BE LIABLE
+FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR
+THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+9. Reservation of Rights
+
+All rights not expressly granted are reserved by the copyright owner.

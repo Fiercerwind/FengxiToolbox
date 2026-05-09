@@ -106,6 +106,8 @@ SIDEBAR_AUX_STYLES = {
 FAST_SIDEBAR_BUILD_FONT = ("Microsoft YaHei UI", 12)
 APP_ICON_PNG = "fengxi_app_icon.png"
 APP_ICON_ICO = "fengxi_app_icon.ico"
+APP_RELEASE_VERSION = "4.0.0"
+APP_DISPLAY_VERSION = "4.0"
 ZIP_MODE_LABEL_TEXTS = {
     "仅压缩总文件 (Total Zip)": "仅压缩总文件 (Total Zip)",
     "全层级递归压缩 (Total + Recursive)": "全层级递归压缩 (Total + Recursive)",
@@ -1249,6 +1251,13 @@ def _apply_app_icon(app):
             app.iconphoto(True, app._fx_window_icon)
     except Exception as exc:
         _debug(f"app_icon:iconphoto_error:{exc}")
+
+
+def _apply_release_identity(app):
+    try:
+        app.title(f"风兮文件批量处理工具箱 {APP_DISPLAY_VERSION}")
+    except Exception as exc:
+        _debug(f"release_identity:title_error:{exc}")
 
 
 def _style_sidebar_aux_button(button, text, image, font, variant):
@@ -5045,6 +5054,8 @@ if __name__ == "__main__":
     _debug("main:app_created")
     _apply_app_icon(app)
     _debug("main:icon_applied")
+    _apply_release_identity(app)
+    _debug("main:release_identity_applied")
     _tighten_layout(app)
     _debug("main:layout_tightened")
     _show_ready_window(app)

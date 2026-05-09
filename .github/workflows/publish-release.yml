@@ -29,7 +29,7 @@ jobs:
           }
 
           $version = $tagName.TrimStart("v")
-          $releaseName = "风兮工具箱 $version"
+          $releaseName = "Fengxi Toolbox $version"
           $assetName = "fengxi-toolbox-$version-windows.zip"
 
           "tag_name=$tagName" >> $env:GITHUB_OUTPUT

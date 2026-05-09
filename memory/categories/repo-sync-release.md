@@ -4,10 +4,11 @@
 - 当前远端仓库：`origin -> https://github.com/Fiercerwind/FengxiToolbox.git`
 - 当前默认分支：`main`
 - 当前发布版本基线：
-  - 展示版本：`3.0`
-  - 标签版本：`v3.0.0`
+  - 展示版本：`4.0`
+  - 标签版本：`v4.0.0`
   - 版本文件：`VERSION`
   - 发布说明：`CHANGELOG.md`
+- 历史标签 `v3.0.0` 已存在并指向早期发布自动化基线，后续不要重用或覆盖该标签，正式版本从 `v4.0.0` 继续递增。
 
 ## 定时同步
 - 本机自动同步脚本：`tools/fx_git_sync.ps1`

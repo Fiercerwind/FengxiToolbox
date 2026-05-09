@@ -211,6 +211,7 @@
   - 配合暖金印章感点缀，表达“风兮”品牌感
 - 接入位置：
   - 运行时窗口图标由 `Fengxi_Toolbox.py` 中的 `_apply_app_icon(app)` 负责加载
+  - 发布版窗口标题由 `Fengxi_Toolbox.py` 中的 `_apply_release_identity(app)` 在启动时统一设置，当前展示口径为 `风兮文件批量处理工具箱 4.0`
   - 打包 exe 图标由 `fx_toolbox.spec` 的 `icon='assets\\fengxi_app_icon.ico'` 负责接入
 - 2026-05-09：
   - 用户已直接替换 `assets/fengxi_app_icon.png` 为新的品牌图。
