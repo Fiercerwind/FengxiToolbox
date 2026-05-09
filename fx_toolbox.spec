@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+import importlib.util
 import os
 
 from PyInstaller.building.datastruct import TOC
@@ -26,19 +27,38 @@ def _is_conflicting_runtime_binary(entry):
         pass
     return any(name.startswith("api-ms-win-crt-") or name in CONFLICTING_RUNTIME_DLLS for name in names)
 
+
+def _module_exists(module_name):
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except Exception:
+        return False
+
 datas = [('fengxi_runtime.bin', '.')]
 datas += collect_data_files('customtkinter')
 datas += collect_data_files('rapidocr')
 binaries = collect_dynamic_libs('onnxruntime')
 hiddenimports = [
     'PyInstaller.archive.readers', 'customtkinter', 'pdf2docx', 'PIL', 'imageio',
-    'imageio_ffmpeg', 'moviepy', 'moviepy.editor', 'pypdf', 'pythoncom',
+    'imageio_ffmpeg', 'pypdf', 'pythoncom',
     'pywinstyles', 'rapidocr', 'reportlab.lib.pagesizes', 'reportlab.pdfbase',
     'reportlab.pdfbase.ttfonts', 'reportlab.pdfgen', 'tkinter', 'tkinter.filedialog',
     'tkinter.font', 'tkinter.messagebox', 'tkinter.ttk', 'windnd',
     'win32com.client'
 ]
-hiddenimports += collect_submodules('rapidocr')
+for module_name in (
+    'moviepy',
+    'moviepy.editor',
+    'moviepy.audio.io.AudioFileClip',
+    'moviepy.video.io.VideoFileClip',
+):
+    if _module_exists(module_name):
+        hiddenimports.append(module_name)
+hiddenimports += collect_submodules(
+    'rapidocr',
+    filter=lambda name: not name.startswith('rapidocr.inference_engine.tensorrt'),
+    on_error='ignore',
+)
 
 
 a = Analysis(

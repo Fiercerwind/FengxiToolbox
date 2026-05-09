@@ -2,6 +2,7 @@ import ast
 import dis
 import inspect
 import io
+import json
 import marshal
 import importlib
 import importlib.util
@@ -86,6 +87,8 @@ SIDEBAR_AUX_BUTTON_SPECS = {
 SIDEBAR_ICON_NAV = (213, 228, 245, 255)
 SIDEBAR_ICON_HELP = (232, 222, 208, 255)
 SIDEBAR_ICON_DONATE = (239, 206, 123, 255)
+CONTENT_ICON_PRIMARY = (173, 200, 228, 255)
+CONTENT_ICON_SECONDARY = (194, 214, 236, 255)
 SIDEBAR_AUX_STYLES = {
     "help": {
         "fg_color": "#161B21",
@@ -103,7 +106,134 @@ SIDEBAR_AUX_STYLES = {
 FAST_SIDEBAR_BUILD_FONT = ("Microsoft YaHei UI", 12)
 APP_ICON_PNG = "fengxi_app_icon.png"
 APP_ICON_ICO = "fengxi_app_icon.ico"
+ZIP_MODE_LABEL_TEXTS = {
+    "仅压缩总文件 (Total Zip)": "仅压缩总文件 (Total Zip)",
+    "全层级递归压缩 (Total + Recursive)": "全层级递归压缩 (Total + Recursive)",
+    "智能混合模式 (Smart Recursive) [推荐]": "智能混合模式 (Smart Recursive) [推荐]",
+}
+ZIP_MODE_DESCRIPTION_TEXT = (
+    "功能说明：\n"
+    "1. 仅压缩总文件：只在根目录生成一个包含所有内容的总压缩包。\n"
+    "2. 全层级递归：会扫描每一层文件夹，并在各自【父级目录】生成对应压缩包。\n"
+    "3. 智能混合模式：\n"
+    "   • 若某一层同时包含文件和子文件夹，则该层会整体打包为一个压缩包。\n"
+    "   • 整体打包后，会停止继续为该层内部子文件夹单独生成压缩包。\n"
+    "   • 若某一层只有子文件夹、没有文件，则继续向下递归扫描。\n"
+    "   • 根目录若同时包含文件和子文件夹，则会直接跳过对子文件夹的单独压缩，最终只保留根目录总包。\n"
+    "4. 自动清理：生成前会自动删除同名的旧压缩包。"
+)
+HELP_TAB_TITLE = "使用教程"
+INLINE_HELP_SECTIONS = (
+    (
+        "使用流程",
+        (
+            "1. 先在顶部输入框拖入或选择文件/文件夹。当前入口支持单个文件和文件夹，拖拽时也会保留真实路径。",
+            "2. 在左侧选择功能模块，再在当前页面配置参数。",
+            "3. 点击底部开始执行，进度条与运行信息框会显示当前处理状态。",
+            "4. 默认输出到原文件同目录或【处理完成】结果文件夹；少数功能会按页面说明生成同名派生文件。",
+            "5. 处理前请确认是否开启“删除源文件”或“覆盖原文件”类开关，这类选项会改变原始资料。",
+        ),
+    ),
+    (
+        "批量水印",
+        (
+            "支持 PDF、Word、PPT 等文档批量添加文字或图片水印。",
+            "智能加水印支持文件名跳过规则：可设置按开头或结尾匹配指定字符，默认兼容跳过文件名去扩展名后以“-”结尾的文件。",
+            "这是稳定区功能，除非明确要求，不应改动核心加水印处理逻辑。",
+        ),
+    ),
+    (
+        "去除水印",
+        (
+            "支持 Word、PDF、PPT 等资料的批量去水印尝试。",
+            "可选择单个文件或文件夹；单文件默认在同目录生成去水印结果，文件夹默认生成【处理完成】结果文件夹。",
+            "如开启覆盖原文件，会在处理成功后替换原文件；不建议在没有备份的唯一资料上直接开启。",
+            "去水印属于识别和清理任务，不同文件结构差异很大，遇到异常文件建议先用副本测试。",
+        ),
+    ),
+    (
+        "格式转换",
+        (
+            "支持常用文档格式互转，包括 Word/PPT/PDF 等转换入口。",
+            "选择单个文件时只处理该文件；选择文件夹时会按当前功能收集可处理文件。",
+            "转换失败通常与 Office/WPS 环境、文件损坏、加密文档或路径权限有关。",
+        ),
+    ),
+    (
+        "音频工具",
+        (
+            "支持从视频中提取音频，以及常见音频格式转换。",
+            "底层优先使用随 Python 环境可用的 ffmpeg 路线，打包版会随包带入必要依赖。",
+            "大体积视频处理耗时较长，处理期间不要频繁切换或强制关闭。",
+        ),
+    ),
+    (
+        "批量压缩",
+        (
+            "仅压缩总文件：只在根目录生成一个包含所有内容的总压缩包。",
+            "全层级递归：扫描每一层文件夹，并在各自父级目录生成对应压缩包。",
+            "智能混合模式：某一层同时包含文件和子文件夹时，会整体打包该层并停止继续为内部子文件夹单独打包；若只有子文件夹则继续向下递归。",
+            "生成前会自动删除同名旧压缩包，避免结果混乱。",
+        ),
+    ),
+    (
+        "PDF 工具",
+        (
+            "页面采用左侧功能入口、右侧参数面板，当前包括合并、拆分、加密、压缩、OCR 搜索版 PDF。",
+            "PDF 压缩可选择 PDF 压缩程度和图片压缩程度，输出为原文件名_压缩.pdf。",
+            "OCR 搜索版 PDF 会保留原页面画面并叠加透明文字层，支持 auto、rapidocr、paddleocr、easyocr、tesseract_cli 等后端路线。",
+            "OCR 可选生成后端对比报告，便于比较不同识别路径效果。",
+        ),
+    ),
+    (
+        "图片工厂",
+        (
+            "支持图片批量处理、图片转 PDF、以及多图合并成一个 PDF。",
+            "图片转 PDF 会为每张图片生成独立 PDF；多图合并 PDF 会按文件名排序合成为一份 PDF。",
+            "支持 jpg、jpeg、png、bmp、webp、tif、tiff 等常见图片格式。",
+        ),
+    ),
+    (
+        "属性隐私",
+        (
+            "支持修改 PDF/Office 作者信息，以及批量修改文件时间属性。",
+            "Office 元数据依赖本机 Office COM 环境；PDF 作者信息通过 PDF 元数据写入。",
+            "处理前建议确认是否需要保留原始创建时间、修改时间或作者信息。",
+        ),
+    ),
+    (
+        "文件管家",
+        (
+            "支持批量重命名和重复文件清理。",
+            "重命名包含添加、替换、截取等子模式；去重基于文件内容哈希判断。",
+            "删除或去重类操作建议先用测试文件夹确认规则，避免误删。",
+        ),
+    ),
+    (
+        "重要约束",
+        (
+            "批量压缩和批量水印是稳定区，非必要不改业务代码。",
+            "任何重要修改前需要先做可恢复备份。",
+            "不得删除项目目录外的任何文件。",
+            "每次工作应先读取记忆文件，再按项目和类别渐进加载上下文。",
+        ),
+    ),
+)
 RESULT_FOLDER_NAME = "【处理完成】结果文件夹"
+INLINE_TITLE_ICON_SPECS = {
+    "批量去水印": {"icon": "eraser", "size": 20, "color": CONTENT_ICON_PRIMARY},
+    "文档格式互转": {"icon": "swap", "size": 20, "color": CONTENT_ICON_PRIMARY},
+    "音频/视频处理": {"icon": "music", "size": 20, "color": CONTENT_ICON_PRIMARY},
+    "批量压缩": {"icon": "box", "size": 20, "color": CONTENT_ICON_PRIMARY},
+    "PDF 进阶工具箱": {"icon": "document", "size": 20, "color": CONTENT_ICON_PRIMARY},
+    "图片批量工厂": {"icon": "image", "size": 20, "color": CONTENT_ICON_PRIMARY},
+    "属性隐私设置": {"icon": "lock", "size": 20, "color": CONTENT_ICON_PRIMARY},
+    "文件管家": {"icon": "folder", "size": 20, "color": CONTENT_ICON_PRIMARY},
+    "水印内容": {"icon": "document", "size": 18, "color": CONTENT_ICON_SECONDARY},
+    "参数配置": {"icon": "settings", "size": 18, "color": CONTENT_ICON_SECONDARY},
+    "图片处理工具": {"icon": "image", "size": 18, "color": CONTENT_ICON_SECONDARY},
+    "⚡": {"icon": "box", "size": 16, "color": CONTENT_ICON_SECONDARY, "display_text": ""},
+}
 BIF_NEWDIALOGSTYLE = 0x00000040
 BIF_USENEWUI = shellcon.BIF_EDITBOX | BIF_NEWDIALOGSTYLE
 BFFM_INITIALIZED = 1
@@ -121,9 +251,10 @@ LAZY_RUNTIME_IMPORT_SPECS = {
     },
     "moviepy.editor": {
         "probe": "moviepy",
+        "fallback_modules": ["moviepy"],
         "symbols": {
-            "AudioFileClip": ("moviepy.editor", "AudioFileClip"),
-            "VideoFileClip": ("moviepy.editor", "VideoFileClip"),
+            "AudioFileClip": ("moviepy", "AudioFileClip"),
+            "VideoFileClip": ("moviepy", "VideoFileClip"),
         },
     },
 }
@@ -164,66 +295,166 @@ def _wrap_callable(owner, name, label=None):
 
 def _draw_sidebar_icon(draw, kind, color, size=22, stroke=2):
     c = color
-    if kind == "shield":
-        draw.polygon(
-            [(11, 2), (18, 5), (17, 13), (11, 19), (5, 13), (4, 5)],
-            outline=c,
-            width=stroke,
+    viewport = 24.0
+    scale = max(0.5, float(size) / viewport)
+    stroke_px = max(1, int(round(stroke * scale * 0.88)))
+    thin_stroke_px = max(1, int(round(stroke_px * 0.72)))
+
+    def pt(x, y):
+        return (x * scale, y * scale)
+
+    def path(points):
+        return [pt(x, y) for x, y in points]
+
+    def line(points, width=None):
+        draw.line(path(points), fill=c, width=width or stroke_px, joint="curve")
+
+    def polygon(points, closed=True, fill=None, outline=True, width=None):
+        pts = path(points)
+        if fill is not None:
+            draw.polygon(pts, fill=fill)
+        if outline:
+            outline_path = pts + ([pts[0]] if closed else [])
+            draw.line(outline_path, fill=c, width=width or stroke_px, joint="curve")
+
+    def ellipse(x1, y1, x2, y2, width=None, fill=None):
+        draw.ellipse(
+            (x1 * scale, y1 * scale, x2 * scale, y2 * scale),
+            outline=c if width else None,
+            width=width or stroke_px,
+            fill=fill,
         )
+
+    def rounded_rect(x1, y1, x2, y2, radius, width=None):
+        draw.rounded_rectangle(
+            (x1 * scale, y1 * scale, x2 * scale, y2 * scale),
+            radius=radius * scale,
+            outline=c,
+            width=width or stroke_px,
+        )
+
+    if kind == "shield":
+        outer = [(12.0, 3.0), (17.1, 5.2), (16.6, 11.0), (12.0, 18.5), (7.4, 11.0), (6.9, 5.2)]
+        inner = [(12.0, 5.0), (15.3, 6.4), (15.0, 10.0), (12.0, 15.0), (9.0, 10.0), (8.7, 6.4)]
+        polygon(outer, fill=(243, 247, 252, 255), outline=False)
+        polygon(inner, fill=(86, 136, 210, 255), outline=False)
     elif kind == "eraser":
-        draw.polygon([(4, 13), (10, 6), (18, 14), (12, 20)], outline=c, width=stroke)
-        draw.line([(8, 17), (13, 12)], fill=c, width=stroke)
+        polygon([(7.1, 14.2), (11.7, 9.6), (16.9, 14.8), (12.3, 19.4)], width=stroke_px)
+        polygon([(11.7, 9.6), (13.9, 7.4), (19.1, 12.6), (16.9, 14.8)], width=stroke_px)
+        line([(9.3, 16.4), (14.5, 11.2)], width=thin_stroke_px)
+        line([(12.0, 19.0), (17.2, 13.8)], width=thin_stroke_px)
+        line([(14.1, 8.3), (18.2, 12.4)], width=thin_stroke_px)
     elif kind == "swap":
-        draw.line([(5, 8), (16, 8)], fill=c, width=stroke)
-        draw.polygon([(16, 8), (13, 5), (13, 11)], fill=c)
-        draw.line([(17, 15), (6, 15)], fill=c, width=stroke)
-        draw.polygon([(6, 15), (9, 12), (9, 18)], fill=c)
+        line([(5.8, 8.1), (17.0, 8.1)])
+        polygon([(18.2, 8.1), (14.9, 5.6), (14.9, 10.6)], fill=c, outline=False)
+        line([(18.2, 15.9), (7.0, 15.9)])
+        polygon([(5.8, 15.9), (9.1, 13.4), (9.1, 18.4)], fill=c, outline=False)
     elif kind == "music":
-        draw.line([(13, 4), (13, 14)], fill=c, width=stroke)
-        draw.line([(13, 4), (18, 6)], fill=c, width=stroke)
-        draw.ellipse((4, 12, 10, 18), outline=c, width=stroke)
-        draw.ellipse((10, 10, 16, 16), outline=c, width=stroke)
-        draw.line([(13, 11), (7, 14)], fill=c, width=stroke)
+        draw.ellipse((4.8 * scale, 11.0 * scale, 11.9 * scale, 18.1 * scale), fill=c)
+        draw.ellipse((12.1 * scale, 11.0 * scale, 19.2 * scale, 18.1 * scale), fill=c)
+        draw.rounded_rectangle(
+            (9.6 * scale, 4.0 * scale, 12.4 * scale, 14.4 * scale),
+            radius=1.1 * scale,
+            fill=c,
+        )
+        draw.rounded_rectangle(
+            (15.9 * scale, 4.0 * scale, 18.7 * scale, 14.4 * scale),
+            radius=1.1 * scale,
+            fill=c,
+        )
+        draw.rounded_rectangle(
+            (9.6 * scale, 4.0 * scale, 18.7 * scale, 6.8 * scale),
+            radius=1.1 * scale,
+            fill=c,
+        )
+        draw.rounded_rectangle(
+            (10.4 * scale, 8.4 * scale, 17.9 * scale, 10.4 * scale),
+            radius=0.8 * scale,
+            fill=c,
+        )
     elif kind == "box":
-        draw.polygon([(11, 3), (18, 7), (11, 11), (4, 7)], outline=c, width=stroke)
-        draw.line([(4, 7), (4, 15), (11, 19), (11, 11)], fill=c, width=stroke)
-        draw.line([(18, 7), (18, 15), (11, 19)], fill=c, width=stroke)
-        draw.line([(11, 11), (11, 19)], fill=c, width=stroke)
+        polygon([(12.0, 4.2), (17.6, 7.2), (12.0, 10.3), (6.4, 7.2)])
+        line([(6.4, 7.2), (6.4, 15.5), (12.0, 18.7), (12.0, 10.3)])
+        line([(17.6, 7.2), (17.6, 15.5), (12.0, 18.7)])
+        line([(12.0, 10.3), (12.0, 18.7)], width=thin_stroke_px)
     elif kind == "document":
-        draw.rounded_rectangle((5, 3, 17, 19), radius=2, outline=c, width=stroke)
-        draw.line([(12, 3), (17, 8)], fill=c, width=stroke)
-        draw.line([(8, 10), (14, 10)], fill=c, width=stroke)
-        draw.line([(8, 14), (14, 14)], fill=c, width=stroke)
+        rounded_rect(5.9, 3.7, 17.7, 19.1, radius=1.8)
+        line([(12.8, 3.8), (12.8, 8.1), (17.4, 8.1)])
+        line([(12.8, 3.8), (17.4, 8.1)])
+        line([(8.4, 11.1), (14.7, 11.1)], width=thin_stroke_px)
+        line([(8.4, 14.2), (14.7, 14.2)], width=thin_stroke_px)
     elif kind == "image":
-        draw.rectangle((4, 5, 18, 17), outline=c, width=stroke)
-        draw.ellipse((6, 7, 9, 10), outline=c, width=stroke)
-        draw.line([(6, 15), (10, 11), (13, 14), (16, 10)], fill=c, width=stroke)
+        rounded_rect(5.0, 5.5, 19.0, 17.4, radius=1.2)
+        ellipse(7.0, 7.6, 9.9, 10.5, width=thin_stroke_px)
+        line([(6.8, 14.9), (10.0, 11.8), (12.7, 14.0), (14.2, 12.3), (17.0, 15.0)])
     elif kind == "lock":
-        draw.rounded_rectangle((5, 10, 17, 19), radius=2, outline=c, width=stroke)
-        draw.arc((7, 3, 15, 13), start=200, end=-20, fill=c, width=stroke)
-        draw.line([(11, 13), (11, 16)], fill=c, width=stroke)
+        rounded_rect(5.8, 10.7, 18.2, 19.0, radius=1.8)
+        draw.arc(
+            (7.6 * scale, 4.0 * scale, 16.4 * scale, 13.5 * scale),
+            start=200,
+            end=340,
+            fill=c,
+            width=stroke_px,
+        )
+        ellipse(11.0, 13.1, 12.8, 14.9, width=thin_stroke_px)
+        line([(11.9, 14.8), (11.9, 16.6)], width=thin_stroke_px)
     elif kind == "folder":
-        draw.line([(4, 8), (9, 8), (11, 6), (18, 6)], fill=c, width=stroke)
-        draw.rounded_rectangle((4, 8, 18, 18), radius=2, outline=c, width=stroke)
+        line([(4.9, 8.5), (9.0, 8.5), (10.9, 6.7), (18.7, 6.7)])
+        rounded_rect(4.9, 8.5, 18.9, 17.8, radius=1.5)
+    elif kind == "settings":
+        ellipse(8.0, 8.0, 16.0, 16.0, width=stroke_px)
+        ellipse(10.5, 10.5, 13.5, 13.5, width=thin_stroke_px)
+        for x1, y1, x2, y2 in (
+            (12.0, 3.6, 12.0, 5.5),
+            (12.0, 18.5, 12.0, 20.4),
+            (3.6, 12.0, 5.5, 12.0),
+            (18.5, 12.0, 20.4, 12.0),
+            (6.1, 6.1, 7.5, 7.5),
+            (16.5, 16.5, 17.9, 17.9),
+            (16.5, 7.5, 17.9, 6.1),
+            (6.1, 17.9, 7.5, 16.5),
+        ):
+            line([(x1, y1), (x2, y2)], width=thin_stroke_px)
     elif kind == "book":
-        draw.line([(11, 5), (11, 18)], fill=c, width=stroke)
-        draw.line([(5, 6), (11, 5), (11, 18), (5, 17), (5, 6)], fill=c, width=stroke)
-        draw.line([(17, 6), (11, 5), (11, 18), (17, 17), (17, 6)], fill=c, width=stroke)
+        line([(12.0, 5.2), (12.0, 18.6)], width=thin_stroke_px)
+        line([(6.4, 6.2), (10.9, 5.5), (10.9, 17.9), (6.4, 17.1), (6.4, 6.2)])
+        line([(17.6, 6.2), (13.1, 5.5), (13.1, 17.9), (17.6, 17.1), (17.6, 6.2)])
     elif kind == "coffee":
-        draw.rounded_rectangle((5, 9, 15, 16), radius=2, outline=c, width=stroke)
-        draw.arc((13, 10, 18, 15), start=-90, end=90, fill=c, width=stroke)
-        draw.line([(6, 18), (16, 18)], fill=c, width=stroke)
-        draw.arc((7, 4, 10, 9), start=180, end=360, fill=c, width=1)
-        draw.arc((11, 3, 14, 8), start=180, end=360, fill=c, width=1)
+        rounded_rect(5.9, 10.3, 15.8, 16.2, radius=1.6)
+        draw.arc(
+            (13.4 * scale, 10.8 * scale, 18.3 * scale, 15.5 * scale),
+            start=270,
+            end=90,
+            fill=c,
+            width=stroke_px,
+        )
+        line([(6.3, 18.2), (16.2, 18.2)], width=thin_stroke_px)
+        draw.arc(
+            (7.5 * scale, 4.6 * scale, 9.5 * scale, 8.4 * scale),
+            start=195,
+            end=355,
+            fill=c,
+            width=thin_stroke_px,
+        )
+        draw.arc(
+            (10.8 * scale, 3.8 * scale, 12.8 * scale, 7.6 * scale),
+            start=195,
+            end=355,
+            fill=c,
+            width=thin_stroke_px,
+        )
     else:
-        draw.ellipse((5, 5, 17, 17), outline=c, width=stroke)
+        ellipse(5.5, 5.5, 18.5, 18.5, width=stroke_px)
 
 
 def _build_sidebar_icon_image(kind, color, size=22):
-    canvas = PILImage.new("RGBA", (size, size), (0, 0, 0, 0))
+    render_scale = 4
+    render_size = max(size * render_scale, 64)
+    canvas = PILImage.new("RGBA", (render_size, render_size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas)
-    _draw_sidebar_icon(draw, kind, color, size=size, stroke=2)
-    return customtkinter.CTkImage(light_image=canvas, dark_image=canvas, size=(size, size))
+    _draw_sidebar_icon(draw, kind, color, size=render_size, stroke=2)
+    final_canvas = canvas.resize((size, size), PILImage.Resampling.LANCZOS)
+    return customtkinter.CTkImage(light_image=final_canvas, dark_image=final_canvas, size=(size, size))
 
 
 def _get_sidebar_icon_images(app):
@@ -242,6 +473,281 @@ def _get_sidebar_icon_images(app):
     cache[("donate", donate_spec["icon"])] = _build_sidebar_icon_image(donate_spec["icon"], SIDEBAR_ICON_DONATE)
     app._fx_sidebar_icon_images = cache
     return cache
+
+
+def _get_sidebar_brand_image(app):
+    image = getattr(app, "_fx_sidebar_brand_image", None)
+    if image is not None:
+        return image
+
+    png_path = _resolve_app_asset(APP_ICON_PNG)
+    if not png_path.exists():
+        return None
+
+    try:
+        brand_image = PILImage.open(png_path).convert("RGBA")
+        image = customtkinter.CTkImage(
+            light_image=brand_image,
+            dark_image=brand_image,
+            size=(44, 44),
+        )
+        app._fx_sidebar_brand_image = image
+        return image
+    except Exception as exc:
+        _debug(f"sidebar_brand_image:error:{exc}")
+        return None
+
+
+def _get_inline_title_icon_image(app, kind, color, size):
+    cache = getattr(app, "_fx_inline_title_icon_images", None)
+    if cache is None:
+        cache = {}
+        app._fx_inline_title_icon_images = cache
+
+    cache_key = (kind, color, size)
+    image = cache.get(cache_key)
+    if image is None:
+        image = _build_sidebar_icon_image(kind, color, size=size)
+        cache[cache_key] = image
+    return image
+
+
+def _ensure_inline_help_tab(app):
+    help_tab = getattr(app, "tab_help", None)
+    if help_tab is not None:
+        return help_tab
+    try:
+        help_tab = app.main_panel.add(HELP_TAB_TITLE)
+    except Exception:
+        help_tab = app.main_panel.tab(HELP_TAB_TITLE)
+    app.tab_help = help_tab
+    _build_inline_help_page(app, help_tab)
+    return help_tab
+
+
+def _build_inline_help_page(app, help_tab):
+    if getattr(help_tab, "_fx_help_page_built", False):
+        return
+    try:
+        help_tab.grid_rowconfigure(0, weight=1)
+        help_tab.grid_columnconfigure(0, weight=1)
+    except Exception:
+        pass
+
+    card = customtkinter.CTkFrame(
+        help_tab,
+        fg_color=globals().get("COLOR_CARD", "#2B2B2B"),
+        corner_radius=18,
+        border_width=1,
+        border_color=globals().get("COLOR_BORDER", "#3A3A3A"),
+    )
+    card.grid(row=0, column=0, sticky="nsew", padx=20, pady=18)
+    card.grid_rowconfigure(1, weight=1)
+    card.grid_columnconfigure(0, weight=1)
+
+    header = customtkinter.CTkFrame(card, fg_color="transparent")
+    header.grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 10))
+    header.grid_columnconfigure(1, weight=1)
+
+    icon = _get_inline_title_icon_image(app, "book", CONTENT_ICON_PRIMARY, 24)
+    customtkinter.CTkLabel(
+        header,
+        text="使用教程",
+        image=icon,
+        compound="left",
+        anchor="w",
+        font=customtkinter.CTkFont(family="Microsoft YaHei UI", size=22, weight="bold"),
+        text_color=globals().get("COLOR_TEXT", "#E6EEF2"),
+    ).grid(row=0, column=0, sticky="w")
+    customtkinter.CTkLabel(
+        header,
+        text="内置说明随功能同步更新，内容较多时可向下滚动查看。",
+        anchor="e",
+        font=customtkinter.CTkFont(family="Microsoft YaHei UI", size=12),
+        text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+    ).grid(row=0, column=1, sticky="e", padx=(18, 0))
+
+    scroll = customtkinter.CTkScrollableFrame(
+        card,
+        fg_color=globals().get("COLOR_CARD_ALT", "#303030"),
+        corner_radius=14,
+        border_width=1,
+        border_color=globals().get("COLOR_BORDER", "#3A3A3A"),
+    )
+    scroll.grid(row=1, column=0, sticky="nsew", padx=28, pady=(0, 24))
+    scroll.grid_columnconfigure(0, weight=1)
+
+    for section_index, (title, lines) in enumerate(INLINE_HELP_SECTIONS):
+        section = customtkinter.CTkFrame(scroll, fg_color="transparent")
+        section.grid(row=section_index, column=0, sticky="ew", padx=18, pady=(16 if section_index else 18, 2))
+        section.grid_columnconfigure(0, weight=1)
+        customtkinter.CTkLabel(
+            section,
+            text=title,
+            anchor="w",
+            font=customtkinter.CTkFont(family="Microsoft YaHei UI", size=16, weight="bold"),
+            text_color=globals().get("COLOR_TEXT", "#E6EEF2"),
+        ).grid(row=0, column=0, sticky="ew")
+        body_text = "\n".join(f"• {line}" for line in lines)
+        customtkinter.CTkLabel(
+            section,
+            text=body_text,
+            anchor="w",
+            justify="left",
+            wraplength=920,
+            font=customtkinter.CTkFont(family="Microsoft YaHei UI", size=13),
+            text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+        ).grid(row=1, column=0, sticky="ew", pady=(6, 0))
+
+    help_tab._fx_help_page_built = True
+
+
+def _set_help_button_selected(app, selected):
+    btn = getattr(app, "btn_help_proxy", None)
+    if btn is None:
+        return
+    try:
+        if selected:
+            btn.configure(
+                text_color=globals().get("COLOR_TEXT", "#E6EEF2"),
+                fg_color=SIDEBAR_AUX_STYLES["help"]["hover_color"],
+                border_color=globals().get("COLOR_BORDER", "#566274"),
+            )
+        else:
+            _style_sidebar_aux_button(
+                btn,
+                SIDEBAR_AUX_BUTTON_SPECS["btn_help_proxy"]["label"],
+                _get_sidebar_icon_images(app).get(("help", SIDEBAR_AUX_BUTTON_SPECS["btn_help_proxy"]["icon"])),
+                _get_sidebar_button_font(app),
+                "help",
+            )
+    except Exception:
+        pass
+
+
+def _set_help_action_state(app, visible):
+    if getattr(app, "is_running", False):
+        return
+    btn_run = getattr(app, "btn_run", None)
+    btn_stop = getattr(app, "btn_stop", None)
+    if btn_run is not None:
+        try:
+            if visible:
+                btn_run.configure(state="disabled", text="查看使用说明中", fg_color="#455A64")
+            else:
+                btn_run.configure(
+                    state="normal",
+                    text="🚀 立即开始处理",
+                    fg_color=globals().get("COLOR_ACCENT", "#8FA9B8"),
+                )
+        except Exception:
+            pass
+    if btn_stop is not None and visible:
+        try:
+            btn_stop.configure(state="disabled")
+        except Exception:
+            pass
+
+
+def _show_inline_help(app):
+    try:
+        _ensure_inline_help_tab(app)
+        app.main_panel.set(HELP_TAB_TITLE)
+        app.current_task = "help"
+        _set_help_button_selected(app, True)
+        _set_help_action_state(app, True)
+        for nav_name in (
+            "btn_nav_wm",
+            "btn_nav_rm_wm",
+            "btn_nav_cv",
+            "btn_nav_audio",
+            "btn_nav_zip",
+            "btn_nav_pdf",
+            "btn_nav_img",
+            "btn_nav_meta",
+            "btn_nav_file",
+        ):
+            nav = getattr(app, nav_name, None)
+            if nav is not None:
+                nav.configure(
+                    text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+                    fg_color="transparent",
+                    border_color=globals().get("COLOR_SIDEBAR", "#202020"),
+                )
+        app.update_idletasks()
+    except Exception as exc:
+        _debug(f"inline_help:show_error:{exc}")
+
+
+def _normalize_icon_title_text(text):
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    while text:
+        first = text[0]
+        if first == "[" or first.isalnum() or ("\u4e00" <= first <= "\u9fff"):
+            break
+        text = text[1:].lstrip()
+    return text
+
+
+def _resolve_inline_title_spec(raw_text):
+    raw_text = str(raw_text or "")
+    for canonical_text in sorted(INLINE_TITLE_ICON_SPECS, key=len, reverse=True):
+        if canonical_text in raw_text:
+            return canonical_text, INLINE_TITLE_ICON_SPECS[canonical_text]
+
+    canonical_text = _normalize_icon_title_text(raw_text)
+    spec = INLINE_TITLE_ICON_SPECS.get(canonical_text)
+    if spec is None:
+        return "", None
+    return canonical_text, spec
+
+
+def _apply_inline_title_icons(app, root_widget):
+    if root_widget is None:
+        return
+
+    pending = [root_widget]
+    while pending:
+        widget = pending.pop(0)
+        try:
+            pending.extend(widget.winfo_children())
+        except Exception:
+            pass
+
+        if not isinstance(widget, customtkinter.CTkLabel):
+            continue
+        try:
+            raw_text = widget.cget("text")
+        except Exception:
+            continue
+
+        canonical_text, spec = _resolve_inline_title_spec(raw_text)
+        if spec is None:
+            continue
+
+        signature = (
+            canonical_text,
+            spec["icon"],
+            spec["size"],
+            spec["color"],
+            spec.get("display_text", canonical_text),
+        )
+        if getattr(widget, "_fx_inline_title_icon_signature", None) == signature:
+            continue
+
+        display_text = spec.get("display_text", canonical_text)
+        try:
+            widget.configure(
+                text=display_text,
+                image=_get_inline_title_icon_image(app, spec["icon"], spec["color"], spec["size"]),
+                compound="left",
+                anchor="w",
+            )
+            widget._fx_inline_title_icon_signature = signature
+        except Exception:
+            pass
 
 
 def _normalize_input_path_value(value):
@@ -349,15 +855,33 @@ def _resolve_lazy_runtime_module(module_name):
             if _is_lazy_runtime_proxy(module_obj, name):
                 removed[name] = sys.modules.pop(name)
 
-    try:
-        module = importlib.import_module(module_name)
-    except Exception:
+    spec = LAZY_RUNTIME_IMPORT_SPECS.get(module_name, {})
+    candidate_names = [module_name]
+    for fallback_name in spec.get("fallback_modules", ()):
+        if fallback_name and fallback_name not in candidate_names:
+            candidate_names.append(fallback_name)
+
+    last_exc = None
+    resolved_name = module_name
+    module = None
+    for candidate_name in candidate_names:
+        try:
+            module = importlib.import_module(candidate_name)
+            resolved_name = candidate_name
+            break
+        except Exception as exc:
+            last_exc = exc
+    if module is None:
         for name, module_obj in removed.items():
             if name not in sys.modules:
                 sys.modules[name] = module_obj
-        raise
+        raise last_exc
+
+    if resolved_name != module_name:
+        _debug(f"lazy_runtime_imports:fallback:{module_name}->{resolved_name}")
 
     cache[module_name] = module
+    cache[resolved_name] = module
     return module
 
 
@@ -854,7 +1378,17 @@ def _apply_shell_layout_tightening(app):
         try:
             header_children = sidebar_children[0].winfo_children()
             if len(header_children) >= 3:
-                header_children[0].grid_configure(padx=(14, 10), pady=14, sticky="w")
+                brand_image = _get_sidebar_brand_image(app)
+                if brand_image is not None:
+                    try:
+                        header_children[0].configure(text="", image=brand_image, compound="center")
+                    except Exception:
+                        pass
+                header_children[0].grid_configure(padx=(12, 10), pady=14, sticky="w")
+                try:
+                    header_children[1].configure(font=customtkinter.CTkFont(family="Microsoft YaHei UI", size=17, weight="bold"))
+                except Exception:
+                    pass
                 header_children[1].grid_configure(padx=(0, 14), pady=(12, 2), sticky="sw")
                 header_children[2].grid_configure(padx=(0, 14), pady=(0, 8), sticky="nw")
         except Exception:
@@ -898,8 +1432,10 @@ def _apply_shell_layout_tightening(app):
         if getattr(app, "btn_help_proxy", None) is None:
             app.btn_help_proxy = customtkinter.CTkButton(
                 app.sidebar_frame,
-                command=app.show_readme,
+                command=lambda target=app: _show_inline_help(target),
             )
+        else:
+            app.btn_help_proxy.configure(command=lambda target=app: _show_inline_help(target))
         _style_sidebar_aux_button(
             app.btn_help_proxy,
             SIDEBAR_AUX_BUTTON_SPECS["btn_help_proxy"]["label"],
@@ -955,49 +1491,226 @@ def _tighten_single_tab_layout(app, task_name):
 
     if task_name == "pdf" and children:
         pdf_card = children[0]
-        pdf_sections = pdf_card.winfo_children()
-        if len(pdf_sections) >= 2:
-            try:
-                pdf_sections[0].pack_configure(anchor="w", padx=28, pady=(24, 14))
-            except Exception:
-                pass
-            try:
-                pdf_sections[1].pack_configure(fill="both", expand=True, padx=28, pady=(0, 20))
-            except Exception:
-                pass
+        _tighten_pdf_tab_layout(pdf_card)
 
     if task_name == "meta" and children:
         meta_card = children[0]
+        _tighten_meta_tab_layout(meta_card)
+
+    if task_name == "zip":
+        _patch_zip_tab_texts(tab)
+
+    _apply_inline_title_icons(app, tab)
+
+    tab._fx_layout_tightened = True
+
+
+def _tighten_pdf_tab_layout(pdf_card):
+    try:
+        pdf_card.pack_configure(padx=18, pady=10)
+    except Exception:
+        pass
+
+    pdf_sections = pdf_card.winfo_children()
+    if len(pdf_sections) < 2:
+        return
+
+    try:
+        pdf_sections[0].pack_configure(anchor="w", padx=24, pady=(16, 8))
+    except Exception:
+        pass
+    try:
+        pdf_sections[1].pack_configure(fill="both", expand=True, padx=24, pady=(0, 12))
+    except Exception:
+        pass
+
+    content_sections = list(pdf_sections[1].winfo_children())
+    if len(content_sections) == 1:
         try:
-            meta_card.pack_configure(padx=20, pady=16)
+            nested_sections = list(content_sections[0].winfo_children())
+        except Exception:
+            nested_sections = []
+        if len(nested_sections) >= 2:
+            try:
+                content_sections[0].pack_configure(fill="both", expand=True, padx=0, pady=0)
+            except Exception:
+                pass
+            content_sections = nested_sections
+    if len(content_sections) < 2:
+        return
+
+    base_panel, detail_shell = content_sections[0], content_sections[1]
+    try:
+        base_panel.configure(width=230)
+        base_panel.pack_configure(side="left", fill="y", padx=(0, 10))
+    except Exception:
+        pass
+    try:
+        detail_shell.pack_configure(side="left", fill="both", expand=True, padx=0, pady=0)
+    except Exception:
+        pass
+
+    base_children = list(base_panel.winfo_children())
+    if base_children:
+        try:
+            base_children[0].pack_configure(anchor="w", pady=(0, 8))
         except Exception:
             pass
-        sections = meta_card.winfo_children()
-        if len(sections) >= 5:
+
+    shared_panel = None
+    compact_button_font = customtkinter.CTkFont(size=11)
+    for child in base_children[1:]:
+        if isinstance(child, customtkinter.CTkButton):
             try:
-                sections[0].pack_configure(anchor="w", padx=28, pady=(8, 4))
+                child.configure(height=40, font=compact_button_font)
+                child.pack_configure(fill="x", pady=(0, 5))
             except Exception:
                 pass
+        else:
+            shared_panel = child
+
+    if shared_panel is not None:
+        try:
+            shared_panel.pack_configure(fill="x", pady=(4, 0))
+        except Exception:
+            pass
+        shared_children = list(shared_panel.winfo_children())
+        for index, child in enumerate(shared_children):
             try:
-                sections[1].configure(height=108)
-                sections[1].pack_configure(fill="x", padx=28, pady=(0, 4))
-            except Exception:
-                pass
-            try:
-                sections[2].pack_configure(fill="x", padx=28, pady=(0, 4))
-            except Exception:
-                pass
-            try:
-                sections[3].pack_configure(fill="x", padx=28, pady=(0, 4))
-            except Exception:
-                pass
-            try:
-                sections[4].configure(height=96)
-                sections[4].pack_configure(fill="x", padx=28, pady=(0, 8))
+                if isinstance(child, customtkinter.CTkSwitch):
+                    child.configure(height=24)
+                    child.pack_configure(anchor="w", pady=(0, 6))
+                elif isinstance(child, customtkinter.CTkLabel):
+                    child.configure(font=customtkinter.CTkFont(size=10))
+                    child.pack_configure(anchor="w", pady=(0, 2))
+                elif isinstance(child, customtkinter.CTkEntry):
+                    child.configure(height=30)
+                    child.pack_configure(fill="x", pady=0)
+                elif index == 0:
+                    child.pack_configure(pady=(0, 6))
             except Exception:
                 pass
 
-    tab._fx_layout_tightened = True
+    try:
+        detail_children = list(detail_shell.winfo_children())
+    except Exception:
+        detail_children = []
+    for panel in detail_children:
+        try:
+            for child in panel.winfo_children():
+                if isinstance(child, customtkinter.CTkLabel):
+                    try:
+                        child.pack_configure(padx=6)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+
+def _tighten_meta_tab_layout(meta_card):
+    try:
+        meta_card.pack_configure(padx=18, pady=10)
+    except Exception:
+        pass
+
+    sections = meta_card.winfo_children()
+    if len(sections) < 5:
+        return
+
+    try:
+        sections[0].pack_configure(anchor="w", padx=24, pady=(8, 2))
+    except Exception:
+        pass
+
+    spacer = sections[1]
+    try:
+        if not spacer.winfo_children():
+            spacer.pack_forget()
+        else:
+            spacer.configure(height=8)
+            spacer.pack_configure(fill="x", padx=24, pady=0)
+    except Exception:
+        pass
+
+    try:
+        sections[2].pack_configure(fill="x", padx=24, pady=(4, 4))
+        for radio in sections[2].winfo_children():
+            try:
+                radio.configure(height=26)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    for section in sections[3:5]:
+        try:
+            section.configure(height=82)
+            section.pack_propagate(False)
+            section.pack_configure(fill="x", padx=24, pady=(0, 4))
+            section_children = list(section.winfo_children())
+            if len(section_children) >= 2:
+                try:
+                    section_children[0].pack_configure(anchor="w", pady=(0, 2))
+                except Exception:
+                    pass
+                try:
+                    section_children[1].configure(height=30)
+                    section_children[1].pack_configure(fill="x", pady=0)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
+def _patch_zip_tab_texts(tab):
+    try:
+        stack = list(tab.winfo_children())
+    except Exception:
+        stack = []
+    while stack:
+        widget = stack.pop()
+        try:
+            text_value = widget.cget("text")
+        except Exception:
+            text_value = None
+        if isinstance(text_value, str):
+            new_label = ZIP_MODE_LABEL_TEXTS.get(text_value)
+            if new_label is not None and text_value != new_label:
+                try:
+                    widget.configure(text=new_label)
+                except Exception:
+                    pass
+            elif text_value.startswith("功能说明：") and text_value != ZIP_MODE_DESCRIPTION_TEXT:
+                try:
+                    widget.configure(text=ZIP_MODE_DESCRIPTION_TEXT, justify="left")
+                except Exception:
+                    pass
+        try:
+            stack.extend(widget.winfo_children())
+        except Exception:
+            pass
+
+
+def _refresh_visible_tab_layout(app, task_name):
+    tab_attr = TAB_LAYOUT_ATTRS.get(task_name)
+    if not tab_attr:
+        return
+
+    tab = getattr(app, tab_attr, None)
+    if tab is None:
+        return
+    children = list(tab.winfo_children())
+    if not children:
+        return
+
+    card = children[0]
+    if task_name == "pdf":
+        _tighten_pdf_tab_layout(card)
+    elif task_name == "meta":
+        _tighten_meta_tab_layout(card)
+    elif task_name == "zip":
+        _patch_zip_tab_texts(tab)
+    _apply_inline_title_icons(app, tab)
 
 
 def _tighten_watermark_tab_layout(app, tab):
@@ -1469,6 +2182,9 @@ def _patch_single_input_support():
 
     def patched_on_start_click(self):
         if getattr(self, "is_running", False):
+            return
+        if getattr(self, "current_task", None) == "help":
+            self.log("ℹ️ [使用教程] 当前页面仅用于查看说明，请先切换到具体功能页。")
             return
         selected_input = _normalize_input_path_value(self.input_path.get())
         if not selected_input:
@@ -3555,6 +4271,154 @@ def _watermark_filename_matches_rule(name_no_ext, mode, marker):
     return normalized_name.endswith(normalized_marker)
 
 
+def _get_user_pref_root():
+    local_app_data = (os.environ.get("LOCALAPPDATA") or "").strip()
+    if local_app_data:
+        return Path(local_app_data) / "FengxiToolbox"
+    try:
+        return Path.home() / ".fengxi_toolbox"
+    except Exception:
+        return Path(__file__).resolve().parent
+
+
+def _get_user_pref_file():
+    return _get_user_pref_root() / "user_prefs.json"
+
+
+def _load_user_prefs():
+    path = _get_user_pref_file()
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _debug(f"user_prefs:load_error:{exc}")
+    return {}
+
+
+def _save_user_prefs(data):
+    path = _get_user_pref_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        _debug(f"user_prefs:save_error:{exc}")
+
+
+def _get_saved_watermark_text():
+    prefs = _load_user_prefs()
+    watermark_prefs = prefs.get("watermark")
+    if isinstance(watermark_prefs, dict):
+        value = watermark_prefs.get("text")
+        if isinstance(value, str):
+            return value
+    return ""
+
+
+def _save_watermark_text(value):
+    normalized = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    prefs = _load_user_prefs()
+    watermark_prefs = prefs.get("watermark")
+    if not isinstance(watermark_prefs, dict):
+        watermark_prefs = {}
+
+    if normalized.strip():
+        watermark_prefs["text"] = normalized
+        prefs["watermark"] = watermark_prefs
+    else:
+        watermark_prefs.pop("text", None)
+        if watermark_prefs:
+            prefs["watermark"] = watermark_prefs
+        else:
+            prefs.pop("watermark", None)
+
+    _save_user_prefs(prefs)
+
+
+def _read_watermark_text_widget(app):
+    widget = getattr(app, "wm_text", None)
+    if widget is None:
+        return ""
+    try:
+        return widget.get("1.0", "end-1c")
+    except Exception:
+        return ""
+
+
+def _flush_watermark_text_persistence(app):
+    if getattr(app, "_fx_wm_text_loading", False):
+        return
+    after_id = getattr(app, "_fx_wm_text_save_after_id", None)
+    if after_id is not None:
+        try:
+            app.after_cancel(after_id)
+        except Exception:
+            pass
+        app._fx_wm_text_save_after_id = None
+    _save_watermark_text(_read_watermark_text_widget(app))
+
+
+def _schedule_watermark_text_persistence(app, delay_ms=400):
+    if getattr(app, "_fx_wm_text_loading", False):
+        return
+    after_id = getattr(app, "_fx_wm_text_save_after_id", None)
+    if after_id is not None:
+        try:
+            app.after_cancel(after_id)
+        except Exception:
+            pass
+
+    def persist_later(target=app):
+        target._fx_wm_text_save_after_id = None
+        _save_watermark_text(_read_watermark_text_widget(target))
+
+    try:
+        app._fx_wm_text_save_after_id = app.after(delay_ms, persist_later)
+    except Exception:
+        _flush_watermark_text_persistence(app)
+
+
+def _install_watermark_text_memory(app):
+    widget = getattr(app, "wm_text", None)
+    if widget is None or getattr(app, "_fx_wm_text_memory_ready", False):
+        return
+
+    saved_text = _get_saved_watermark_text()
+    if saved_text:
+        current_text = _read_watermark_text_widget(app)
+        if current_text != saved_text:
+            try:
+                app._fx_wm_text_loading = True
+                widget.delete("1.0", "end")
+                widget.insert("1.0", saved_text)
+            except Exception as exc:
+                _debug(f"wm_text_memory:load_error:{exc}")
+            finally:
+                app._fx_wm_text_loading = False
+
+    def on_change(_event=None, target=app):
+        _schedule_watermark_text_persistence(target)
+
+    def on_focus_out(_event=None, target=app):
+        _flush_watermark_text_persistence(target)
+
+    try:
+        widget.bind("<KeyRelease>", on_change, add="+")
+        widget.bind("<FocusOut>", on_focus_out, add="+")
+    except Exception:
+        pass
+
+    inner_text = getattr(widget, "_textbox", None)
+    if inner_text is not None:
+        try:
+            inner_text.bind("<KeyRelease>", on_change, add="+")
+            inner_text.bind("<FocusOut>", on_focus_out, add="+")
+            inner_text.bind("<<Paste>>", on_change, add="+")
+        except Exception:
+            pass
+
+    app._fx_wm_text_memory_ready = True
+
+
 def _patch_watermark_filename_rule_ui():
     try:
         original_init_watermark_ui = FengxiToolboxApp.init_watermark_ui
@@ -3713,6 +4577,42 @@ def _patch_watermark_filename_rule_ui():
 
 
 _patch_watermark_filename_rule_ui()
+
+
+def _patch_watermark_text_memory_ui():
+    try:
+        original_init_watermark_ui = FengxiToolboxApp.init_watermark_ui
+        original_on_start_click = FengxiToolboxApp.on_start_click
+    except Exception as exc:
+        _debug(f"patch_watermark_text_memory:missing:{exc}")
+        return
+
+    if getattr(original_init_watermark_ui, "__fx_wm_text_memory_patch__", False):
+        return
+
+    def patched_init_watermark_ui(self):
+        original_init_watermark_ui(self)
+        try:
+            _install_watermark_text_memory(self)
+        except Exception as exc:
+            _debug(f"patch_watermark_text_memory:init_error:{exc}")
+
+    def patched_on_start_click(self):
+        if getattr(self, "current_task", None) == "watermark":
+            try:
+                _flush_watermark_text_persistence(self)
+            except Exception as exc:
+                _debug(f"patch_watermark_text_memory:flush_before_run_error:{exc}")
+        return original_on_start_click(self)
+
+    patched_init_watermark_ui.__fx_wm_text_memory_patch__ = True
+    patched_on_start_click.__fx_wm_text_memory_patch__ = True
+    FengxiToolboxApp.init_watermark_ui = patched_init_watermark_ui
+    FengxiToolboxApp.on_start_click = patched_on_start_click
+    _debug("patch_watermark_text_memory:installed")
+
+
+_patch_watermark_text_memory_ui()
 
 
 def _patch_remove_wm_output_ui():
@@ -3920,6 +4820,10 @@ def _request_fast_close(app):
         return
     app._fx_fast_close_started = True
     try:
+        _flush_watermark_text_persistence(app)
+    except Exception as exc:
+        _debug(f"fast_close:wm_text_flush_error:{exc}")
+    try:
         app.stop_event = True
     except Exception:
         pass
@@ -3997,6 +4901,9 @@ def _patch_startup_performance():
     if getattr(original_setup_main_area, "__fx_lazy_startup_patch__", False):
         return
 
+    def patched_show_readme(self):
+        return _show_inline_help(self)
+
     def patched_ctk_init(self, *args, **kwargs):
         original_ctk_init(self, *args, **kwargs)
         if _get_internal_attr(self, "_fx_start_hidden", False):
@@ -4048,7 +4955,16 @@ def _patch_startup_performance():
                 _ensure_lazy_tab_initialized(self, task_name)
         except Exception as exc:
             _debug(f"lazy_tab:switch_error:{task_name}:{exc}")
-        return original_switch_tab(self, task_name, btn_obj)
+        result = original_switch_tab(self, task_name, btn_obj)
+        try:
+            _set_help_button_selected(self, False)
+            _set_help_action_state(self, False)
+            self.update_idletasks()
+            _refresh_visible_tab_layout(self, task_name)
+            self.update_idletasks()
+        except Exception as exc:
+            _debug(f"lazy_tab:visible_layout_refresh_error:{task_name}:{exc}")
+        return result
 
     def patched_getattr(self, name):
         task_name = _guess_lazy_tab_for_attr(name)
@@ -4068,10 +4984,12 @@ def _patch_startup_performance():
     patched_setup_main_area.__fx_lazy_startup_patch__ = True
     patched_switch_tab.__fx_lazy_startup_patch__ = True
     patched_getattr.__fx_lazy_startup_patch__ = True
+    patched_show_readme.__fx_inline_help_patch__ = True
     customtkinter.CTk.__init__ = patched_ctk_init
     FengxiToolboxApp.setup_main_area = patched_setup_main_area
     FengxiToolboxApp.switch_tab = patched_switch_tab
     FengxiToolboxApp.__getattr__ = patched_getattr
+    FengxiToolboxApp.show_readme = patched_show_readme
     _debug("patch_startup_performance:installed")
 
 

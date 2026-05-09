@@ -25,3 +25,20 @@
   关联文件：agent.md, memory.md, memory\load-order.md, memory\architecture.md, memory\constraints.md, memory\categories\watermark-and-remove.md, memory\categories\convert-audio-image.md, memory\categories\pdf-file-meta-zip.md, memory\debug-status.md, memory\distilled-memory.md, memory\recent-changes.md, tools\fx_workspace_tools.py, Fengxi_Toolbox.py, fx_toolbox.spec, package.bat, full_debug_test.py
 - [ui] 摘要：收紧左侧导航并将 OCR 配置改为右侧双栏；进一步压紧左侧导航并重构 PDF OCR 双栏布局；左侧导航改为固定图标槽并统一按钮节奏；左侧导航恢复真实图标并保留统一对齐；统一底部教程赞助卡片并新增风兮应用图标
   关联文件：Fengxi_Toolbox.py, memory\categories\pdf-file-meta-zip.md, memory\debug-status.md, memory\recent-changes.md, memory\architecture.md, tools\generate_fengxi_icon.py, fx_toolbox.spec
+
+## 自动蒸馏 2026-05-09 16:15:33
+- 覆盖变更：第 31 到第 60 条
+- [image] 摘要：图片模块新增图片转PDF和多图合并PDF
+  关联文件：Fengxi_Toolbox.py, smoke_test.py, full_debug_test.py, memory/categories/convert-audio-image.md
+- [pdf_file] 摘要：PDF 模块新增 PDF 压缩并改为功能入口式布局
+  关联文件：Fengxi_Toolbox.py, smoke_test.py, full_debug_test.py, memory/categories/pdf-file-meta-zip.md
+- [progress] 摘要：统一修复运行时进度条并接入OCR页级进度
+  关联文件：Fengxi_Toolbox.py, full_debug_test.py, memory/recent-changes.md, memory/architecture.md, memory/debug-status.md
+- [repo] 摘要：初始化本地 Git 仓库并建立首个 .gitignore 上传基线；接入 GitHub 远端并完成首次推送；补齐 GitHub 首页说明、依赖清单与 Windows 自动打包工作流；将 GitHub 打包工作流升级为缓存依赖并使用新版 artifact action；建立 GitHub 定时同步与 3.0 标签发布链路
+  关联文件：.gitignore, memory/architecture.md, README.md, requirements.txt, .github/workflows/build-windows-exe.yml, VERSION, CHANGELOG.md, README.txt, tools/fx_git_sync.ps1, tools/register_github_sync_task.ps1, tools/unregister_github_sync_task.ps1, tools/fx_release_version.ps1, .github/workflows/publish-release.yml, memory.md, memory/load-order.md, memory/categories/repo-sync-release.md
+- [runtime] 摘要：收敛懒加载布局刷新范围，降低首次切页开销；为setup_sidebar增加创建阶段快路径，继续优化启动速度；修复打包版关闭窗口消失慢；兼容 moviepy 2.2 打包并清理 PyInstaller 噪声日志
+  关联文件：Fengxi_Toolbox.py, memory/recent-changes.md, memory/architecture.md, memory/debug-status.md, full_debug_test.py, fx_toolbox.spec
+- [ui] 摘要：优化水印页黑色横带与功能框显示不全；修复水印页黑色横条与下方功能框裁切；恢复底部栏原高度并保留黑线修复；底部运行信息框高度增加一倍；修复属性页与PDF页显示裁切；统一功能页内标题图标并移除乱码符号；重绘侧栏与标题图标并提升清晰度；按参考图逐项贴齐侧栏图标线稿；将音频工具图标改为标准双音符轮廓；将批量水印与去除水印图标改成标准盾牌和橡皮擦；将批量水印盾牌图标收敛到参考盾牌轮廓；将批量水印盾牌改为白描边蓝色填充样式；将音频工具图标改为更标准的单旗音符轮廓；将音频工具图标改为更接近参考图的实心音符；将音频工具图标改为双横梁实心音符；继续收敛音频工具图标到双横梁实心音符比例；继续将批量水印盾牌贴齐参考图的白边蓝芯比例
+  关联文件：Fengxi_Toolbox.py, memory/architecture.md, memory\architecture.md, agent.md
+- [watermark] 摘要：稳定区批量水印新增可配置文件名跳过规则
+  关联文件：Fengxi_Toolbox.py, memory/categories/watermark-and-remove.md

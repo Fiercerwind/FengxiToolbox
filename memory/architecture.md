@@ -1,5 +1,48 @@
 # 项目架构
 
+## 2026-05-09 使用教程改为应用内滚动页
+- `使用教程` 不再通过 `show_readme()` 调用系统打开 `README.txt / README.md`，而是被加载器层重定向为应用内页面。
+- 实现仍限定在 `Fengxi_Toolbox.py`，不修改 `fengxi_runtime.bin`。
+- 当前方案：
+  - 新增 `HELP_TAB_TITLE = "使用教程"` 与 `INLINE_HELP_SECTIONS`，将帮助内容直接内置为结构化章节。
+  - 通过 `_ensure_inline_help_tab()` 在 `main_panel` 上懒创建帮助页 tab。
+  - 帮助内容使用 `CTkScrollableFrame` 承载，页面显示不下时可直接纵向滚动。
+  - 左侧 `btn_help_proxy` 的命令已改为 `_show_inline_help(...)`，不再走外部文档打开链路。
+  - `show_readme()` 也被补丁层接管，任何旧入口最终都会切到应用内帮助页。
+- 交互约束：
+  - 进入帮助页时会高亮 `使用教程` 按钮。
+  - 帮助页显示期间，底部开始按钮会禁用，避免 `current_task="help"` 误进入业务处理分支。
+  - 切回任意功能页后，帮助按钮高亮取消，开始按钮恢复正常状态。
+- 维护要求：
+  - 后续功能有新增或行为变化时，需要同步更新 `INLINE_HELP_SECTIONS` 文案。
+  - 如果继续扩展帮助页，优先沿用“应用内 tab + scrollable 内容”的路线，不要退回外部 README 打开方式。
+
+## 2026-05-09 侧栏与标题图标清晰度重绘
+- 用户反馈：左侧功能区图标线条发糊、细节乱，想按新的视觉参考图把图标做得更清晰、更规整。
+- 当前修复仍限定在 `Fengxi_Toolbox.py` 加载器层，不改 `fengxi_runtime.bin`，不触碰稳定区 `批量压缩` / `添加水印` 的业务处理逻辑。
+- 当前方案：
+  - `_draw_sidebar_icon(...)` 不再沿用旧的低分辨率直接描线方案，而是统一改成更规整的几何线稿。
+  - `_build_sidebar_icon_image(...)` 改为先按高分辨率画布超采样绘制，再用 `LANCZOS` 缩回实际显示尺寸，提升边缘清晰度。
+  - 由于页面内标题图标复用同一套自绘逻辑，侧栏图标与功能页标题图标会同步变清晰，不需要分别维护两套素材。
+  - `水印内容` 小标题图标已按参考图切换为文档语义，和页面布局更一致。
+- 后续边界：
+  - 若继续调整图标观感，优先改 `_draw_sidebar_icon(...)` 的几何路径与 `_build_sidebar_icon_image(...)` 的渲染策略，不要回退到 22px 画布直接硬描边。
+  - 若引入新的图标种类，默认继续走“统一线稿 + 超采样缩放”路线，保持侧栏与页面标题风格一致。
+  - 2026-05-09 起，侧栏头部原来的 `FX` 文本占位也已改为直接显示 `assets/fengxi_app_icon.png` 品牌图标；如果后续再调品牌头部，优先复用 `_get_sidebar_brand_image(...)`，不要重新塞回字母占位。
+
+## 2026-05-09 页面内标题图标统一
+- 用户反馈：左侧功能区图标与点击进入后的页面标题图标不一致，且部分页面标题/小标题使用 emoji 或符号时会出现乱码或观感不统一。
+- 当前修复仍限定在 `Fengxi_Toolbox.py` 加载器层，不改 `fengxi_runtime.bin`，也不触碰稳定区 `批量压缩` / `添加水印` 业务处理逻辑。
+- 当前方案：
+  - 侧栏继续使用 PIL 自绘图标缓存 `_draw_sidebar_icon(...)` / `_get_sidebar_icon_images(...)`。
+  - 新增页面内标题图标映射 `INLINE_TITLE_ICON_SPECS`，统一为主功能标题与关键小标题分配与侧栏同风格的自绘图标。
+  - 通过 `_apply_inline_title_icons(...)` 递归扫描当前页 `CTkLabel`，把运行时自带的 emoji/符号标题改写为“纯文本标题 + 自绘 CTkImage”。
+  - 该逻辑接入 `_tighten_single_tab_layout(...)` 与 `_refresh_visible_tab_layout(...)`，保证默认页和懒加载后的页签都会应用一致化图标。
+  - `zip` 页残留的单字符闪电标签也已纳入同一映射，改为仅显示自绘图标，避免不同机器下出现符号观感差异。
+- 当前边界：
+  - 后续如继续调整功能页标题视觉，优先修改 `INLINE_TITLE_ICON_SPECS` 与 `_draw_sidebar_icon(...)`，不要回退到把 emoji 直接写进标题文本。
+  - 页面内标题若要做到“只显示图标不显示旧字符”，应复用 `display_text` 机制，而不是保留原符号字符。
+
 ## 2026-04-26 侧栏构建快路径
 - 继续沿加载器层优化启动性能，不改 `fengxi_runtime.bin`，也不碰稳定区 `批量压缩` / `添加水印` 业务逻辑。
 - `Fengxi_Toolbox.py` 新增 `FAST_SIDEBAR_BUILD_FONT`、`_run_with_fast_sidebar_button_construction(...)` 与 `_patch_sidebar_build_performance()`。
@@ -169,6 +212,10 @@
 - 接入位置：
   - 运行时窗口图标由 `Fengxi_Toolbox.py` 中的 `_apply_app_icon(app)` 负责加载
   - 打包 exe 图标由 `fx_toolbox.spec` 的 `icon='assets\\fengxi_app_icon.ico'` 负责接入
+- 2026-05-09：
+  - 用户已直接替换 `assets/fengxi_app_icon.png` 为新的品牌图。
+  - `assets/fengxi_app_icon.ico` 也必须同步由该 `png` 重生成，否则侧栏品牌头、窗口图标与打包 exe 图标会不一致。
+  - 当前这版品牌图已清理四角黑底，根资产与打包产物都应保持“透明圆角”状态；若后续再次替换源图，需同时验证 PNG/ICO 左上角 alpha 为 0，避免黑角回归。
 - 若后续继续改品牌图标，优先改生成脚本并重新生成 PNG/ICO，不要只手工替换其中一个产物，避免源码态与打包态图标不一致
 
 ## 打包策略
@@ -268,7 +315,10 @@
 - 设计边界：
 - 只延后“首次真正调用”时再导入重依赖，不改动运行时业务函数签名。
 - 执行完 `fengxi_runtime.bin` 后会通过 `_restore_runtime_lazy_imports()` 清理 `sys.modules` 中仍是代理的占位项，避免污染常规导入环境。
-- `fx_toolbox.spec` 里的 `hiddenimports` 必须继续保留 `pdf2docx`、`moviepy`、`moviepy.editor`，不要因为源码态变成懒加载就从打包配置中删除。
+- 2026-05-09 起需兼容 `moviepy==2.2.x` 已不再提供 `moviepy.editor` 实体模块这一事实：
+  - 加载器层仍保留 `moviepy.editor` 代理名，避免嵌入运行时里的旧导入路径失效。
+  - 但其真实符号解析已回退到 `moviepy` 根模块上的 `AudioFileClip` / `VideoFileClip`。
+  - `fx_toolbox.spec` 不再无条件写死 `moviepy.editor` hidden import，而是仅在当前环境存在该模块时才加入；同时显式补入新版可用的 `moviepy.audio.io.AudioFileClip` 与 `moviepy.video.io.VideoFileClip`。
 - 后续如果还要继续优化启动速度，优先沿着“可选重依赖懒加载”思路做；不要轻易动 `customtkinter`、首屏 `watermark` UI、批量压缩、添加水印的稳定业务逻辑。
 
 ## 2026-04-24 去水印单文件输出与失败防伪成功
@@ -394,3 +444,15 @@
 - 高 DPI 下复测：日志框实际高度从约 `96px` 增至约 `192px`，符合“双倍高度”。
 - 为避免 1360x768 窗口下默认水印页右侧参数被裁切，同步微调 `_tighten_watermark_tab_layout()` 的右侧控件垂直间距和滑块组高度；只改 UI 排版，不改添加水印业务逻辑。
 - 复测：`right_panel` 请求高度约 `589px`，可视高度约 `594px`，右侧控件可完整显示。
+
+## 2026-05-08 属性页与 PDF 页显示裁切修复
+- 用户反馈：属性隐私页底部输入区域被裁切，PDF 功能页左侧按钮列与共享控件显示不全。
+- 根因：2026-05-05 将 `bottom_bar` 日志区加高到双倍后，主内容区可视高度降到约 `676px`；`meta` 页原始请求高度约 `754px`，`pdf` 页虽然整体请求高度不高，但左侧功能列内部仍保留较大的按钮高度与间距，导致下半部分被裁切。
+- 当前修复仍只在 `Fengxi_Toolbox.py` 加载器层做 UI 调整：
+  - 新增 `_tighten_meta_tab_layout()`：隐藏属性页中无子控件的 300px 空白占位 frame，并压紧单选区与两个输入区的高度。
+  - 新增/修正 `_tighten_pdf_tab_layout()`：压紧 PDF 页卡片边距、左侧功能按钮高度与共享开关/密码框高度；修正了 PDF 页真实内容嵌套在额外一层 frame 中的层级判断。
+  - 新增 `_refresh_visible_tab_layout()`，并在 `patched_switch_tab()` 中于原始切页后执行，确保 `meta/pdf` 的紧凑布局是在页签真正显示后应用，而不是在不可见阶段提前失效。
+- 1360x768 复测：
+  - `meta` 页请求高度约从 `754px` 降到 `424px`，作者/时间两个输入区完整可见。
+  - `pdf` 页请求高度约从 `466px` 降到 `398px`；左侧 5 个模式按钮、`OCR` 按钮及共享控件完整显示。
+- 本次未改 PDF/OCR/属性处理业务逻辑，仅调整布局与切页后的可见态刷新。
