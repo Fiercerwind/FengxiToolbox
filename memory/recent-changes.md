@@ -1,5 +1,10 @@
 # 最近变更
 
+## 2026-05-09 23:28:57 | release
+- 摘要：公开仓库隐私清理，并准备为 v4.0.0 Release 补传 Windows 打包资产
+- 文件：README.md, README.txt, agent.md, memory.md, memory/load-order.md, memory/constraints.md, LICENSE, NOTICE, dist_release_ascii/fengxi-toolbox-4.0.0-windows.zip
+- 说明：README 改为公开产品说明，不再展示内部维护细节；记忆入口与约束文件移除本机绝对路径和用户名暴露；LICENSE/NOTICE 去掉个人标识；已生成 dist_release_ascii/fengxi-toolbox-4.0.0-windows.zip，接下来将同步 main、重指向 v4.0.0 标签并上传 Release 资产。
+
 ## 2026-05-09 23:00:08 | release
 - 摘要：发布基线提升到 4.0.0，并补齐 README、LICENSE、NOTICE 与 GitHub Release 口径
 - 文件：VERSION, README.md, README.txt, CHANGELOG.md, LICENSE, NOTICE, Fengxi_Toolbox.py, .github/workflows/publish-release.yml, agent.md, memory.md, memory/architecture.md, memory/categories/repo-sync-release.md

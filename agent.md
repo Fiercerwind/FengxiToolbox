@@ -1,8 +1,8 @@
 # 风兮工具箱 Agent 约定
 
 ## 开工前必做
-- 先读 [memory.md](/d:/Users/CHEER/Desktop/Tools/FengxiToolbox/memory.md)。
-- 再读 [memory/load-order.md](/d:/Users/CHEER/Desktop/Tools/FengxiToolbox/memory/load-order.md)。
+- 先读 [memory.md](memory.md)。
+- 再读 [memory/load-order.md](memory/load-order.md)。
 - 然后按任务类别渐进式加载对应记忆文件，优先读蒸馏记忆和最近变更，避免整仓库全量重扫。
 - 可以先运行 `python tools/fx_workspace_tools.py snapshot` 获取推荐加载顺序。
 

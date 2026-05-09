@@ -75,44 +75,13 @@ dist_release_ascii\fx_toolbox\
 dist_release_ascii\fx_toolbox\fx_toolbox.exe
 ```
 
-## GitHub 同步与发布
+## 获取与发布
 
-### 手动同步
+- 源码仓库：`https://github.com/Fiercerwind/FengxiToolbox`
+- 正式发布页：`https://github.com/Fiercerwind/FengxiToolbox/releases`
+- 发布版包含 Windows 打包产物，不仅是源码快照。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File tools\fx_git_sync.ps1
-```
-
-该脚本会自动检测当前分支、提交未忽略改动、在需要时先 `pull --rebase`，然后推送到 GitHub。
-
-### 注册定时同步
-
-默认推荐每天 `21:30` 自动同步一次：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools\register_github_sync_task.ps1 -DailyAt 21:30
-```
-
-移除计划任务：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools\unregister_github_sync_task.ps1
-```
-
-### 版本发布
-
-仓库已提供两条发布链路：
-
-- `Actions -> Build Windows EXE`：手动打包目录版 Windows EXE
-- `push v* tag`：自动触发 GitHub Release 构建、压缩并上传发布资产
-
-推荐创建正式版本标签的方式：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools\fx_release_version.ps1 -Version 4.0.0
-```
-
-发布说明来源于 [CHANGELOG.md](CHANGELOG.md) 中对应版本段落。
+如需从源码自行构建，可直接运行 `package.bat`。
 
 ## 版本文件
 
@@ -139,16 +108,13 @@ python full_debug_test.py
 - 很多功能不能只测 helper，必须测真实 `FengxiToolboxApp.run_process()` 工作流。
 - Office、拖拽、窗口样式、OCR 等能力会受本机环境影响。
 
-## 仓库结构
+## 主要文件
 
 ```text
 Fengxi_Toolbox.py                   # 加载器层、补丁层、UI 与调度增强
 fengxi_runtime.bin                  # 封装后的主体运行时逻辑
 tools/fx_pdf_ocr.py                 # OCR 搜索版 PDF 引擎与后端探测
 tools/fx_workspace_tools.py         # 备份、记忆、蒸馏与日志工具
-tools/fx_git_sync.ps1               # 本机 GitHub 自动同步脚本
-tools/register_github_sync_task.ps1 # 注册计划任务
-tools/fx_release_version.ps1        # 创建并推送版本标签
 assets/                             # 图标、赞助码与其他 UI 资源
 memory/                             # 架构、约束、近期改动、分类记忆与研究记录
 .github/workflows/                  # 打包与发布工作流
@@ -172,13 +138,6 @@ full_debug_test.py                  # 全功能增强自检
 - `风兮`、`Fengxi Toolbox`、项目图标及相关品牌视觉均保留权利。
 
 如果需要商业授权、定制授权或合作，请联系权利人并取得书面许可。
-
-## 维护约束
-
-- `批量压缩` 与 `添加水印` 当前属于稳定区，非必要不应改动其业务实现。
-- 优先修改 `Fengxi_Toolbox.py` 的加载器/补丁层，不轻易重写 `fengxi_runtime.bin` 对应逻辑。
-- 修改任何已有文件前，先使用 `python tools/fx_workspace_tools.py backup <files...>` 做可恢复备份。
-- 重要改动后，必须同步更新记忆文件并记录变更。
 
 ## 免责声明
 
