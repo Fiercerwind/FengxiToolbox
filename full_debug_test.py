@@ -1,6 +1,8 @@
 import importlib.util
 import json
+import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -65,15 +67,16 @@ def office_available(progid):
 
 def main():
     mod = load_module()
-    root = Path(f"tmp_full_debug_{int(time.time())}").resolve()
-    root.mkdir(exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="tmp_full_debug_", dir=Path.cwd())).resolve()
+    original_pref_root = mod._get_user_pref_root
+    mod._get_user_pref_root = lambda: root / "user_prefs"
     dummy = DummyApp()
     results = []
 
     def record(name, ok, detail="", skipped=False):
         payload = {"case": name, "ok": bool(ok), "detail": str(detail), "skipped": bool(skipped)}
         results.append(payload)
-        print(json.dumps(payload, ensure_ascii=True))
+        print(json.dumps(payload, ensure_ascii=True), flush=True)
 
     runtime_run_process = mod._unwrap_runtime_run_process(mod.FengxiToolboxApp.run_process)
     runtime_progress_map = mod._build_runtime_progress_site_map(runtime_run_process)
@@ -117,14 +120,124 @@ def main():
 
     app = mod.FengxiToolboxApp()
     app.withdraw()
+    app._fx_disable_fast_close_force_exit = True
     record("app_init", True, "current_task=" + str(getattr(app, "current_task", None)))
+
+    app.wm_skip_hyphen_var.set(True)
+    app.wm_skip_name_position_var.set("开头")
+    app.wm_skip_name_text_var.set("FX")
+    mod._flush_watermark_filename_rule_persistence(app)
+    saved_rule = mod._get_saved_watermark_filename_rule_settings()
+    record(
+        "watermark_filename_rule_memory_save",
+        saved_rule == {"enabled": True, "position": "开头", "marker": "FX"},
+        saved_rule,
+    )
+
+    reload_probe = type("WatermarkRuleProbe", (), {})()
+    reload_probe.wm_skip_hyphen_var = mod.tkinter.BooleanVar(master=app, value=False)
+    reload_probe.wm_skip_name_position_var = mod.tkinter.StringVar(master=app, value="结尾")
+    reload_probe.wm_skip_name_text_var = mod.tkinter.StringVar(master=app, value="-")
+    reload_probe.after = app.after
+    reload_probe.after_cancel = app.after_cancel
+    mod._install_watermark_filename_rule_memory(reload_probe)
+    record(
+        "watermark_filename_rule_memory_load",
+        reload_probe.wm_skip_hyphen_var.get()
+        and reload_probe.wm_skip_name_position_var.get() == "开头"
+        and reload_probe.wm_skip_name_text_var.get() == "FX",
+        {
+            "enabled": reload_probe.wm_skip_hyphen_var.get(),
+            "position": reload_probe.wm_skip_name_position_var.get(),
+            "marker": reload_probe.wm_skip_name_text_var.get(),
+        },
+    )
+
+    controls_row = getattr(getattr(app, "wm_skip_name_entry", None), "master", None)
+    controls_row = getattr(controls_row, "master", None)
+    hint_text = ""
+    try:
+        hint_text = controls_row.winfo_children()[-1].cget("text")
+    except Exception:
+        hint_text = ""
+    record(
+        "watermark_filename_rule_hint_layout",
+        bool(getattr(controls_row, "_fx_wm_filename_rule_controls", False))
+        and "留空默认" in hint_text
+        and "任意开头或结尾字符" in hint_text,
+        hint_text,
+    )
+
+    queue_root = root / "queue_probe"
+    queue_root.mkdir()
+    queue_pdf = queue_root / "queue.pdf"
+    make_pdf(queue_pdf, ["queue probe"])
+    app.current_task = "pdf"
+    _ = app.pdf_mode_var
+    app.pdf_mode_var.set("encrypt")
+    app.pdf_pwd_entry.delete(0, "end")
+    app.pdf_pwd_entry.insert(0, "2468")
+    app.input_path.set(str(queue_pdf))
+    queue_task = mod._queue_add_current_task(app)
+    record(
+        "task_queue_snapshot",
+        queue_task is not None
+        and queue_task["snapshot"]["variables"].get("pdf_mode_var") == "encrypt"
+        and queue_task["snapshot"]["widgets"].get("pdf_pwd_entry") == "2468"
+        and hasattr(app, "btn_queue_add")
+        and hasattr(app, "btn_queue_panel"),
+        queue_task["title"] if queue_task else "missing",
+    )
+
+    queue_run_calls = []
+    original_queue_run_process = app.run_process
+
+    def fake_queue_run_process(input_value, task_type):
+        queue_run_calls.append((input_value, task_type, app.pdf_mode_var.get(), app.pdf_pwd_entry.get()))
+        app.log("queue fake success")
+
+    app.run_process = fake_queue_run_process
+    mod._run_task_queue_worker(app)
+    app.run_process = original_queue_run_process
+    success_history = [item for item in getattr(app, "_fx_task_history", []) if item.get("title") == queue_task["title"] and item.get("status") == "success"]
+    record(
+        "task_queue_success_history",
+        queue_run_calls
+        and queue_run_calls[-1][1:] == ("pdf", "encrypt", "2468")
+        and bool(success_history),
+        queue_run_calls,
+    )
+
+    failed_source = {
+        "id": "failed-probe",
+        "input": str(queue_pdf),
+        "task_type": "pdf",
+        "title": "PDF 工具 · 失败样本",
+        "snapshot": queue_task["snapshot"],
+        "status": "failed",
+        "created_at": time.time(),
+        "finished_at": time.time(),
+        "detail": "probe failed",
+        "logs": ["❌ probe failed"],
+    }
+    app._fx_task_history.append(failed_source)
+    mod._queue_retry_failed_history(app)
+    retry_titles = [item.get("title") for item in getattr(app, "_fx_task_queue", [])]
+    record(
+        "task_queue_retry_failed",
+        failed_source["title"] in retry_titles,
+        retry_titles,
+    )
+    app._fx_task_queue = []
 
     close_probe = type("FastCloseProbe", (), {})()
     close_destroy_called = []
     close_withdraw_called = []
     close_quit_called = []
     close_probe.stop_event = False
+    close_probe._fx_disable_fast_close_force_exit = True
     close_probe.withdraw = lambda: close_withdraw_called.append(True)
+    close_probe.update_idletasks = lambda: None
     close_probe.quit = lambda: close_quit_called.append(True)
     close_probe.destroy = lambda: close_destroy_called.append(True)
     close_probe.after = lambda delay, callback=None, *args: callback(*args) if callback else None
@@ -670,7 +783,14 @@ def main():
         record("ppt_to_pdf", True, "skipped_no_ppt_com", skipped=True)
 
     failed_cases = [item["case"] for item in results if not item["ok"]]
-    print(json.dumps({"total": len(results), "failed": failed_cases}, ensure_ascii=True))
+    print(json.dumps({"total": len(results), "failed": failed_cases}, ensure_ascii=True), flush=True)
+    mod._get_user_pref_root = original_pref_root
+    try:
+        app.destroy()
+    except Exception:
+        pass
+    if not failed_cases:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,48 @@
 # 项目架构
 
+## 2026-05-20 任务队列 / 历史记录 / 失败重试
+- 本轮新增“任务队列 + 历史记录 + 失败重试”，实现仍限定在 `Fengxi_Toolbox.py` 加载器层，不修改 `fengxi_runtime.bin`。
+- UI 入口：
+  - 底部操作区新增 `加入队列` 与 `队列历史` 两个按钮。
+  - `加入队列` 会把当前输入路径、当前功能类型、以及已初始化页面上的参数变量/输入框内容保存为任务快照。
+  - `队列历史` 打开独立窗口，左侧显示等待执行队列，右侧显示历史记录与失败重试。
+- 调度策略：
+  - 队列只做顺序执行，不做并发，避免 Office COM、OCR、PDF 去水印等重任务互相污染。
+  - 每个队列任务执行前会恢复保存的参数快照，再调用现有 `run_process(input, task_type)`。
+  - 这样用户可以先配置多个不同功能任务入队，再统一执行。
+- 历史与重试：
+  - 历史记录保存到用户配置目录 `FengxiToolbox/queue_history.json`，不写入项目源码目录。
+  - 历史最多保留 `QUEUE_HISTORY_LIMIT = 80` 条。
+  - 失败判断目前基于异常捕获、用户停止状态、以及任务日志中的错误关键词。
+  - 失败重试会把失败历史的原始快照重新加入等待队列，避免只重试路径却丢失当时配置。
+- 测试隔离：
+  - `full_debug_test.py` 会临时替换 `_get_user_pref_root()` 到本轮 `tmp_full_debug_*/user_prefs`，避免队列回归污染真实用户历史。
+- 维护边界：
+  - 后续若增强队列，不要改稳定业务区的 `批量压缩` / `添加水印` 核心逻辑。
+  - 若要支持并发队列，必须先重新评估 Office COM、OCR、去水印、文件覆盖等副作用风险。
+  - 若要提高失败判断准确度，优先让各自工作流返回结构化结果，而不是继续扩大日志关键词列表。
+
+## 2026-05-20 自检与快关测试架构稳健化
+- 本轮未改 `批量压缩` 与 `添加水印` 的业务实现，只在加载器外围、测试脚本和发布链路做工程可靠性优化。
+- `Fengxi_Toolbox.py` 的 `_request_fast_close(app)` 保持真实应用快速关闭逻辑不变：先 `withdraw()` 隐藏窗口，再异步 `quit()/destroy()`，必要时强制退出。
+- 为避免自动化测试中的快关探针触发真实 `os._exit(0)` 导致测试进程提前结束，新增实例级开关 `_fx_disable_fast_close_force_exit`：
+  - 默认不存在或为 `False`，真实应用行为不变。
+  - `full_debug_test.py` 会在测试 app 和 close probe 上设置为 `True`，只关闭“兜底强退定时器”，不关闭快关本身。
+- `smoke_test.py` 与 `full_debug_test.py` 现在统一使用项目根目录内的 `tmp_*` 临时目录，并在全部通过后自动删除本轮新建目录。
+- 测试输出现在对每条 JSON 记录使用 `flush=True`，避免长测试或异常退出时丢失关键进度。
+- 边界：历史遗留 `tmp_*` 目录没有在本轮批量删除；后续如要清理，应作为单独维护任务处理，并只限项目目录内。
+
+## 2026-05-20 Release 大文件上传稳健化
+- `.github/workflows/publish-release.yml` 仍保留原有 Release 创建/更新 API 流程。
+- 最后的 zip 资产上传步骤已从 PowerShell `Invoke-WebRequest -InFile` 改为 `curl.exe --data-binary`。
+- 原因：之前补传正式 Windows zip 资产时，手动验证 `curl.exe --data-binary` 上传更稳定；`Invoke-WebRequest` 在大文件上传时有卡住/超时风险。
+- 新上传步骤会：
+  - 使用 `GITHUB_TOKEN`、GitHub API headers 和 `application/zip`。
+  - 将响应写入同目录临时 response json。
+  - 检查 `curl.exe` 退出码。
+  - 只接受 HTTP `200` 或 `201`，否则输出响应体并失败。
+- 后续维护 Release 工作流时，优先保留这条 `curl.exe --data-binary` 路线，不要轻易回退到 `Invoke-WebRequest -InFile` 上传大 zip。
+
 ## 2026-05-09 使用教程改为应用内滚动页
 - `使用教程` 不再通过 `show_readme()` 调用系统打开 `README.txt / README.md`，而是被加载器层重定向为应用内页面。
 - 实现仍限定在 `Fengxi_Toolbox.py`，不修改 `fengxi_runtime.bin`。

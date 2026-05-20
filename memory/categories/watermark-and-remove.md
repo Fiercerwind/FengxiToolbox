@@ -47,6 +47,30 @@
   - 这样既保留原水印主体逻辑，又把跳过规则改为用户可配置
 - 这一补丁只应影响 `watermark` 任务，不得影响其他任务类型
 
+## 2026-05-20 批量水印文件名规则记忆与提示修复
+- 用户反馈：
+  - `按文件名规则跳过` 下方的 `留空默认` 提示显示不全。
+  - 该处的开关、匹配位置和字符输入也需要像水印文本一样具备记忆功能。
+- 当前修复：
+  - 仍限定在 `Fengxi_Toolbox.py` 加载器/UI/偏好层，不修改 `fengxi_runtime.bin` 和添加水印核心业务逻辑。
+  - 文件名规则控件改为两行布局：
+    - 第一行：`匹配位置`、`开头/结尾` 下拉框、自定义字符输入框。
+    - 第二行：完整显示 `留空默认 “-”，可填写任意开头或结尾字符`。
+  - 布局收紧函数会识别该控件的 `_fx_wm_filename_rule_controls` 标记并保留 56px 高度，避免后续统一压缩布局时再次裁切提示。
+  - 本地用户偏好新增 `watermark.filename_skip_rule`：
+    - `enabled`
+    - `position`
+    - `marker`
+  - 保存时机包括变量变更防抖、输入框失焦/回车、执行水印任务前、窗口关闭前。
+  - 若用户把 marker 清空，下次启动仍回填为空；实际执行时继续沿用旧兼容行为，空 marker 默认按 `-` 匹配。
+- 新增回归：
+  - `watermark_filename_rule_memory_save`
+  - `watermark_filename_rule_memory_load`
+  - `watermark_filename_rule_hint_layout`
+- 边界：
+  - `run_process()` 内部为绕开运行时固定 `-` 结尾判断而临时关闭旧开关时，会设置 `_fx_wm_filename_rule_loading`，避免该内部切换被误保存成用户偏好。
+  - 这次没有改 `create_watermark_packet`、`add_watermark_to_pdf`、`add_watermark_to_word` 等核心水印函数。
+
 ## 去水印
 - 任务类型：`remove_wm`
 - Word 去水印通过扫描页眉中的艺术字 / 图片水印处理

@@ -1,6 +1,8 @@
 import importlib.util
 import json
+import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -27,14 +29,13 @@ class DummyApp:
 
 def main():
     mod = load_module()
-    root = Path(f"tmp_test_artifacts_{int(time.time())}")
-    root.mkdir(exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="tmp_test_artifacts_", dir=Path.cwd())).resolve()
     dummy = DummyApp()
     results = []
 
     def record(name, ok, detail=""):
         results.append((name, ok, detail))
-        print(json.dumps({"case": name, "ok": ok, "detail": detail}, ensure_ascii=True))
+        print(json.dumps({"case": name, "ok": ok, "detail": detail}, ensure_ascii=True), flush=True)
 
     pdf_src = root / "sample.pdf"
     c = canvas.Canvas(str(pdf_src))
@@ -167,7 +168,9 @@ def main():
     record("audio_convert", s2 == "SUCCESS" and m4a.exists() and m4a.stat().st_size > 0, s2)
 
     failed_cases = [name for name, ok, _ in results if not ok]
-    print(json.dumps({"total": len(results), "failed": failed_cases}, ensure_ascii=True))
+    print(json.dumps({"total": len(results), "failed": failed_cases}, ensure_ascii=True), flush=True)
+    if not failed_cases:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,67 @@
 # 调试状态
 
+## 2026-05-20 批量水印文件名规则 UI 与记忆回归
+- 本轮目标：
+  - 修复 `按文件名规则跳过` 行里的 `留空默认` 提示显示不全。
+  - 让该处设置具备本地记忆功能。
+- 关键修复：
+  - 文件名规则控件改为两行布局，并在水印页布局收紧时保留 56px 高度，避免提示再次被裁切。
+  - 新增 `watermark.filename_skip_rule` 用户偏好，保存 `enabled`、`position`、`marker`。
+  - 保存时机覆盖变量变更防抖、失焦/回车、执行前和关闭前。
+  - 水印执行中临时关闭旧固定跳过开关时，会屏蔽偏好写入，避免把内部状态误保存为用户设置。
+- 新增回归：
+  - `watermark_filename_rule_memory_save`
+  - `watermark_filename_rule_memory_load`
+  - `watermark_filename_rule_hint_layout`
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py smoke_test.py tools\fx_pdf_ocr.py tools\fx_workspace_tools.py tools\generate_fengxi_icon.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：59/59 通过。
+- 改动边界：
+  - 本轮只改加载器 UI/偏好层和测试记忆，不改 `fengxi_runtime.bin`。
+  - 未改 `批量压缩` / `添加水印` 核心业务逻辑。
+
+## 2026-05-20 任务队列功能回归
+- 本轮新增“任务队列 + 历史记录 + 失败重试”：
+  - 底部操作区新增 `加入队列` 与 `队列历史`。
+  - 队列窗口左侧显示等待执行，右侧显示历史与失败重试。
+  - 队列任务保存输入路径、任务类型和参数快照，执行前自动恢复快照。
+  - 历史持久化到用户配置目录的 `queue_history.json`。
+- 新增回归：
+  - `task_queue_snapshot`：验证 PDF 加密模式、密码框和底部队列按钮均能正确快照。
+  - `task_queue_success_history`：验证队列 worker 执行后写入成功历史，并恢复快照参数。
+  - `task_queue_retry_failed`：验证失败历史能重新加入队列。
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py smoke_test.py tools\fx_pdf_ocr.py tools\fx_workspace_tools.py tools\generate_fengxi_icon.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：56/56 通过。
+  - `cmd /c "set FX_NO_PAUSE=1 && package.bat"` 通过。
+  - `dist_release_ascii\fx_toolbox\fx_toolbox.exe` 已生成并打开。
+  - 打包产物 `_internal` 未发现 OCR/onnxruntime 冲突 DLL。
+- 注意：
+  - 队列当前是顺序执行，不做并发。
+  - 失败判定目前是日志关键词 + 异常 + stop_event 的实用版，后续可升级为结构化结果。
+  - 本轮未改 `批量压缩` / `添加水印` 业务逻辑。
+
+## 2026-05-20 全面自检与工程可靠性回归
+- 本轮目标：全面检查项目代码/文件、优化工程架构、debug，并保持稳定区安全。
+- 关键修复：
+  - 修复 `full_debug_test.py` 中快关探针可能触发真实 `os._exit(0)` 的问题，避免全量测试 0 退出但没有最终 JSON 输出。
+  - `smoke_test.py` / `full_debug_test.py` 成功时自动清理本轮新建的项目内 `tmp_*` 测试目录，防止后续 debug 继续制造垃圾目录。
+  - JSON 测试记录改为 `flush=True`，长流程时能稳定看到逐项进度。
+  - GitHub Release zip 上传改为 `curl.exe --data-binary` 并检查 HTTP 状态码，提升大文件资产上传可靠性。
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py smoke_test.py tools\fx_pdf_ocr.py tools\fx_workspace_tools.py tools\generate_fengxi_icon.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：53/53 通过。
+  - `cmd /c "set FX_NO_PAUSE=1 && package.bat"` 通过，生成 `dist_release_ascii\fx_toolbox\fx_toolbox.exe`。
+  - 打包产物 `_internal` 中未发现会和 OCR/onnxruntime 冲突的 `msvcp140*.dll`、`vcruntime140*.dll`、`ucrtbase.dll`、`api-ms-win-crt-*.dll`。
+  - 敏感信息扫描仅命中测试里的假文本 `secret`，未发现 token/真实密钥。
+- 注意：
+  - 本轮没有删除历史 `tmp_*` 目录，只阻止新测试继续留下成功样本。
+  - 旧版 `风兮文件批量处理工具箱2.0.spec`、`package_legacy_backup.bat`、`fx_toolbox_diag.spec` 仍是可清理/归档候选，但本轮未删除。
+  - `批量压缩` 与 `添加水印` 业务逻辑未改。
+
 ## 2026-04-26 侧栏创建阶段加速回归
 - 用户继续反馈：打开软件和切功能时仍希望更快。
 - 新定位：

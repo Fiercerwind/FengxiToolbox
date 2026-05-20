@@ -193,9 +193,35 @@ jobs:
           $uploadUrl = $release.upload_url -replace '\{\?name,label\}$', ''
           $escapedName = [System.Uri]::EscapeDataString($assetName)
 
-          Invoke-WebRequest `
-            -Method Post `
-            -Uri "$uploadUrl?name=$escapedName" `
-            -Headers $headers `
-            -ContentType "application/zip" `
-            -InFile $assetPath | Out-Null
+          $uploadUri = "$uploadUrl?name=$escapedName"
+          $responsePath = "$assetPath.upload-response.json"
+          if (Test-Path $responsePath) {
+            Remove-Item $responsePath -Force
+          }
+
+          $httpStatus = & curl.exe `
+            --silent `
+            --show-error `
+            --location `
+            --request POST `
+            --header "Authorization: Bearer $env:GITHUB_TOKEN" `
+            --header "Accept: application/vnd.github+json" `
+            --header "X-GitHub-Api-Version: 2022-11-28" `
+            --header "User-Agent: FengxiToolbox-Release-Workflow" `
+            --header "Content-Type: application/zip" `
+            --data-binary "@$assetPath" `
+            --write-out "%{http_code}" `
+            --output $responsePath `
+            $uploadUri
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release asset upload failed: curl exited with code $LASTEXITCODE."
+          }
+
+          if ($httpStatus -notin @("200", "201")) {
+            $responseBody = ""
+            if (Test-Path $responsePath) {
+              $responseBody = Get-Content $responsePath -Raw -Encoding UTF8
+            }
+            throw "Release asset upload failed with HTTP $httpStatus. $responseBody"
+          }

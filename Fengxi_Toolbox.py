@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import types
+import time
 import customtkinter
 import pypdf
 import pywinstyles
@@ -222,6 +223,36 @@ INLINE_HELP_SECTIONS = (
     ),
 )
 RESULT_FOLDER_NAME = "【处理完成】结果文件夹"
+QUEUE_HISTORY_LIMIT = 80
+QUEUE_ERROR_MARKERS = (
+    "❌",
+    "🔥",
+    "失败",
+    "错误",
+    "异常",
+    "严重错误",
+    "error",
+    "failed",
+    "traceback",
+)
+QUEUE_TASK_LABELS = {
+    "watermark": "批量水印",
+    "remove_wm": "去除水印",
+    "convert": "格式转换",
+    "audio": "音频工具",
+    "zip": "批量压缩",
+    "pdf": "PDF 工具",
+    "image": "图片工厂",
+    "meta": "属性隐私",
+    "file": "文件管家",
+}
+QUEUE_STATUS_LABELS = {
+    "queued": "等待",
+    "running": "执行中",
+    "success": "完成",
+    "failed": "失败",
+    "stopped": "已停止",
+}
 INLINE_TITLE_ICON_SPECS = {
     "批量去水印": {"icon": "eraser", "size": 20, "color": CONTENT_ICON_PRIMARY},
     "文档格式互转": {"icon": "swap", "size": 20, "color": CONTENT_ICON_PRIMARY},
@@ -1834,11 +1865,14 @@ def _tighten_watermark_tab_layout(app, tab):
                 pass
     if len(right_children) > 11:
         try:
-            right_children[11].configure(height=30)
+            controls_height = 56 if getattr(right_children[11], "_fx_wm_filename_rule_controls", False) else 30
+            right_children[11].configure(height=controls_height)
             right_children[11].pack_propagate(False)
-            right_children[11].pack_configure(fill="x", padx=24, pady=(0, 1))
+            right_children[11].pack_configure(fill="x", padx=24, pady=(0, 2))
             for child in right_children[11].winfo_children():
                 try:
+                    if getattr(right_children[11], "_fx_wm_filename_rule_controls", False):
+                        continue
                     child.configure(height=30)
                 except Exception:
                     pass
@@ -4294,6 +4328,10 @@ def _get_user_pref_file():
     return _get_user_pref_root() / "user_prefs.json"
 
 
+def _get_queue_history_file():
+    return _get_user_pref_root() / "queue_history.json"
+
+
 def _load_user_prefs():
     path = _get_user_pref_file()
     try:
@@ -4341,6 +4379,153 @@ def _save_watermark_text(value):
             prefs.pop("watermark", None)
 
     _save_user_prefs(prefs)
+
+
+def _get_saved_watermark_filename_rule_settings():
+    prefs = _load_user_prefs()
+    watermark_prefs = prefs.get("watermark")
+    if not isinstance(watermark_prefs, dict):
+        return {}
+    settings = watermark_prefs.get("filename_skip_rule")
+    if not isinstance(settings, dict):
+        return {}
+
+    saved = {}
+    if "enabled" in settings:
+        saved["enabled"] = bool(settings.get("enabled"))
+
+    position = settings.get("position")
+    if isinstance(position, str) and position in ("开头", "结尾"):
+        saved["position"] = position
+
+    marker = settings.get("marker")
+    if isinstance(marker, str):
+        saved["marker"] = marker
+    return saved
+
+
+def _save_watermark_filename_rule_settings(app):
+    skip_var = getattr(app, "wm_skip_hyphen_var", None)
+    mode_var = getattr(app, "wm_skip_name_position_var", None)
+    marker_var = getattr(app, "wm_skip_name_text_var", None)
+    if skip_var is None and mode_var is None and marker_var is None:
+        return
+
+    prefs = _load_user_prefs()
+    watermark_prefs = prefs.get("watermark")
+    if not isinstance(watermark_prefs, dict):
+        watermark_prefs = {}
+
+    enabled = False
+    position = "结尾"
+    marker = "-"
+
+    try:
+        if skip_var is not None:
+            enabled = bool(skip_var.get())
+    except Exception:
+        enabled = False
+
+    try:
+        if mode_var is not None:
+            raw_position = str(mode_var.get() or "").strip()
+            if raw_position in ("开头", "结尾"):
+                position = raw_position
+    except Exception:
+        position = "结尾"
+
+    try:
+        if marker_var is not None:
+            marker = str(marker_var.get() or "")
+    except Exception:
+        marker = "-"
+
+    watermark_prefs["filename_skip_rule"] = {
+        "enabled": enabled,
+        "position": position,
+        "marker": marker,
+    }
+    prefs["watermark"] = watermark_prefs
+    _save_user_prefs(prefs)
+
+
+def _flush_watermark_filename_rule_persistence(app):
+    if getattr(app, "_fx_wm_filename_rule_loading", False):
+        return
+    after_id = getattr(app, "_fx_wm_filename_rule_save_after_id", None)
+    if after_id is not None:
+        try:
+            app.after_cancel(after_id)
+        except Exception:
+            pass
+        app._fx_wm_filename_rule_save_after_id = None
+    _save_watermark_filename_rule_settings(app)
+
+
+def _schedule_watermark_filename_rule_persistence(app, delay_ms=300):
+    if getattr(app, "_fx_wm_filename_rule_loading", False):
+        return
+    after_id = getattr(app, "_fx_wm_filename_rule_save_after_id", None)
+    if after_id is not None:
+        try:
+            app.after_cancel(after_id)
+        except Exception:
+            pass
+
+    def persist_later(target=app):
+        target._fx_wm_filename_rule_save_after_id = None
+        _save_watermark_filename_rule_settings(target)
+
+    try:
+        app._fx_wm_filename_rule_save_after_id = app.after(delay_ms, persist_later)
+    except Exception:
+        _flush_watermark_filename_rule_persistence(app)
+
+
+def _install_watermark_filename_rule_memory(app):
+    if getattr(app, "_fx_wm_filename_rule_memory_ready", False):
+        return
+
+    skip_var = getattr(app, "wm_skip_hyphen_var", None)
+    mode_var = getattr(app, "wm_skip_name_position_var", None)
+    marker_var = getattr(app, "wm_skip_name_text_var", None)
+
+    saved = _get_saved_watermark_filename_rule_settings()
+    try:
+        app._fx_wm_filename_rule_loading = True
+        if "enabled" in saved and skip_var is not None:
+            skip_var.set(bool(saved["enabled"]))
+        if "position" in saved and mode_var is not None:
+            mode_var.set(saved["position"])
+        if "marker" in saved and marker_var is not None:
+            marker_var.set(saved["marker"])
+    except Exception as exc:
+        _debug(f"wm_filename_rule_memory:load_error:{exc}")
+    finally:
+        app._fx_wm_filename_rule_loading = False
+
+    def on_var_change(*_args, target=app):
+        _schedule_watermark_filename_rule_persistence(target)
+
+    def on_focus_out(_event=None, target=app):
+        _flush_watermark_filename_rule_persistence(target)
+
+    for var in (skip_var, mode_var, marker_var):
+        try:
+            if var is not None:
+                var.trace_add("write", on_var_change)
+        except Exception:
+            pass
+
+    entry = getattr(app, "wm_skip_name_entry", None)
+    if entry is not None:
+        try:
+            entry.bind("<FocusOut>", on_focus_out, add="+")
+            entry.bind("<Return>", on_focus_out, add="+")
+        except Exception:
+            pass
+
+    app._fx_wm_filename_rule_memory_ready = True
 
 
 def _read_watermark_text_widget(app):
@@ -4452,9 +4637,10 @@ def _patch_watermark_filename_rule_ui():
             controls_parent = getattr(skip_switch, "master", None) if skip_switch is not None else None
             controls_row = customtkinter.CTkFrame(
                 controls_parent if controls_parent is not None else self.tab_wm,
-                height=30,
+                height=56,
                 fg_color="transparent",
             )
+            controls_row._fx_wm_filename_rule_controls = True
             try:
                 controls_row.pack_propagate(False)
             except Exception:
@@ -4465,7 +4651,7 @@ def _patch_watermark_filename_rule_ui():
                     skip_switch.configure(text="按文件名规则跳过")
                 except Exception:
                     pass
-                controls_row.pack(after=skip_switch, fill="x", padx=0, pady=(0, 3))
+                controls_row.pack(after=skip_switch, fill="x", padx=0, pady=(0, 4))
             else:
                 controls_row.grid(row=99, column=0, columnspan=2, sticky="ew", padx=18, pady=(4, 8))
 
@@ -4476,8 +4662,11 @@ def _patch_watermark_filename_rule_ui():
                 combo_style = {}
             option_menu_style = _get_option_menu_style(combo_style)
 
+            fields_row = customtkinter.CTkFrame(controls_row, fg_color="transparent", height=30)
+            fields_row.pack(fill="x", pady=(0, 2))
+
             customtkinter.CTkLabel(
-                controls_row,
+                fields_row,
                 text="匹配位置",
                 text_color=globals().get("COLOR_TEXT_SOFT"),
                 font=customtkinter.CTkFont(size=11),
@@ -4485,29 +4674,32 @@ def _patch_watermark_filename_rule_ui():
             ).pack(side="left", padx=(0, 8))
 
             customtkinter.CTkOptionMenu(
-                controls_row,
+                fields_row,
                 variable=self.wm_skip_name_position_var,
                 values=["结尾", "开头"],
-                width=92,
+                width=82,
                 height=30,
                 **option_menu_style,
             ).pack(side="left", padx=(0, 8))
 
-            customtkinter.CTkEntry(
-                controls_row,
-                width=150,
+            self.wm_skip_name_entry = customtkinter.CTkEntry(
+                fields_row,
+                width=126,
                 height=30,
                 textvariable=self.wm_skip_name_text_var,
                 placeholder_text="-",
-            ).pack(side="left", padx=(0, 8))
+            )
+            self.wm_skip_name_entry.pack(side="left", fill="x", expand=True, padx=(0, 0))
 
             customtkinter.CTkLabel(
                 controls_row,
-                text="留空默认 -",
+                text="留空默认 “-”，可填写任意开头或结尾字符",
                 text_color=globals().get("COLOR_TEXT_SOFT"),
                 font=customtkinter.CTkFont(size=11),
-                height=30,
-            ).pack(side="left")
+                height=18,
+                anchor="w",
+            ).pack(anchor="w", fill="x")
+            _install_watermark_filename_rule_memory(self)
         except Exception as exc:
             _debug(f"patch_watermark_filename_rule:init_ui_error:{exc}")
         self._fx_wm_filename_rule_ui_ready = True
@@ -4550,6 +4742,11 @@ def _patch_watermark_filename_rule_ui():
         if task_type != "watermark":
             return original_run_process(self, input_folder, task_type)
 
+        try:
+            _flush_watermark_filename_rule_persistence(self)
+        except Exception as exc:
+            _debug(f"patch_watermark_filename_rule:flush_before_run_error:{exc}")
+
         rule = _get_watermark_filename_rule(self)
         if not rule:
             return original_run_process(self, input_folder, task_type)
@@ -4558,10 +4755,12 @@ def _patch_watermark_filename_rule_ui():
         previous_runtime_rule = getattr(self, "_fx_wm_filename_rule_runtime", None)
         previous_skip_value = None
         restore_skip_value = False
+        previous_rule_loading = getattr(self, "_fx_wm_filename_rule_loading", False)
         try:
             self._fx_wm_filename_rule_runtime = rule
             if skip_var is not None:
                 try:
+                    self._fx_wm_filename_rule_loading = True
                     previous_skip_value = skip_var.get()
                     skip_var.set(False)
                     restore_skip_value = True
@@ -4575,6 +4774,7 @@ def _patch_watermark_filename_rule_ui():
                     skip_var.set(previous_skip_value)
                 except Exception:
                     pass
+            self._fx_wm_filename_rule_loading = previous_rule_loading
 
     patched_init_watermark_ui.__fx_watermark_filename_rule_patch__ = True
     patched_collect_input_files.__fx_watermark_filename_rule_patch__ = True
@@ -4712,6 +4912,808 @@ def _patch_remove_wm_pdf_fallback():
 _patch_remove_wm_pdf_fallback()
 
 
+def _make_queue_task_id():
+    return f"task_{int(time.time() * 1000)}_{os.getpid()}"
+
+
+def _format_queue_time(timestamp=None):
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(timestamp or time.time())))
+    except Exception:
+        return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _safe_widget_get(widget):
+    try:
+        if isinstance(widget, customtkinter.CTkTextbox):
+            return widget.get("1.0", "end-1c")
+        if hasattr(widget, "get"):
+            return widget.get()
+    except Exception:
+        return None
+    return None
+
+
+def _safe_widget_set(widget, value):
+    try:
+        if isinstance(widget, customtkinter.CTkTextbox):
+            widget.delete("1.0", "end")
+            widget.insert("1.0", str(value or ""))
+            return True
+        if isinstance(widget, customtkinter.CTkEntry):
+            widget.delete(0, "end")
+            widget.insert(0, str(value or ""))
+            return True
+        if hasattr(widget, "set"):
+            widget.set(value)
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _queue_snapshot_app_state(app, task_type):
+    variables = {}
+    widgets = {}
+    try:
+        _ensure_lazy_tab_initialized(app, task_type)
+    except Exception as exc:
+        _debug(f"queue:snapshot_lazy_error:{task_type}:{exc}")
+
+    for name, value in list(vars(app).items()):
+        try:
+            if isinstance(value, tkinter.Variable):
+                variables[name] = value.get()
+        except Exception:
+            pass
+        try:
+            if isinstance(
+                value,
+                (
+                    customtkinter.CTkEntry,
+                    customtkinter.CTkTextbox,
+                    customtkinter.CTkComboBox,
+                    customtkinter.CTkOptionMenu,
+                ),
+            ):
+                widget_value = _safe_widget_get(value)
+                if widget_value is not None:
+                    widgets[name] = widget_value
+        except Exception:
+            pass
+    return {"variables": variables, "widgets": widgets}
+
+
+def _queue_restore_app_state(app, task):
+    task_type = task.get("task_type")
+    if task_type:
+        try:
+            _ensure_lazy_tab_initialized(app, task_type)
+        except Exception as exc:
+            _debug(f"queue:restore_lazy_error:{task_type}:{exc}")
+    snapshot = task.get("snapshot") if isinstance(task, dict) else {}
+    if not isinstance(snapshot, dict):
+        return
+    variables = snapshot.get("variables") if isinstance(snapshot.get("variables"), dict) else {}
+    widgets = snapshot.get("widgets") if isinstance(snapshot.get("widgets"), dict) else {}
+    for name, value in variables.items():
+        try:
+            var = getattr(app, name, None)
+            if isinstance(var, tkinter.Variable):
+                var.set(value)
+        except Exception:
+            pass
+    for name, value in widgets.items():
+        try:
+            widget = getattr(app, name, None)
+            _safe_widget_set(widget, value)
+        except Exception:
+            pass
+    try:
+        if task.get("input"):
+            app.input_path.set(task.get("input"))
+    except Exception:
+        pass
+    if task_type:
+        try:
+            app.current_task = task_type
+        except Exception:
+            pass
+
+
+def _queue_describe_task(app, task_type, input_path):
+    label = QUEUE_TASK_LABELS.get(task_type, task_type or "未知任务")
+    name = os.path.basename(str(input_path or "").rstrip("\\/")) or str(input_path or "未选择路径")
+    detail = ""
+    try:
+        if task_type == "pdf" and getattr(app, "pdf_mode_var", None) is not None:
+            detail = app.pdf_mode_var.get()
+        elif task_type == "image" and getattr(app, "img_mode_var", None) is not None:
+            detail = app.img_mode_var.get()
+        elif task_type == "zip" and getattr(app, "zip_mode_var", None) is not None:
+            detail = app.zip_mode_var.get()
+        elif task_type == "convert" and getattr(app, "cv_mode", None) is not None:
+            detail = app.cv_mode.get()
+        elif task_type == "file" and getattr(app, "file_mode_var", None) is not None:
+            detail = app.file_mode_var.get()
+        elif task_type == "watermark":
+            detail = "add"
+        elif task_type == "remove_wm":
+            detail = "remove"
+    except Exception:
+        detail = ""
+    suffix = f" · {detail}" if detail else ""
+    return f"{label}{suffix} · {name}"
+
+
+def _load_queue_history():
+    path = _get_queue_history_file()
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+    except Exception as exc:
+        _debug(f"queue:history_load_error:{exc}")
+    return []
+
+
+def _save_queue_history(entries):
+    path = _get_queue_history_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        safe_entries = list(entries or [])[-QUEUE_HISTORY_LIMIT:]
+        path.write_text(json.dumps(safe_entries, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        _debug(f"queue:history_save_error:{exc}")
+
+
+def _normalize_queue_history_entry(task):
+    entry = dict(task or {})
+    entry.pop("status_var", None)
+    entry.pop("row", None)
+    entry.pop("action_button", None)
+    entry.pop("index_label", None)
+    entry.pop("retry_source_id", None)
+    return entry
+
+
+def _append_queue_history(app, task):
+    history = getattr(app, "_fx_task_history", None)
+    if history is None:
+        history = _load_queue_history()
+        app._fx_task_history = history
+    history.append(_normalize_queue_history_entry(task))
+    if len(history) > QUEUE_HISTORY_LIMIT:
+        del history[:-QUEUE_HISTORY_LIMIT]
+    _save_queue_history(history)
+
+
+def _queue_status_text(status):
+    return QUEUE_STATUS_LABELS.get(status, status or "")
+
+
+def _queue_status_color(status):
+    if status == "success":
+        return "#A7D39B"
+    if status == "failed":
+        return "#F0A6A6"
+    if status == "running":
+        return "#F6D28B"
+    if status == "stopped":
+        return "#B5C0CC"
+    return globals().get("COLOR_TEXT_SOFT", "#B2C0C8")
+
+
+def _queue_set_task_status(app, task, status, detail=""):
+    task["status"] = status
+    task["finished_at"] = time.time() if status in {"success", "failed", "stopped"} else task.get("finished_at")
+    if detail:
+        task["detail"] = str(detail)
+    status_var = task.get("status_var")
+    if status_var is not None:
+        try:
+            status_var.set(_queue_status_text(status))
+        except Exception:
+            pass
+    row = task.get("row")
+    if row is not None:
+        try:
+            for child in row.winfo_children():
+                if isinstance(child, customtkinter.CTkLabel) and getattr(child, "_fx_queue_status_label", False):
+                    child.configure(text_color=_queue_status_color(status))
+        except Exception:
+            pass
+    _refresh_queue_panel(app)
+
+
+def _queue_task_had_errors(task):
+    if task.get("exception"):
+        return True
+    logs = task.get("logs") or []
+    if getattr(task.get("app", None), "stop_event", False):
+        return True
+    joined = "\n".join(str(item) for item in logs).lower()
+    return any(marker.lower() in joined for marker in QUEUE_ERROR_MARKERS)
+
+
+def _queue_capture_task_logs(app, task):
+    original_log = getattr(app, "log", None)
+    if not callable(original_log):
+        return None
+
+    def patched_log(message, *args, **kwargs):
+        try:
+            task.setdefault("logs", []).append(str(message))
+        except Exception:
+            pass
+        return original_log(message, *args, **kwargs)
+
+    app.log = patched_log
+    return original_log
+
+
+def _queue_restore_task_logs(app, original_log):
+    if original_log is not None:
+        try:
+            app.log = original_log
+        except Exception:
+            pass
+
+
+def _queue_build_task(app, input_path=None, task_type=None, retry_source=None):
+    normalized_input = _normalize_input_path_value(input_path if input_path is not None else app.input_path.get())
+    task_type = task_type or getattr(app, "current_task", "")
+    if not normalized_input:
+        raise ValueError("请先选择文件或文件夹")
+    if not os.path.exists(normalized_input):
+        raise ValueError(f"路径不存在: {normalized_input}")
+    if task_type == "help":
+        raise ValueError("使用教程不能加入任务队列")
+    snapshot = retry_source.get("snapshot") if isinstance(retry_source, dict) else None
+    if not isinstance(snapshot, dict):
+        snapshot = _queue_snapshot_app_state(app, task_type)
+    task = {
+        "id": _make_queue_task_id(),
+        "input": normalized_input,
+        "task_type": task_type,
+        "title": retry_source.get("title") if isinstance(retry_source, dict) else _queue_describe_task(app, task_type, normalized_input),
+        "snapshot": snapshot,
+        "status": "queued",
+        "created_at": time.time(),
+        "started_at": None,
+        "finished_at": None,
+        "detail": "",
+        "logs": [],
+    }
+    if isinstance(retry_source, dict):
+        task["retry_source_id"] = retry_source.get("id")
+    return task
+
+
+def _ensure_queue_state(app):
+    if not hasattr(app, "_fx_task_queue"):
+        app._fx_task_queue = []
+    if not hasattr(app, "_fx_task_history"):
+        app._fx_task_history = _load_queue_history()
+    if not hasattr(app, "_fx_task_queue_running"):
+        app._fx_task_queue_running = False
+    if not hasattr(app, "_fx_queue_window"):
+        app._fx_queue_window = None
+
+
+def _refresh_queue_status_summary(app):
+    summary_var = getattr(app, "_fx_queue_summary_var", None)
+    if summary_var is None:
+        return
+    try:
+        queue = getattr(app, "_fx_task_queue", [])
+        running = sum(1 for item in queue if item.get("status") == "running")
+        queued = sum(1 for item in queue if item.get("status") == "queued")
+        failed = sum(1 for item in getattr(app, "_fx_task_history", []) if item.get("status") == "failed")
+        if running:
+            summary = f"队列执行中 · 等待 {queued} · 可重试失败 {failed}"
+        elif queued:
+            summary = f"队列待执行 {queued} 项 · 可重试失败 {failed}"
+        else:
+            summary = f"队列空闲 · 可重试失败 {failed}"
+        summary_var.set(summary)
+    except Exception:
+        pass
+
+
+def _refresh_queue_panel(app):
+    _refresh_queue_status_summary(app)
+    panel = getattr(app, "_fx_queue_list_frame", None)
+    if panel is None:
+        return
+    try:
+        for child in panel.winfo_children():
+            child.destroy()
+        queue = getattr(app, "_fx_task_queue", [])
+        if not queue:
+            customtkinter.CTkLabel(
+                panel,
+                text="当前队列为空。配置好功能后点“加入队列”，就可以批量排队执行。",
+                text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+                font=customtkinter.CTkFont(size=12),
+                justify="left",
+            ).pack(anchor="w", padx=16, pady=14)
+            return
+        for index, task in enumerate(queue, 1):
+            row = customtkinter.CTkFrame(panel, fg_color=globals().get("COLOR_CARD_ALT", "#303030"), corner_radius=10)
+            row.pack(fill="x", padx=10, pady=(8 if index == 1 else 4, 4))
+            task["row"] = row
+            row.grid_columnconfigure(1, weight=1)
+            customtkinter.CTkLabel(
+                row,
+                text=f"{index:02d}",
+                text_color="#F0D39A",
+                font=customtkinter.CTkFont(size=12, weight="bold"),
+                width=34,
+            ).grid(row=0, column=0, rowspan=2, padx=(10, 6), pady=8, sticky="n")
+            customtkinter.CTkLabel(
+                row,
+                text=task.get("title", ""),
+                text_color=globals().get("COLOR_TEXT", "#E6EEF2"),
+                font=customtkinter.CTkFont(size=12, weight="bold"),
+                anchor="w",
+            ).grid(row=0, column=1, padx=4, pady=(8, 1), sticky="ew")
+            customtkinter.CTkLabel(
+                row,
+                text=task.get("input", ""),
+                text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+                font=customtkinter.CTkFont(size=10),
+                anchor="w",
+            ).grid(row=1, column=1, padx=4, pady=(0, 8), sticky="ew")
+            status_label = customtkinter.CTkLabel(
+                row,
+                text=_queue_status_text(task.get("status")),
+                text_color=_queue_status_color(task.get("status")),
+                font=customtkinter.CTkFont(size=12, weight="bold"),
+                width=64,
+            )
+            status_label._fx_queue_status_label = True
+            status_label.grid(row=0, column=2, rowspan=2, padx=(6, 10), pady=8, sticky="e")
+    except Exception as exc:
+        _debug(f"queue:refresh_panel_error:{exc}")
+
+
+def _refresh_history_panel(app):
+    panel = getattr(app, "_fx_history_list_frame", None)
+    if panel is None:
+        return
+    try:
+        for child in panel.winfo_children():
+            child.destroy()
+        history = list(getattr(app, "_fx_task_history", []) or [])
+        if not history:
+            customtkinter.CTkLabel(
+                panel,
+                text="暂无历史记录。完成队列任务后会自动记录到这里。",
+                text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+                font=customtkinter.CTkFont(size=12),
+                justify="left",
+            ).pack(anchor="w", padx=16, pady=14)
+            return
+        for item in reversed(history[-QUEUE_HISTORY_LIMIT:]):
+            row = customtkinter.CTkFrame(panel, fg_color=globals().get("COLOR_CARD_ALT", "#303030"), corner_radius=10)
+            row.pack(fill="x", padx=10, pady=(6, 4))
+            row.grid_columnconfigure(0, weight=1)
+            top = customtkinter.CTkFrame(row, fg_color="transparent")
+            top.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 2))
+            top.grid_columnconfigure(0, weight=1)
+            customtkinter.CTkLabel(
+                top,
+                text=item.get("title", ""),
+                text_color=globals().get("COLOR_TEXT", "#E6EEF2"),
+                font=customtkinter.CTkFont(size=12, weight="bold"),
+                anchor="w",
+            ).grid(row=0, column=0, sticky="ew")
+            customtkinter.CTkLabel(
+                top,
+                text=_queue_status_text(item.get("status")),
+                text_color=_queue_status_color(item.get("status")),
+                font=customtkinter.CTkFont(size=12, weight="bold"),
+                width=58,
+            ).grid(row=0, column=1, padx=(8, 0), sticky="e")
+            detail_lines = [
+                item.get("input", ""),
+                f"时间：{_format_queue_time(item.get('finished_at') or item.get('created_at'))}",
+            ]
+            if item.get("detail"):
+                detail_lines.append(str(item.get("detail"))[:160])
+            customtkinter.CTkLabel(
+                row,
+                text="\n".join(line for line in detail_lines if line),
+                text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+                font=customtkinter.CTkFont(size=10),
+                justify="left",
+                anchor="w",
+            ).grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
+            if item.get("status") == "failed":
+                customtkinter.CTkButton(
+                    row,
+                    text="重试",
+                    command=lambda source=item: _queue_retry_history_task(app, source),
+                    height=30,
+                    width=72,
+                    corner_radius=8,
+                    fg_color="#6D4F3B",
+                    hover_color="#7C5B43",
+                    text_color="#FFF6E6",
+                ).grid(row=0, column=1, rowspan=2, padx=(0, 10), pady=8, sticky="e")
+    except Exception as exc:
+        _debug(f"queue:refresh_history_error:{exc}")
+
+
+def _show_task_queue_window(app):
+    _ensure_queue_state(app)
+    window = getattr(app, "_fx_queue_window", None)
+    try:
+        if window is not None and window.winfo_exists():
+            window.deiconify()
+            window.lift()
+            _refresh_queue_panel(app)
+            _refresh_history_panel(app)
+            return window
+    except Exception:
+        pass
+
+    window = customtkinter.CTkToplevel(app)
+    app._fx_queue_window = window
+    window.title("任务队列与历史记录")
+    window.geometry("860x620")
+    window.minsize(760, 520)
+    try:
+        window.configure(fg_color=globals().get("COLOR_CARD_ALT", "#303030"))
+    except Exception:
+        pass
+    window.grid_columnconfigure(0, weight=1)
+    window.grid_columnconfigure(1, weight=1)
+    window.grid_rowconfigure(1, weight=1)
+
+    header = customtkinter.CTkFrame(window, fg_color="transparent")
+    header.grid(row=0, column=0, columnspan=2, sticky="ew", padx=18, pady=(16, 8))
+    header.grid_columnconfigure(0, weight=1)
+    customtkinter.CTkLabel(
+        header,
+        text="任务队列",
+        text_color=globals().get("COLOR_TEXT", "#E6EEF2"),
+        font=customtkinter.CTkFont(size=20, weight="bold"),
+        anchor="w",
+    ).grid(row=0, column=0, sticky="w")
+    customtkinter.CTkLabel(
+        header,
+        textvariable=app._fx_queue_summary_var,
+        text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+        font=customtkinter.CTkFont(size=12),
+        anchor="e",
+    ).grid(row=0, column=1, sticky="e", padx=(16, 0))
+
+    queue_card = customtkinter.CTkFrame(window, fg_color=globals().get("COLOR_CARD", "#2B2B2B"), corner_radius=14, border_width=1, border_color=globals().get("COLOR_BORDER", "#3A3A3A"))
+    queue_card.grid(row=1, column=0, sticky="nsew", padx=(18, 8), pady=(0, 16))
+    queue_card.grid_rowconfigure(1, weight=1)
+    queue_card.grid_columnconfigure(0, weight=1)
+    customtkinter.CTkLabel(
+        queue_card,
+        text="等待执行",
+        text_color=globals().get("COLOR_TEXT", "#E6EEF2"),
+        font=customtkinter.CTkFont(size=14, weight="bold"),
+        anchor="w",
+    ).grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
+    app._fx_queue_list_frame = customtkinter.CTkScrollableFrame(queue_card, fg_color="transparent")
+    app._fx_queue_list_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+    queue_actions = customtkinter.CTkFrame(queue_card, fg_color="transparent")
+    queue_actions.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 12))
+    queue_actions.grid_columnconfigure(0, weight=1)
+    customtkinter.CTkButton(
+        queue_actions,
+        text="开始队列",
+        command=lambda target=app: _start_task_queue(target),
+        height=34,
+        corner_radius=10,
+        fg_color="#7A695B",
+        hover_color="#8B7867",
+        text_color="#FFFFFF",
+    ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+    customtkinter.CTkButton(
+        queue_actions,
+        text="清空等待",
+        command=lambda target=app: _clear_queued_tasks(target),
+        height=34,
+        width=92,
+        corner_radius=10,
+        fg_color="transparent",
+        hover_color="#303030",
+        border_width=1,
+        border_color="#566274",
+        text_color="#E8EDF5",
+    ).grid(row=0, column=1, sticky="e")
+
+    history_card = customtkinter.CTkFrame(window, fg_color=globals().get("COLOR_CARD", "#2B2B2B"), corner_radius=14, border_width=1, border_color=globals().get("COLOR_BORDER", "#3A3A3A"))
+    history_card.grid(row=1, column=1, sticky="nsew", padx=(8, 18), pady=(0, 16))
+    history_card.grid_rowconfigure(1, weight=1)
+    history_card.grid_columnconfigure(0, weight=1)
+    customtkinter.CTkLabel(
+        history_card,
+        text="历史与失败重试",
+        text_color=globals().get("COLOR_TEXT", "#E6EEF2"),
+        font=customtkinter.CTkFont(size=14, weight="bold"),
+        anchor="w",
+    ).grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
+    app._fx_history_list_frame = customtkinter.CTkScrollableFrame(history_card, fg_color="transparent")
+    app._fx_history_list_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+    history_actions = customtkinter.CTkFrame(history_card, fg_color="transparent")
+    history_actions.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 12))
+    history_actions.grid_columnconfigure(0, weight=1)
+    customtkinter.CTkButton(
+        history_actions,
+        text="只重试失败",
+        command=lambda target=app: _queue_retry_failed_history(target),
+        height=34,
+        corner_radius=10,
+        fg_color="#6D4F3B",
+        hover_color="#7C5B43",
+        text_color="#FFF6E6",
+    ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+    customtkinter.CTkButton(
+        history_actions,
+        text="刷新",
+        command=lambda target=app: (_refresh_queue_panel(target), _refresh_history_panel(target)),
+        height=34,
+        width=82,
+        corner_radius=10,
+        fg_color="transparent",
+        hover_color="#303030",
+        border_width=1,
+        border_color="#566274",
+        text_color="#E8EDF5",
+    ).grid(row=0, column=1, sticky="e")
+
+    def on_close():
+        try:
+            window.withdraw()
+        except Exception:
+            pass
+
+    window.protocol("WM_DELETE_WINDOW", on_close)
+    _refresh_queue_panel(app)
+    _refresh_history_panel(app)
+    return window
+
+
+def _queue_add_current_task(app, start_after_add=False):
+    _ensure_queue_state(app)
+    try:
+        task = _queue_build_task(app)
+    except Exception as exc:
+        try:
+            app.log(f"❌ [队列] 无法加入队列：{exc}")
+            tkinter.messagebox.showwarning("任务队列", str(exc))
+        except Exception:
+            pass
+        return None
+    app._fx_task_queue.append(task)
+    try:
+        app.log(f"📌 [队列] 已加入：{task['title']}")
+    except Exception:
+        pass
+    _refresh_queue_panel(app)
+    if start_after_add:
+        _start_task_queue(app)
+    return task
+
+
+def _clear_queued_tasks(app):
+    _ensure_queue_state(app)
+    if getattr(app, "_fx_task_queue_running", False):
+        try:
+            app.log("ℹ️ [队列] 正在执行时不能清空等待项。")
+        except Exception:
+            pass
+        return
+    app._fx_task_queue = [item for item in app._fx_task_queue if item.get("status") == "running"]
+    _refresh_queue_panel(app)
+
+
+def _queue_retry_history_task(app, source):
+    _ensure_queue_state(app)
+    try:
+        task = _queue_build_task(app, source.get("input"), source.get("task_type"), retry_source=source)
+        app._fx_task_queue.append(task)
+        app.log(f"🔁 [队列] 已加入重试：{task['title']}")
+    except Exception as exc:
+        try:
+            app.log(f"❌ [队列] 重试失败：{exc}")
+        except Exception:
+            pass
+    _refresh_queue_panel(app)
+
+
+def _queue_retry_failed_history(app):
+    _ensure_queue_state(app)
+    failed = [item for item in getattr(app, "_fx_task_history", []) if item.get("status") == "failed"]
+    if not failed:
+        try:
+            app.log("ℹ️ [队列] 暂无失败历史可重试。")
+        except Exception:
+            pass
+        return
+    for item in failed:
+        _queue_retry_history_task(app, item)
+
+
+def _run_task_queue_worker(app):
+    _ensure_queue_state(app)
+    app._fx_task_queue_running = True
+    try:
+        while True:
+            task = next((item for item in app._fx_task_queue if item.get("status") == "queued"), None)
+            if task is None:
+                break
+            task["started_at"] = time.time()
+            task["logs"] = []
+            _queue_set_task_status(app, task, "running")
+            try:
+                app.after(0, lambda target=app, current=task: _queue_restore_app_state(target, current))
+            except Exception:
+                _queue_restore_app_state(app, task)
+            time.sleep(0.05)
+            original_log = _queue_capture_task_logs(app, task)
+            try:
+                app.stop_event = False
+                app.is_running = True
+                try:
+                    app.progress_bar.set(0)
+                except Exception:
+                    pass
+                app.run_process(task.get("input"), task.get("task_type"))
+                if getattr(app, "stop_event", False):
+                    _queue_set_task_status(app, task, "stopped", "用户停止")
+                elif _queue_task_had_errors(task):
+                    _queue_set_task_status(app, task, "failed", "执行日志中包含失败或错误信息")
+                else:
+                    _queue_set_task_status(app, task, "success", "执行完成")
+            except Exception as exc:
+                task["exception"] = str(exc)
+                _queue_set_task_status(app, task, "failed", exc)
+                try:
+                    app.log(f"🔥 [队列] {task.get('title', '')} 执行异常：{exc}")
+                except Exception:
+                    pass
+            finally:
+                _queue_restore_task_logs(app, original_log)
+                try:
+                    app.is_running = False
+                except Exception:
+                    pass
+                _append_queue_history(app, task)
+                try:
+                    app._fx_task_queue = [item for item in app._fx_task_queue if item.get("id") != task.get("id")]
+                except Exception:
+                    pass
+                _refresh_queue_panel(app)
+                _refresh_history_panel(app)
+        try:
+            app.log("✅ [队列] 队列执行完成。")
+        except Exception:
+            pass
+    finally:
+        app._fx_task_queue_running = False
+        try:
+            app.reset_ui()
+        except Exception:
+            pass
+        _refresh_queue_panel(app)
+        _refresh_history_panel(app)
+
+
+def _start_task_queue(app):
+    _ensure_queue_state(app)
+    if getattr(app, "_fx_task_queue_running", False):
+        try:
+            app.log("ℹ️ [队列] 队列已经在执行中。")
+        except Exception:
+            pass
+        return
+    if not any(item.get("status") == "queued" for item in app._fx_task_queue):
+        try:
+            app.log("ℹ️ [队列] 当前没有等待执行的任务。")
+        except Exception:
+            pass
+        return
+    try:
+        app.log("🚦 [队列] 开始顺序执行任务。")
+    except Exception:
+        pass
+    threading.Thread(target=_run_task_queue_worker, args=(app,), daemon=True).start()
+
+
+def _install_queue_bottom_actions(app):
+    _ensure_queue_state(app)
+    if getattr(app, "_fx_queue_actions_ready", False):
+        return
+    action_row = None
+    try:
+        for child in app.bottom_bar.winfo_children():
+            if isinstance(child, customtkinter.CTkFrame) and child.winfo_children():
+                action_row = child
+                break
+    except Exception:
+        action_row = None
+    if action_row is None:
+        return
+    app._fx_queue_summary_var = tkinter.StringVar(value="")
+    try:
+        app.btn_queue_add = customtkinter.CTkButton(
+            action_row,
+            text="加入队列",
+            command=lambda target=app: _queue_add_current_task(target),
+            height=40,
+            width=104,
+            corner_radius=10,
+            fg_color="transparent",
+            hover_color="#303030",
+            border_width=1,
+            border_color="#B89352",
+            text_color="#F6E2B2",
+        )
+        app.btn_queue_add.pack(side="left", padx=(0, 12))
+        app.btn_queue_panel = customtkinter.CTkButton(
+            action_row,
+            text="队列历史",
+            command=lambda target=app: _show_task_queue_window(target),
+            height=40,
+            width=104,
+            corner_radius=10,
+            fg_color="transparent",
+            hover_color="#303030",
+            border_width=1,
+            border_color="#566274",
+            text_color="#E8EDF5",
+        )
+        app.btn_queue_panel.pack(side="left", padx=(0, 18))
+    except Exception as exc:
+        _debug(f"queue:bottom_actions_error:{exc}")
+        return
+    app._fx_queue_actions_ready = True
+    _refresh_queue_status_summary(app)
+
+
+def _patch_task_queue_history():
+    try:
+        original_setup_main_area = FengxiToolboxApp.setup_main_area
+        original_on_start_click = FengxiToolboxApp.on_start_click
+    except Exception as exc:
+        _debug(f"queue:patch_missing:{exc}")
+        return
+    if getattr(original_setup_main_area, "__fx_queue_history_patch__", False):
+        return
+
+    def patched_setup_main_area(self, *args, **kwargs):
+        result = original_setup_main_area(self, *args, **kwargs)
+        try:
+            _install_queue_bottom_actions(self)
+        except Exception as exc:
+            _debug(f"queue:install_after_main_area_error:{exc}")
+        return result
+
+    def patched_on_start_click(self):
+        if getattr(self, "_fx_start_via_queue", False):
+            return original_on_start_click(self)
+        return original_on_start_click(self)
+
+    patched_setup_main_area.__fx_queue_history_patch__ = True
+    patched_on_start_click.__fx_queue_history_patch__ = True
+    FengxiToolboxApp.setup_main_area = patched_setup_main_area
+    FengxiToolboxApp.on_start_click = patched_on_start_click
+    _debug("queue:patch_installed")
+
+
+_patch_task_queue_history()
+
+
 def _patch_runtime_progress_reporting():
     try:
         original_run_process = FengxiToolboxApp.run_process
@@ -4833,6 +5835,10 @@ def _request_fast_close(app):
     except Exception as exc:
         _debug(f"fast_close:wm_text_flush_error:{exc}")
     try:
+        _flush_watermark_filename_rule_persistence(app)
+    except Exception as exc:
+        _debug(f"fast_close:wm_filename_rule_flush_error:{exc}")
+    try:
         app.stop_event = True
     except Exception:
         pass
@@ -4872,12 +5878,13 @@ def _request_fast_close(app):
         except Exception:
             pass
 
-    try:
-        timer = threading.Timer(0.9, force_exit_if_needed)
-        timer.daemon = True
-        timer.start()
-    except Exception as exc:
-        _debug(f"fast_close:force_timer_error:{exc}")
+    if not getattr(app, "_fx_disable_fast_close_force_exit", False):
+        try:
+            timer = threading.Timer(0.9, force_exit_if_needed)
+            timer.daemon = True
+            timer.start()
+        except Exception as exc:
+            _debug(f"fast_close:force_timer_error:{exc}")
 
     try:
         app.after_idle(finish_destroy)

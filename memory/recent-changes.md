@@ -1,5 +1,20 @@
 # 最近变更
 
+## 2026-05-20 18:28:52 | watermark
+- 摘要：批量水印文件名跳过规则提示与本地记忆修复
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/categories/watermark-and-remove.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：文件名规则控件改为两行布局，完整显示留空默认提示；新增 watermark.filename_skip_rule 用户偏好，持久化开关、开头/结尾和 marker；新增 save/load/hint layout 三条回归；验证 py_compile、smoke_test 14/14、full_debug_test 59/59。
+
+## 2026-05-20 17:15:54 | runtime
+- 摘要：新增任务队列、历史记录与失败重试
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：底部新增加入队列和队列历史入口；队列任务保存输入路径、任务类型与参数快照，顺序调用现有 run_process 执行；历史持久化到用户配置目录 queue_history.json，失败历史可重新入队重试；新增 task_queue_snapshot、task_queue_success_history、task_queue_retry_failed 回归；验证 smoke_test 14/14、full_debug_test 56/56、package.bat 打包通过并打开 EXE。
+
+## 2026-05-20 16:17:35 | release
+- 摘要：全量自检输出与 Release 上传链路稳健化
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, smoke_test.py, .github/workflows/publish-release.yml, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：修复快关探针导致全量测试提前退出并丢失最终 JSON 的问题；smoke/full_debug 改为项目内临时目录并在成功后自动清理；Release 资产上传改用 curl.exe --data-binary 并校验 HTTP 状态码；验证 smoke_test 14/14、full_debug_test 53/53、package.bat 通过。
+
 ## 2026-05-10 00:05:23 | release
 - 摘要：公开仓库已清理隐私信息，并为 v4.0.0 Release 补传 Windows 打包资产
 - 文件：README.md, README.txt, agent.md, memory.md, memory/load-order.md, memory/constraints.md, LICENSE, NOTICE, memory/categories/repo-sync-release.md, dist_release_ascii/fengxi-toolbox-4.0.0-windows.zip
