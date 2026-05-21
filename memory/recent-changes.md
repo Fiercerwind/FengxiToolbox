@@ -1,5 +1,55 @@
 # 最近变更
 
+## 2026-05-21 19:51:45 | runtime
+- 摘要：subwindow app icon and history failure filter
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：Applied the Fengxi app icon to child windows including the unified file/folder picker, task history detail dialog, and queue/history window so subpages no longer fall back to generic icons. Continued the unfinished next step by wiring failure-category filtering into task history with a new failure filter option menu, matching filter state, and search support for classified failure reasons. Added regression checks for path-missing failure filtering through both direct helper filtering and app-bound filter state. Validation: py_compile passed, smoke_test 14/14, full_debug_test 83/83.
+
+## 2026-05-21 19:08:52 | runtime
+- 摘要：history failure classification preview
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：Added a lightweight failure classification layer for task history entries so failed rows can surface path-missing, permission, timeout, dependency, partial-failure, and generic failure hints. The history search blob now includes failure kind and reason, and the list view can display the failure label alongside the existing detail lines. Added regression checks for path-missing classification and search-blob inclusion. Validation: py_compile passed, smoke_test 14/14, full_debug_test 81/81.
+
+## 2026-05-21 18:39:59 | runtime
+- 摘要：history detail failure grouping and highlighting
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：Extended the task history detail dialog with explicit failure sections: failure overview, failure reason, failed items, and key failure logs. Added text-tag highlighting for failed headers, failure text, failed-item lines, and error logs inside the history detail textbox. Added regression checks for grouped failure text and textbox tag ranges. Validation: py_compile passed, smoke_test 14/14, full_debug_test 79/79.
+
+## 2026-05-21 18:20:07 | runtime
+- 摘要：history detail open output location
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：Added an 打开位置 action to the task history detail dialog. It opens the current entry's best available target on Windows, preferring output_root, then the first output file's parent, then the input's parent directory. Added regression checks for opening output_root, falling back from an output file to its parent directory, and rejecting empty targets.
+
+## 2026-05-21 17:02:05 | runtime
+- 摘要：history detail log export
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：Added a 导出日志 action to the task history detail dialog. It exports a plain text snapshot of the current entry's title, task, status, input, timestamps, and log lines, using a safe default filename and a clean empty-log fallback. Added regression checks for filename safety, successful log export, and empty-log handling.
+
+## 2026-05-21 16:52:47 | runtime
+- 摘要：history detail export
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：Added a 导出结果 action to the task history detail dialog, exporting the current entry's structured task_result JSON with a safe default filename. Added regression checks for filename safety, export success, and empty-entry rejection. Also made the full debug test tolerate a PowerPoint COM Close() hiccup during teardown so the suite finishes cleanly.
+
+## 2026-05-21 16:13:39 | runtime
+- 摘要：任务历史增加详情查看入口
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：历史列表新增详情按钮，可查看结构化结果、失败项、输出目录、日志片段与原始 JSON；补充 detail_text 回归。
+
+## 2026-05-21 16:06:12 | runtime
+- 摘要：失败重试支持失败项子集回放
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：历史重试优先解析 failed_items，成功生成时可仅重放失败子集；无法解析时回退整任务重试，并清理临时 staging。
+
+## 2026-05-21 15:57:19 | runtime
+- 摘要：任务历史增加筛选与回放入口
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：任务队列历史窗口新增状态/功能/关键词筛选，历史条目支持成功回放入队，失败项保留重试；补充历史摘要和回归测试。
+
+## 2026-05-21 15:22:08 | runtime
+- 摘要：统一任务结果模型并接入队列历史
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：新增统一 task_result 结构并挂载到 app._fx_last_task_result；run_process 最外层补丁在任务开始时创建结果对象，在结束时统一补齐 status、outputs、output_root、duration_seconds、error 等字段；pdf OCR、pdf 压缩、图片转 PDF、去水印、单文件 zip 已接入结果写入；队列 worker 与历史记录优先消费结构化结果；新增 task_queue_structured_result 与 single_file_input_pdf_compress_result_model 回归；验证 smoke_test 14/14、full_debug_test 61/61。
+
 ## 2026-05-20 18:28:52 | watermark
 - 摘要：批量水印文件名跳过规则提示与本地记忆修复
 - 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/categories/watermark-and-remove.md, memory/debug-status.md, memory/recent-changes.md

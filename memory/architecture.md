@@ -1,5 +1,60 @@
 # 项目架构
 
+## 2026-05-21 统一任务结果模型
+- 本轮开始收口任务执行的统一结果语义，目标是为后续的真进度条、历史记录、失败重试、结果导出提供稳定基础。
+- 实现仍限定在 `Fengxi_Toolbox.py` 加载器层，不修改 `fengxi_runtime.bin`。
+- 当前新增统一结果对象，实例级挂载在 `app._fx_last_task_result`，基础字段包括：
+  - `task_type`
+  - `input`
+  - `status`
+  - `success`
+  - `stopped`
+  - `skipped`
+  - `message`
+  - `detail`
+  - `error`
+  - `outputs`
+  - `output_root`
+  - `failed_items`
+  - `processed_count`
+  - `success_count`
+  - `failed_count`
+  - `skipped_count`
+  - `started_at`
+  - `finished_at`
+  - `duration_seconds`
+- 当前接入策略：
+  - `run_process()` 最外层补丁在每次任务开始时创建结果对象。
+  - 自定义工作流优先主动写入结果：
+    - `remove_wm`
+    - `pdf -> ocr`
+    - `pdf -> compress`
+    - `image -> to_pdf / merge_pdf`
+    - 单文件 `zip` 包装路径
+  - 若底层流程没有主动完成结果对象，则在 `run_process()` 和队列 worker 收尾时通过输入、日志、返回值、停止状态做统一推断。
+- 当前队列/历史调整：
+  - 队列任务执行后优先消费 `task_result`，不再只靠日志关键词猜测成功失败。
+  - 历史记录会保存裁剪后的 `task_result` 快照，便于后续做结果导出与更稳定的失败重试。
+  - `task_result` 必须和当前 `task_type + input` 匹配后才可被队列条目采用，避免串到上一个任务的结果。
+- 当前保留的兼容策略：
+  - 旧的日志关键词失败判断仍保留为兜底，不与结构化结果硬冲突。
+  - 未完全接入统一结果对象的运行时原生分支，暂时仍允许通过推断补齐状态。
+- 后续扩展方向：
+  - 把运行时原生批处理分支也逐步映射到统一结果对象。
+  - 基于 `task_result` 增加 JSON 导出、历史详情弹窗、失败原因筛选与真正的任务报告。
+
+## 2026-05-21 任务历史筛选与回放
+- 在统一任务结果模型之上，任务历史窗口进一步收口为“可检索 + 可回放”的单一入口。
+- 当前历史层新增三类筛选条件：
+  - 状态筛选：全部状态、仅完成、仅失败、仅跳过、仅停止。
+  - 功能筛选：按 `QUEUE_TASK_LABELS` 对应的功能类型过滤。
+  - 关键词筛选：可按路径、错误、输出位置、结果信息做模糊检索。
+- 当前历史条目展示更偏结构化结果：
+  - 会显示功能名称、输入路径、完成时间、耗时、输出位置、错误原因。
+  - 成功历史也支持“回放”重新加入队列，失败历史保留“重试”语义。
+- 这层实现仍限定在 `Fengxi_Toolbox.py` 加载器层，历史过滤态通过实例变量保存，不侵入 `fengxi_runtime.bin`。
+- 回归已经补到 `full_debug_test.py`，覆盖筛选、重置、回放和失败重试。
+
 ## 2026-05-20 任务队列 / 历史记录 / 失败重试
 - 本轮新增“任务队列 + 历史记录 + 失败重试”，实现仍限定在 `Fengxi_Toolbox.py` 加载器层，不修改 `fengxi_runtime.bin`。
 - UI 入口：
@@ -500,3 +555,21 @@
   - `meta` 页请求高度约从 `754px` 降到 `424px`，作者/时间两个输入区完整可见。
   - `pdf` 页请求高度约从 `466px` 降到 `398px`；左侧 5 个模式按钮、`OCR` 按钮及共享控件完整显示。
 - 本次未改 PDF/OCR/属性处理业务逻辑，仅调整布局与切页后的可见态刷新。
+
+
+## 2026-05-21 16:48:24 | runtime
+- summary: history detail export
+- files: Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- note: added an export-result button to the task history detail dialog; it exports the current entry's structured task_result JSON via a save dialog and default filename, keeps the export scope narrow, and binds the dialog to the current entry so reuse does not leak the previous task. Added test coverage for filename generation, successful JSON export, and empty-entry rejection; full_debug_test now tolerates a PowerPoint COM close hiccup during teardown. Validation: py_compile passed, smoke_test 14/14, full_debug_test 71/71.
+
+
+## 2026-05-21 16:59:33 | runtime
+- summary: history detail log export
+- files: Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- note: extended the task history detail dialog with a second export path for logs. The dialog now exposes 导出日志 alongside 导出结果 and 复制详情. The log export helper writes a plain text snapshot containing title, task, status, input, timestamps, and current log lines, with a safe default filename and empty-log fallback. Added regression checks for filename safety, successful log export, and empty-log handling. Validation: py_compile passed, smoke_test 14/14, full_debug_test 74/74.
+
+
+## 2026-05-21 18:14:31 | runtime
+- summary: history detail open output location
+- files: Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- note: added an 打开位置 action to the task history detail dialog. It resolves the best available target in order: output_root, first output file parent, then input parent, and opens it with os.startfile on Windows. Added regression checks for opening output_root, falling back from an output file to its parent directory, and rejecting empty targets. Validation: py_compile passed, smoke_test 14/14, full_debug_test 77/77.

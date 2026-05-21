@@ -207,6 +207,164 @@ def main():
         and bool(success_history),
         queue_run_calls,
     )
+    success_result = success_history[-1].get("task_result") if success_history else {}
+    record(
+        "task_queue_structured_result",
+        isinstance(success_result, dict)
+        and success_result.get("status") == "success"
+        and success_result.get("task_type") == "pdf"
+        and success_result.get("input") == str(queue_pdf)
+        and "duration_seconds" in success_result,
+        success_result,
+    )
+    filtered_failed = mod._filter_queue_history_entries(
+        getattr(app, "_fx_task_history", []),
+        status_filter="仅完成",
+        task_filter="PDF 工具",
+        keyword="queue",
+    )
+    record(
+        "task_history_filter_success_pdf_keyword",
+        len(filtered_failed) >= 1
+        and all(item.get("status") == "success" for item in filtered_failed)
+        and all(item.get("task_type") == "pdf" for item in filtered_failed),
+        filtered_failed[:2],
+    )
+    app._fx_history_filter_status_var.set("仅完成")
+    app._fx_history_filter_task_var.set("PDF 工具")
+    app._fx_history_search_var.set("queue")
+    filtered_via_app = mod._get_filtered_queue_history(app)
+    record(
+        "task_history_filter_state_vars",
+        len(filtered_via_app) == len(filtered_failed)
+        and bool(filtered_via_app)
+        and "显示 1/1 条" in app._fx_history_summary_var.get(),
+        {
+            "count": len(filtered_via_app),
+            "summary": app._fx_history_summary_var.get(),
+        },
+    )
+    detail_text = mod._build_task_history_detail_text(success_history[-1] if success_history else {})
+    record(
+        "task_history_detail_text",
+        "任务历史详情" not in detail_text
+        and "结构化结果 JSON" in detail_text
+        and "标题：" in detail_text
+        and "功能：" in detail_text,
+        detail_text[:240],
+    )
+    export_filename = mod._build_task_history_export_filename(success_history[-1] if success_history else {})
+    record(
+        "task_history_export_filename",
+        export_filename.endswith(".json")
+        and "fengxi_task_result_" in export_filename
+        and all(char not in export_filename for char in '<>:"/\\\\|?*'),
+        export_filename,
+    )
+    export_path = root / "task_result_export.json"
+    export_ok, export_payload = mod._export_task_history_entry(success_history[-1] if success_history else {}, str(export_path))
+    exported_json = json.loads(export_path.read_text(encoding="utf-8")) if export_ok and export_path.exists() else {}
+    record(
+        "task_history_export_result",
+        export_ok
+        and export_payload == str(export_path.resolve())
+        and exported_json.get("task_type") == "pdf"
+        and exported_json.get("input") == str(queue_pdf)
+        and "status" in exported_json
+        and "outputs" in exported_json
+        and "output_root" in exported_json
+        and "failed_items" in exported_json,
+        exported_json,
+    )
+    export_missing_ok, export_missing_payload = mod._export_task_history_entry({"title": "empty"}, str(root / "empty_export.json"))
+    record(
+        "task_history_export_missing_result",
+        (not export_missing_ok) and ("没有可导出的结构化结果" in export_missing_payload),
+        export_missing_payload,
+    )
+    log_filename = mod._build_task_history_log_export_filename(success_history[-1] if success_history else {})
+    record(
+        "task_history_log_export_filename",
+        log_filename.endswith(".txt")
+        and "fengxi_task_log_" in log_filename
+        and all(char not in log_filename for char in '<>:"/\\\\|?*'),
+        log_filename,
+    )
+    log_path = root / "task_history_log.txt"
+    log_ok, log_payload = mod._export_task_history_log(success_history[-1] if success_history else {}, str(log_path))
+    log_text = log_path.read_text(encoding="utf-8") if log_ok and log_path.exists() else ""
+    record(
+        "task_history_log_export_result",
+        log_ok
+        and log_payload == str(log_path.resolve())
+        and "日志：" in log_text
+        and "queue fake success" in log_text,
+        log_text[:240],
+    )
+    empty_log_ok, empty_log_payload = mod._export_task_history_log({"title": "empty"}, str(root / "empty_log.txt"))
+    record(
+        "task_history_log_export_empty",
+        empty_log_ok
+        and "日志：" in (root / "empty_log.txt").read_text(encoding="utf-8"),
+        empty_log_payload,
+    )
+    open_dir = root / "history_open_output"
+    open_dir.mkdir(exist_ok=True)
+    open_calls = []
+    original_startfile = getattr(mod.os, "startfile", None)
+    mod.os.startfile = lambda path: open_calls.append(str(path))
+    try:
+        open_ok, open_payload = mod._open_task_history_output({"output_root": str(open_dir)})
+        record(
+            "task_history_open_output_root",
+            open_ok and open_payload == str(open_dir.resolve()) and open_calls[-1] == str(open_dir.resolve()),
+            {"payload": open_payload, "calls": open_calls},
+        )
+        output_file = open_dir / "from_output_file.pdf"
+        output_file.write_text("probe", encoding="utf-8")
+        open_ok_file, open_payload_file = mod._open_task_history_output({"outputs": [str(output_file)]})
+        record(
+            "task_history_open_output_file_parent",
+            open_ok_file and open_payload_file == str(open_dir.resolve()) and open_calls[-1] == str(open_dir.resolve()),
+            {"payload": open_payload_file, "calls": open_calls},
+        )
+        open_missing_ok, open_missing_payload = mod._open_task_history_output({"title": "empty"})
+        record(
+            "task_history_open_output_missing",
+            (not open_missing_ok) and ("没有可打开的输出位置" in open_missing_payload),
+            open_missing_payload,
+        )
+    finally:
+        if original_startfile is None:
+            try:
+                delattr(mod.os, "startfile")
+            except Exception:
+                pass
+        else:
+            mod.os.startfile = original_startfile
+    mod._reset_queue_history_filters(app)
+    record(
+        "task_history_filter_reset",
+        app._fx_history_filter_status_var.get() == "全部状态"
+        and app._fx_history_filter_task_var.get() == "全部功能"
+        and app._fx_history_search_var.get() == "",
+        {
+            "status": app._fx_history_filter_status_var.get(),
+            "task": app._fx_history_filter_task_var.get(),
+            "keyword": app._fx_history_search_var.get(),
+        },
+    )
+    app._fx_task_queue = []
+    replay_task = mod._queue_replay_history_task(app, success_history[-1]) if success_history else None
+    record(
+        "task_history_replay_success",
+        replay_task is not None
+        and replay_task.get("input") == str(queue_pdf)
+        and replay_task.get("task_type") == "pdf"
+        and any(item.get("id") == replay_task.get("id") for item in getattr(app, "_fx_task_queue", [])),
+        replay_task or "missing",
+    )
+    app._fx_task_queue = []
 
     failed_source = {
         "id": "failed-probe",
@@ -219,16 +377,115 @@ def main():
         "finished_at": time.time(),
         "detail": "probe failed",
         "logs": ["❌ probe failed"],
+        "task_result": {
+            "task_type": "pdf",
+            "input": str(queue_root),
+            "status": "failed",
+            "failed_items": [str(queue_pdf)],
+            "failed_count": 1,
+        },
     }
+    retry_failed_paths = mod._resolve_retry_failed_item_paths(failed_source)
+    record(
+        "task_queue_retry_failed_item_paths",
+        retry_failed_paths == [str(queue_pdf)],
+        retry_failed_paths,
+    )
+    retry_subset = mod._build_retry_subset_input(app, failed_source)
+    record(
+        "task_queue_retry_failed_subset",
+        isinstance(retry_subset, dict)
+        and retry_subset.get("mode") in {"single_file", "staging_dir"}
+        and bool(retry_subset.get("input")),
+        retry_subset,
+    )
     app._fx_task_history.append(failed_source)
     mod._queue_retry_failed_history(app)
-    retry_titles = [item.get("title") for item in getattr(app, "_fx_task_queue", [])]
+    retry_tasks = list(getattr(app, "_fx_task_queue", []))
+    retry_titles = [item.get("title") for item in retry_tasks]
+    targeted_retry = next((item for item in retry_tasks if item.get("title") == failed_source["title"]), None)
     record(
         "task_queue_retry_failed",
-        failed_source["title"] in retry_titles,
-        retry_titles,
+        failed_source["title"] in retry_titles
+        and targeted_retry is not None
+        and targeted_retry.get("retry_mode") in {"single_file", "staging_dir"}
+        and bool(targeted_retry.get("retry_failed_items")),
+        targeted_retry or retry_titles,
     )
     app._fx_task_queue = []
+    failed_detail_text = mod._build_task_history_detail_text(failed_source)
+    record(
+        "task_history_failed_detail_groups",
+        "失败概览：" in failed_detail_text
+        and "失败原因：" in failed_detail_text
+        and "失败项：" in failed_detail_text
+        and "关键日志：" in failed_detail_text
+        and str(queue_pdf) in failed_detail_text
+        and "probe failed" in failed_detail_text,
+        failed_detail_text[:500],
+    )
+    mod._show_task_history_detail(app, failed_source)
+    detail_window = getattr(app, "_fx_history_detail_window", None)
+    detail_box = getattr(detail_window, "_fx_detail_box", None) if detail_window is not None else None
+    fail_header_ranges = detail_box.tag_ranges("fx_history_fail_header") if detail_box is not None else ()
+    fail_text_ranges = detail_box.tag_ranges("fx_history_fail_text") if detail_box is not None else ()
+    fail_item_ranges = detail_box.tag_ranges("fx_history_fail_item") if detail_box is not None else ()
+    fail_log_ranges = detail_box.tag_ranges("fx_history_log_error") if detail_box is not None else ()
+    record(
+        "task_history_failed_detail_highlight_tags",
+        bool(fail_header_ranges) and bool(fail_text_ranges) and bool(fail_item_ranges) and bool(fail_log_ranges),
+        {
+            "header": len(fail_header_ranges),
+            "text": len(fail_text_ranges),
+            "item": len(fail_item_ranges),
+            "log": len(fail_log_ranges),
+        },
+    )
+    classified_failed_source = dict(failed_source)
+    classified_failed_source["error"] = "路径不存在: probe.pdf"
+    classified_failed_source["task_result"] = dict(failed_source["task_result"])
+    classified_failed_source["task_result"]["error"] = "路径不存在: probe.pdf"
+    failure_kind, failure_reason = mod._classify_failure_reason(classified_failed_source)
+    record(
+        "task_history_failure_reason_classification",
+        failure_kind == "path_missing" and "路径不存在" in failure_reason,
+        {"kind": failure_kind, "reason": failure_reason},
+    )
+    failed_history_blob = mod._build_queue_history_search_blob(classified_failed_source)
+    record(
+        "task_history_failure_reason_search_blob",
+        "path_missing" in failed_history_blob and "路径不存在" in failed_history_blob,
+        failed_history_blob,
+    )
+    failed_path_entry = dict(classified_failed_source)
+    failed_path_entry["status"] = "failed"
+    failed_path_entry["task_type"] = "pdf"
+    path_filtered = mod._filter_queue_history_entries(
+        [failed_source, failed_path_entry],
+        status_filter="仅失败",
+        task_filter="PDF 工具",
+        failure_filter="路径缺失",
+        keyword="路径不存在",
+    )
+    record(
+        "task_history_failure_filter_path_missing",
+        len(path_filtered) == 1 and path_filtered[0].get("error") == "路径不存在: probe.pdf",
+        path_filtered,
+    )
+    app._fx_task_history = [failed_source, failed_path_entry]
+    app._fx_history_filter_status_var.set("仅失败")
+    app._fx_history_filter_task_var.set("PDF 工具")
+    app._fx_history_filter_failure_var.set("路径缺失")
+    app._fx_history_search_var.set("路径不存在")
+    filtered_via_failure_app = mod._get_filtered_queue_history(app)
+    record(
+        "task_history_failure_filter_state_vars",
+        len(filtered_via_failure_app) == 1
+        and filtered_via_failure_app[0].get("error") == "路径不存在: probe.pdf",
+        filtered_via_failure_app,
+    )
+    mod._reset_queue_history_filters(app)
+    app._fx_task_history = []
 
     close_probe = type("FastCloseProbe", (), {})()
     close_destroy_called = []
@@ -341,6 +598,7 @@ def main():
         app.pdf_image_compress_level_var.set("保留原图")
     app.run_process(str(single_compress_pdf), "pdf")
     single_compress_out = root / "【处理完成】结果文件夹" / "single_input_compress_压缩.pdf"
+    single_compress_result = getattr(app, "_fx_last_task_result", {})
     single_compress_text = ""
     if wait_for(lambda: single_compress_out.exists()):
         single_compress_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(single_compress_out)).pages)
@@ -348,6 +606,15 @@ def main():
         "single_file_input_pdf_compress",
         single_compress_out.exists() and "single compress input" in single_compress_text,
         single_compress_out,
+    )
+    record(
+        "single_file_input_pdf_compress_result_model",
+        isinstance(single_compress_result, dict)
+        and single_compress_result.get("status") == "success"
+        and str(single_compress_result.get("output_root", "")).endswith("【处理完成】结果文件夹")
+        and str(single_compress_out) in list(single_compress_result.get("outputs") or [])
+        and float(single_compress_result.get("duration_seconds") or 0.0) >= 0.0,
+        single_compress_result,
     )
 
     inp = root / "img_in"
@@ -771,7 +1038,13 @@ def main():
             slide.Shapes.AddTextbox(1, 50, 50, 400, 50).TextFrame.TextRange.Text = "hello ppt"
             pptx_src = root / "office_src.pptx"
             pres.SaveAs(str(pptx_src.resolve()))
-            pres.Close()
+            try:
+                pres.Close()
+            except Exception:
+                try:
+                    ppt.Presentations.Close()
+                except Exception:
+                    pass
 
             ppt_pdf = root / "office_ppt2pdf.pdf"
             status = mod.convert_ppt_to_pdf(ppt, str(pptx_src.resolve()), str(ppt_pdf.resolve()))

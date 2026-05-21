@@ -7,6 +7,7 @@ import marshal
 import importlib
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -251,8 +252,36 @@ QUEUE_STATUS_LABELS = {
     "running": "执行中",
     "success": "完成",
     "failed": "失败",
+    "skipped": "跳过",
     "stopped": "已停止",
 }
+QUEUE_HISTORY_STATUS_DEFAULT = "全部状态"
+QUEUE_HISTORY_TASK_DEFAULT = "全部功能"
+QUEUE_HISTORY_FAILURE_DEFAULT = "全部失败"
+QUEUE_HISTORY_STATUS_OPTIONS = (
+    (QUEUE_HISTORY_STATUS_DEFAULT, ""),
+    ("仅完成", "success"),
+    ("仅失败", "failed"),
+    ("仅跳过", "skipped"),
+    ("仅停止", "stopped"),
+)
+QUEUE_HISTORY_FAILURE_OPTIONS = (
+    (QUEUE_HISTORY_FAILURE_DEFAULT, ""),
+    ("路径缺失", "path_missing"),
+    ("权限问题", "permission"),
+    ("超时", "timeout"),
+    ("依赖问题", "dependency"),
+    ("部分失败", "partial_failure"),
+    ("日志失败", "log_failure"),
+    ("普通失败", "generic_failure"),
+    ("未知失败", "unknown"),
+)
+QUEUE_HISTORY_TASK_OPTIONS = ((QUEUE_HISTORY_TASK_DEFAULT, ""),) + tuple(
+    (label, task_type) for task_type, label in QUEUE_TASK_LABELS.items()
+)
+QUEUE_HISTORY_STATUS_LABEL_TO_VALUE = {label: value for label, value in QUEUE_HISTORY_STATUS_OPTIONS}
+QUEUE_HISTORY_FAILURE_LABEL_TO_VALUE = {label: value for label, value in QUEUE_HISTORY_FAILURE_OPTIONS}
+QUEUE_HISTORY_TASK_LABEL_TO_VALUE = {label: value for label, value in QUEUE_HISTORY_TASK_OPTIONS}
 INLINE_TITLE_ICON_SPECS = {
     "批量去水印": {"icon": "eraser", "size": 20, "color": CONTENT_ICON_PRIMARY},
     "文档格式互转": {"icon": "swap", "size": 20, "color": CONTENT_ICON_PRIMARY},
@@ -790,6 +819,16 @@ def _normalize_input_path_value(value):
     return os.path.abspath(os.path.normpath(text))
 
 
+def _sanitize_filename_component(value, fallback="task_result"):
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    text = text.replace("\r", " ").replace("\n", " ")
+    text = re.sub(r'[<>:"/\\\\|?*\x00-\x1f]+', "_", text)
+    text = re.sub(r"\s+", "_", text).strip(" ._")
+    return text or fallback
+
+
 def _decode_input_path_bytes(raw):
     candidates = []
     for encoding in ("utf-8", "mbcs", "gbk", sys.getfilesystemencoding()):
@@ -971,6 +1010,7 @@ class _UnifiedInputPathPicker:
         self._item_paths = {}
 
         self.window = customtkinter.CTkToplevel(parent)
+        _apply_window_icon(self.window)
         self.window.title("选择文件或文件夹")
         self.window.geometry("860x560")
         self.window.minsize(760, 480)
@@ -1282,6 +1322,28 @@ def _apply_app_icon(app):
             app.iconphoto(True, app._fx_window_icon)
     except Exception as exc:
         _debug(f"app_icon:iconphoto_error:{exc}")
+
+
+def _apply_window_icon(window):
+    try:
+        if hasattr(window, "_fx_window_icon") and getattr(window, "_fx_window_icon", None) is not None:
+            window.iconphoto(True, window._fx_window_icon)
+            return
+    except Exception:
+        pass
+    ico_path = _resolve_app_asset(APP_ICON_ICO)
+    png_path = _resolve_app_asset(APP_ICON_PNG)
+    try:
+        if ico_path.exists():
+            window.iconbitmap(default=str(ico_path))
+    except Exception as exc:
+        _debug(f"window_icon:iconbitmap_error:{exc}")
+    try:
+        if png_path.exists():
+            window._fx_window_icon = tkinter.PhotoImage(file=str(png_path))
+            window.iconphoto(True, window._fx_window_icon)
+    except Exception as exc:
+        _debug(f"window_icon:iconphoto_error:{exc}")
 
 
 def _apply_release_identity(app):
@@ -2140,11 +2202,24 @@ def _run_single_file_zip_via_staging(app, input_file, original_run_process):
                     pass
             shutil.move(str(produced_zip), str(target_zip))
             moved_outputs.append(target_zip)
+            result = _get_last_task_result(app)
+            _add_task_result_output(result, target_zip)
         for target_zip in moved_outputs:
             try:
                 app.log(f"✅ [单文件压缩] 已输出: {target_zip.name}")
             except Exception:
                 pass
+        result = _get_last_task_result(app)
+        if result is not None:
+            _set_task_result_output_root(result, source_file.parent)
+            _set_task_result_counts(result, processed=1, success=1 if moved_outputs else 0, failed=0 if moved_outputs else 1)
+            if moved_outputs:
+                _set_task_result_finished(
+                    result,
+                    "success",
+                    message="单文件压缩完成",
+                    detail=f"已生成 {len(moved_outputs)} 个压缩包",
+                )
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
     return moved_outputs
@@ -2617,6 +2692,264 @@ def _resolve_result_output_folder(input_value):
     return normalized_input, input_root, os.path.join(input_root, RESULT_FOLDER_NAME)
 
 
+def _task_result_now():
+    return time.time()
+
+
+def _new_task_result(input_value="", task_type=""):
+    normalized_input = _normalize_input_path_value(input_value)
+    started_at = _task_result_now()
+    return {
+        "task_type": task_type or "",
+        "input": normalized_input,
+        "status": "unknown",
+        "success": False,
+        "stopped": False,
+        "skipped": False,
+        "message": "",
+        "detail": "",
+        "error": "",
+        "outputs": [],
+        "output_root": "",
+        "failed_items": [],
+        "processed_count": 0,
+        "success_count": 0,
+        "failed_count": 0,
+        "skipped_count": 0,
+        "started_at": started_at,
+        "finished_at": None,
+        "duration_seconds": 0.0,
+    }
+
+
+def _normalize_task_output_path(path_value):
+    normalized = _normalize_input_path_value(path_value)
+    return normalized if normalized else ""
+
+
+def _add_task_result_output(result, path_value):
+    if not isinstance(result, dict):
+        return
+    normalized = _normalize_task_output_path(path_value)
+    if not normalized:
+        return
+    outputs = result.setdefault("outputs", [])
+    if normalized not in outputs:
+        outputs.append(normalized)
+
+
+def _set_task_result_output_root(result, path_value):
+    if not isinstance(result, dict):
+        return
+    normalized = _normalize_task_output_path(path_value)
+    if normalized:
+        result["output_root"] = normalized
+
+
+def _set_task_result_counts(result, *, processed=None, success=None, failed=None, skipped=None):
+    if not isinstance(result, dict):
+        return
+    if processed is not None:
+        result["processed_count"] = max(0, int(processed))
+    if success is not None:
+        result["success_count"] = max(0, int(success))
+    if failed is not None:
+        result["failed_count"] = max(0, int(failed))
+    if skipped is not None:
+        result["skipped_count"] = max(0, int(skipped))
+
+
+def _set_task_result_finished(result, status, message="", detail="", error="", stopped=False, skipped=False):
+    if not isinstance(result, dict):
+        return result
+    finished_at = _task_result_now()
+    result["finished_at"] = finished_at
+    result["duration_seconds"] = max(0.0, finished_at - float(result.get("started_at") or finished_at))
+    normalized_status = str(status or "unknown").strip().lower() or "unknown"
+    result["status"] = normalized_status
+    result["success"] = normalized_status == "success"
+    result["stopped"] = bool(stopped or normalized_status == "stopped")
+    result["skipped"] = bool(skipped or normalized_status == "skipped")
+    result["message"] = str(message or result.get("message") or "")
+    result["detail"] = str(detail or result.get("detail") or "")
+    result["error"] = str(error or result.get("error") or "")
+    result["failed_count"] = max(0, int(result.get("failed_count") or 0))
+    result["success_count"] = max(0, int(result.get("success_count") or 0))
+    result["processed_count"] = max(0, int(result.get("processed_count") or 0))
+    result["skipped_count"] = max(0, int(result.get("skipped_count") or 0))
+    result["failed_items"] = list(result.get("failed_items") or [])
+    result["outputs"] = [item for item in result.get("outputs", []) if item]
+    return result
+
+
+def _attach_task_result(app, result):
+    if app is None or not isinstance(result, dict):
+        return result
+    try:
+        app._fx_last_task_result = result
+    except Exception:
+        pass
+    return result
+
+
+def _start_task_result(app, input_value, task_type):
+    result = _new_task_result(input_value=input_value, task_type=task_type)
+    return _attach_task_result(app, result)
+
+
+def _get_last_task_result(app):
+    try:
+        result = getattr(app, "_fx_last_task_result", None)
+    except Exception:
+        result = None
+    return result if isinstance(result, dict) else None
+
+
+def _clear_last_task_result(app):
+    try:
+        app._fx_last_task_result = None
+    except Exception:
+        pass
+
+
+def _export_task_result(result, output_path):
+    if not isinstance(result, dict) or not output_path:
+        return False
+    try:
+        path = Path(_normalize_input_path_value(output_path))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception as exc:
+        _debug(f"task_result:export_error:{exc}")
+        return False
+
+
+def _finalize_current_task_result(app, status, message="", detail="", error="", stopped=False, skipped=False):
+    result = _get_last_task_result(app)
+    if result is None:
+        result = _start_task_result(app, "", "")
+    return _set_task_result_finished(
+        result,
+        status=status,
+        message=message,
+        detail=detail,
+        error=error,
+        stopped=stopped,
+        skipped=skipped,
+    )
+
+
+def _summarize_logs_for_task_result(logs):
+    entries = [str(item).strip() for item in (logs or []) if str(item).strip()]
+    if not entries:
+        return "", "", False, False
+
+    error_lines = [item for item in entries if "❌" in item or "🔥" in item or "错误" in item or "失败" in item]
+    stop_lines = [item for item in entries if "⏹️" in item or "中止" in item or "停止" in item]
+    success_lines = [item for item in entries if "🎉 [完成]" in item or "✅ [完成]" in item or "已全部完成" in item]
+    if error_lines:
+        return "failed", error_lines[-1], False, False
+    if stop_lines:
+        return "stopped", stop_lines[-1], True, False
+    if success_lines:
+        return "success", success_lines[-1], False, False
+    return "", entries[-1], False, False
+
+
+def _infer_task_result_from_context(app, input_value, task_type, return_value=None, logs=None, exception=None):
+    result = _get_last_task_result(app)
+    if result is None:
+        result = _start_task_result(app, input_value, task_type)
+    if task_type and not result.get("task_type"):
+        result["task_type"] = task_type
+    if input_value and not result.get("input"):
+        result["input"] = _normalize_input_path_value(input_value)
+
+    if exception is not None:
+        return _set_task_result_finished(
+            result,
+            status="failed",
+            message=str(exception),
+            detail=str(exception),
+            error=str(exception),
+        )
+
+    if result.get("finished_at"):
+        return result
+
+    inferred_status = ""
+    inferred_message = ""
+    stopped = False
+    skipped = False
+
+    if getattr(app, "stop_event", False):
+        inferred_status = "stopped"
+        inferred_message = "用户停止"
+        stopped = True
+
+    if not inferred_status:
+        log_status, log_message, log_stopped, log_skipped = _summarize_logs_for_task_result(logs)
+        if log_status:
+            inferred_status = log_status
+            inferred_message = log_message
+            stopped = log_stopped
+            skipped = log_skipped
+
+    if not inferred_status and isinstance(return_value, str):
+        normalized_return = return_value.strip()
+        if normalized_return == "SUCCESS":
+            inferred_status = "success"
+            inferred_message = normalized_return
+        elif normalized_return.startswith("ERROR"):
+            inferred_status = "failed"
+            inferred_message = normalized_return
+        elif normalized_return.startswith("SKIP"):
+            inferred_status = "skipped"
+            inferred_message = normalized_return
+            skipped = True
+
+    if not inferred_status:
+        failed_items = list(result.get("failed_items") or [])
+        if failed_items or int(result.get("failed_count") or 0) > 0:
+            inferred_status = "failed"
+            inferred_message = result.get("detail") or "存在失败项目"
+        elif result.get("outputs") or result.get("output_root"):
+            inferred_status = "success"
+            inferred_message = result.get("detail") or "执行完成"
+        else:
+            inferred_status = "success"
+            inferred_message = result.get("detail") or "执行完成"
+
+    return _set_task_result_finished(
+        result,
+        status=inferred_status,
+        message=inferred_message,
+        detail=result.get("detail") or inferred_message,
+        error=result.get("error") or (inferred_message if inferred_status == "failed" else ""),
+        stopped=stopped,
+        skipped=skipped,
+    )
+
+
+def _collect_result_file_paths(output_root):
+    normalized_root = _normalize_input_path_value(output_root)
+    if not normalized_root or not os.path.exists(normalized_root):
+        return []
+    root_path = Path(normalized_root)
+    results = []
+    if root_path.is_file():
+        return [str(root_path)]
+    skip_names = {"!失败文件清单.txt"}
+    for item in root_path.rglob("*"):
+        if not item.is_file():
+            continue
+        if item.name in skip_names:
+            continue
+        results.append(str(item))
+    return results
+
+
 def _coerce_progress_value(value, default=0.0):
     try:
         return float(value)
@@ -2936,6 +3269,10 @@ def _run_remove_wm_pdf_roundtrip(app, pdf_files, input_folder, output_folder):
     failed_list = []
     preserve_mine = False
     tracker = _get_active_progress_tracker(app)
+    result = _get_last_task_result(app)
+    if result is None:
+        result = _start_task_result(app, input_folder, "remove_wm")
+    _set_task_result_output_root(result, output_folder)
     if getattr(app, "rm_wm_preserve_mine", None) is not None:
         try:
             preserve_mine = bool(app.rm_wm_preserve_mine.get())
@@ -3015,6 +3352,7 @@ def _run_remove_wm_pdf_roundtrip(app, pdf_files, input_folder, output_folder):
                     app.log(f"✅ [PDF去水印] 已输出：{os.path.basename(dst_pdf)}")
                 except Exception:
                     pass
+                _add_task_result_output(result, dst_pdf)
             finally:
                 if tracker is not None:
                     tracker.complete_units(1)
@@ -3026,6 +3364,9 @@ def _run_remove_wm_pdf_roundtrip(app, pdf_files, input_folder, output_folder):
     finally:
         pythoncom.CoUninitialize()
         shutil.rmtree(temp_root, ignore_errors=True)
+    _set_task_result_counts(result, processed=len(pdf_files), success=len(pdf_files) - len(failed_list), failed=len(failed_list), skipped=0)
+    if failed_list:
+        result["failed_items"] = list(failed_list)
     return failed_list
 
 
@@ -3034,13 +3375,18 @@ def _run_remove_wm_task(app, input_folder, original_run_process):
     input_root = os.path.dirname(normalized_input) if normalized_input and os.path.isfile(normalized_input) else normalized_input
     output_folder = os.path.join(input_root, RESULT_FOLDER_NAME)
     os.makedirs(output_folder, exist_ok=True)
+    result = _get_last_task_result(app)
+    if result is None:
+        result = _start_task_result(app, normalized_input, "remove_wm")
+    _set_task_result_output_root(result, output_folder)
 
     all_files = app.collect_input_files(normalized_input, "remove_wm")
     pdf_files = [path for path in all_files if path.lower().endswith(".pdf")]
     other_files = [path for path in all_files if not path.lower().endswith(".pdf")]
 
     if not pdf_files:
-        return original_run_process(app, input_folder, "remove_wm")
+        original_run_process(app, input_folder, "remove_wm")
+        return _infer_task_result_from_context(app, normalized_input, "remove_wm")
 
     failed_list = []
 
@@ -3177,10 +3523,30 @@ def _run_remove_wm_task(app, input_folder, original_run_process):
             report_path = _write_failed_report(output_folder, deduped_failed)
             if report_path:
                 app.log(f"\n📄 [报告] 已生成报告: {report_path}")
+                _add_task_result_output(result, report_path)
             app.log("完成 (含错误)")
             app.log(f"去水印任务结束，但有 {len(deduped_failed)} 个文件处理失败。")
+            result["failed_items"] = list(deduped_failed)
+            _set_task_result_counts(result, processed=len(pdf_files) + len(other_files), success=max(0, len(pdf_files) - len(deduped_failed)), failed=len(deduped_failed), skipped=0)
+            _set_task_result_finished(
+                result,
+                "failed",
+                message=f"去水印任务结束，但有 {len(deduped_failed)} 个文件处理失败。",
+                detail=f"失败 {len(deduped_failed)} 个文件",
+                error=f"失败 {len(deduped_failed)} 个文件",
+            )
         elif not getattr(app, "stop_event", False):
             app.log("\n🎉 [完成] 去水印已全部处理完成！")
+            _set_task_result_counts(result, processed=len(pdf_files) + len(other_files), success=len(pdf_files) + len(other_files), failed=0, skipped=0)
+            _set_task_result_finished(
+                result,
+                "success",
+                message="去水印已全部处理完成",
+                detail=f"成功处理 {len(pdf_files) + len(other_files)} 个文件",
+            )
+        else:
+            _set_task_result_counts(result, processed=len(pdf_files) + len(other_files), success=max(0, len(pdf_files) - len(failed_list)), failed=len(failed_list), skipped=0)
+            _set_task_result_finished(result, "stopped", message="用户停止去水印任务", detail="用户停止去水印任务", stopped=True)
     finally:
         if single_output_root is not None:
             shutil.rmtree(single_output_root, ignore_errors=True)
@@ -3197,12 +3563,18 @@ def _run_pdf_ocr_task(app, input_folder):
     )
 
     normalized_input, input_root, output_folder = _resolve_result_output_folder(input_folder)
+    result = _get_last_task_result(app)
+    if result is None:
+        result = _start_task_result(app, normalized_input, "pdf")
+    _set_task_result_output_root(result, output_folder)
     os.makedirs(output_folder, exist_ok=True)
     all_files = app.collect_input_files(normalized_input, "pdf")
     pdf_files = [f for f in all_files if f.lower().endswith(".pdf")]
 
     if not pdf_files:
         app.log("⚠️ [提示] 未找到可处理的 PDF 文件")
+        _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=1)
+        _set_task_result_finished(result, "skipped", message="未找到可处理的 PDF 文件", detail="未找到可处理的 PDF 文件", skipped=True)
         return
 
     model_root = default_model_root()
@@ -3259,6 +3631,7 @@ def _run_pdf_ocr_task(app, input_folder):
         f" | 对比报告：{'开' if compare_report else '关'}"
     )
     tracker = _get_active_progress_tracker(app)
+    success_count = 0
     try:
         total = len(pdf_files)
         for index, src in enumerate(pdf_files):
@@ -3321,6 +3694,8 @@ def _run_pdf_ocr_task(app, input_folder):
                     pass
                 app.log(f"❌ [失败] OCR 错误: {os.path.basename(src)}: {exc}")
             else:
+                success_count += 1
+                _add_task_result_output(result, dst)
                 app.log(f"✅ [OCR] 已生成可搜索 PDF：{os.path.basename(src)}")
             finally:
                 if should_count_completion:
@@ -3332,16 +3707,36 @@ def _run_pdf_ocr_task(app, input_folder):
         engine.close()
 
     if failed_list:
+        result["failed_items"] = list(failed_list)
+        _set_task_result_counts(result, processed=len(pdf_files), success=success_count, failed=len(failed_list), skipped=0)
         app.log("\n========= ❌ 失败清单 =========")
         for item in failed_list:
             app.log(f"• {item}")
         report_path = _write_failed_report(output_folder, failed_list)
         if report_path:
             app.log(f"\n📄 [报告] 已生成报告: {report_path}")
+            _add_task_result_output(result, report_path)
         app.log(f"完成 (含错误)")
         app.log(f"OCR 搜索版 PDF 任务结束，但有 {len(failed_list)} 个文件处理失败。")
+        _set_task_result_finished(
+            result,
+            "failed",
+            message=f"OCR 搜索版 PDF 任务结束，但有 {len(failed_list)} 个文件处理失败。",
+            detail=f"失败 {len(failed_list)} 个文件",
+            error=f"失败 {len(failed_list)} 个文件",
+        )
     elif not app.stop_event:
+        _set_task_result_counts(result, processed=len(pdf_files), success=success_count, failed=0, skipped=0)
         app.log("\n🎉 [完成] OCR 搜索版 PDF 已全部生成！")
+        _set_task_result_finished(
+            result,
+            "success",
+            message="OCR 搜索版 PDF 已全部生成",
+            detail=f"成功处理 {success_count} 个文件",
+        )
+    else:
+        _set_task_result_counts(result, processed=success_count + len(failed_list), success=success_count, failed=len(failed_list), skipped=0)
+        _set_task_result_finished(result, "stopped", message="用户停止 OCR 任务", detail="用户停止 OCR 任务", stopped=True)
 
 
 PDF_COMPRESS_LEVELS = {
@@ -3471,10 +3866,16 @@ def compress_pdf_file(src, dst, compress_level="标准", image_level="标准", p
 
 def _run_pdf_compress_task(app, input_folder):
     normalized_input, input_root, output_folder = _resolve_result_output_folder(input_folder)
+    result = _get_last_task_result(app)
+    if result is None:
+        result = _start_task_result(app, normalized_input, "pdf")
+    _set_task_result_output_root(result, output_folder)
     all_files = app.collect_input_files(normalized_input, "pdf")
     pdf_files = [f for f in all_files if f.lower().endswith(".pdf")]
     if not pdf_files:
         app.log("⚠️ 未找到可压缩的 PDF 文件。")
+        _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=1)
+        _set_task_result_finished(result, "skipped", message="未找到可压缩的 PDF 文件", detail="未找到可压缩的 PDF 文件", skipped=True)
         return
 
     os.makedirs(output_folder, exist_ok=True)
@@ -3488,6 +3889,7 @@ def _run_pdf_compress_task(app, input_folder):
 
     tracker = _get_active_progress_tracker(app)
     failed_list = []
+    success_count = 0
     total = len(pdf_files)
     app.log(f"📉 [PDF 压缩] 共 {total} 个 PDF，压缩程度：{compress_level}，图片压缩：{image_level}")
     for index, src in enumerate(pdf_files):
@@ -3508,6 +3910,8 @@ def _run_pdf_compress_task(app, input_folder):
             ratio = 0 if before_size <= 0 else max(0, round((1 - after_size / before_size) * 100, 1))
             image_changes = status.split(":", 1)[1] if ":" in status else "0"
             app.log(f"✅ [PDF 压缩] {os.path.basename(dst)} | 减少 {ratio}% | 图片 {image_changes} 项")
+            success_count += 1
+            _add_task_result_output(result, dst)
             if getattr(app, "pdf_delete_var", None) is not None:
                 try:
                     if bool(app.pdf_delete_var.get()):
@@ -3526,15 +3930,35 @@ def _run_pdf_compress_task(app, input_folder):
                     app.progress_bar.set((index + 1) / total)
 
     if failed_list:
+        result["failed_items"] = list(failed_list)
+        _set_task_result_counts(result, processed=total, success=success_count, failed=len(failed_list), skipped=0)
         app.log("\n========= ❌ 失败清单 =========")
         for item in failed_list:
             app.log(f"• {item}")
         report_path = _write_failed_report(output_folder, failed_list)
         if report_path:
             app.log(f"\n📄 [报告] 已生成报告: {report_path}")
+            _add_task_result_output(result, report_path)
         app.log(f"PDF 压缩任务结束，但有 {len(failed_list)} 个文件处理失败。")
+        _set_task_result_finished(
+            result,
+            "failed",
+            message=f"PDF 压缩任务结束，但有 {len(failed_list)} 个文件处理失败。",
+            detail=f"失败 {len(failed_list)} 个文件",
+            error=f"失败 {len(failed_list)} 个文件",
+        )
     elif not getattr(app, "stop_event", False):
+        _set_task_result_counts(result, processed=total, success=success_count, failed=0, skipped=0)
         app.log("\n🎉 [完成] PDF 压缩已全部完成！")
+        _set_task_result_finished(
+            result,
+            "success",
+            message="PDF 压缩已全部完成",
+            detail=f"成功处理 {success_count} 个文件",
+        )
+    else:
+        _set_task_result_counts(result, processed=success_count + len(failed_list), success=success_count, failed=len(failed_list), skipped=0)
+        _set_task_result_finished(result, "stopped", message="用户停止 PDF 压缩任务", detail="用户停止 PDF 压缩任务", stopped=True)
 
 
 IMAGE_TO_PDF_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
@@ -3597,14 +4021,21 @@ def _get_image_pdf_mode(app):
 
 def _run_image_to_pdf_task(app, input_folder, merge=False):
     normalized_input, input_root, output_folder = _resolve_result_output_folder(input_folder)
+    result = _get_last_task_result(app)
+    if result is None:
+        result = _start_task_result(app, normalized_input, "image")
+    _set_task_result_output_root(result, output_folder)
     image_files = _collect_image_to_pdf_files(app, normalized_input)
     if not image_files:
         app.log("⚠️ 未找到可转 PDF 的图片文件。")
+        _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=1)
+        _set_task_result_finished(result, "skipped", message="未找到可转 PDF 的图片文件", detail="未找到可转 PDF 的图片文件", skipped=True)
         return
     os.makedirs(output_folder, exist_ok=True)
 
     tracker = _get_active_progress_tracker(app)
     failed_list = []
+    success_count = 0
     should_delete = False
     if getattr(app, "img_delete_var", None) is not None:
         try:
@@ -3621,6 +4052,8 @@ def _run_image_to_pdf_task(app, input_folder, merge=False):
             failed_list.append(f"{normalized_input}: {status}")
             app.log(f"❌ [失败] 多图合并 PDF: {status}")
         else:
+            success_count = len(image_files)
+            _add_task_result_output(result, dst)
             app.log(f"✅ [多图合并PDF] 已输出：{os.path.basename(dst)}")
             if should_delete:
                 for src in image_files:
@@ -3646,6 +4079,8 @@ def _run_image_to_pdf_task(app, input_folder, merge=False):
                     failed_list.append(f"{src}: {status}")
                     app.log(f"❌ [失败] {os.path.basename(src)}: {status}")
                 else:
+                    success_count += 1
+                    _add_task_result_output(result, dst)
                     app.log(f"✅ [图片转PDF] {os.path.basename(src)} -> {os.path.basename(dst)}")
                     if should_delete:
                         os.remove(src)
@@ -3659,15 +4094,35 @@ def _run_image_to_pdf_task(app, input_folder, merge=False):
                     app.progress_bar.set((index + 1) / total)
 
     if failed_list:
+        result["failed_items"] = list(failed_list)
+        _set_task_result_counts(result, processed=len(image_files), success=success_count, failed=len(failed_list), skipped=0)
         app.log("\n========= ❌ 失败清单 =========")
         for item in failed_list:
             app.log(f"• {item}")
         report_path = _write_failed_report(output_folder, failed_list)
         if report_path:
             app.log(f"\n📄 [报告] 已生成报告: {report_path}")
+            _add_task_result_output(result, report_path)
         app.log(f"图片转 PDF 任务结束，但有 {len(failed_list)} 个文件处理失败。")
+        _set_task_result_finished(
+            result,
+            "failed",
+            message=f"图片转 PDF 任务结束，但有 {len(failed_list)} 个文件处理失败。",
+            detail=f"失败 {len(failed_list)} 个文件",
+            error=f"失败 {len(failed_list)} 个文件",
+        )
     elif not getattr(app, "stop_event", False):
+        _set_task_result_counts(result, processed=len(image_files), success=success_count, failed=0, skipped=0)
         app.log("\n🎉 [完成] 图片 PDF 任务已全部完成！")
+        _set_task_result_finished(
+            result,
+            "success",
+            message="图片 PDF 任务已全部完成",
+            detail=f"成功处理 {success_count} 个文件",
+        )
+    else:
+        _set_task_result_counts(result, processed=success_count + len(failed_list), success=success_count, failed=len(failed_list), skipped=0)
+        _set_task_result_finished(result, "stopped", message="用户停止图片 PDF 任务", detail="用户停止图片 PDF 任务", stopped=True)
 
 
 def _patch_pdf_ocr_mode():
@@ -5075,6 +5530,32 @@ def _normalize_queue_history_entry(task):
     entry.pop("action_button", None)
     entry.pop("index_label", None)
     entry.pop("retry_source_id", None)
+    entry.pop("retry_staging_root", None)
+    entry.pop("retry_mode", None)
+    entry.pop("retry_failed_items", None)
+    task_result = entry.get("task_result")
+    if isinstance(task_result, dict):
+        entry["task_result"] = {
+            "task_type": task_result.get("task_type", ""),
+            "input": task_result.get("input", ""),
+            "status": task_result.get("status", ""),
+            "success": bool(task_result.get("success", False)),
+            "stopped": bool(task_result.get("stopped", False)),
+            "skipped": bool(task_result.get("skipped", False)),
+            "message": task_result.get("message", ""),
+            "detail": task_result.get("detail", ""),
+            "error": task_result.get("error", ""),
+            "outputs": list(task_result.get("outputs") or []),
+            "output_root": task_result.get("output_root", ""),
+            "failed_items": list(task_result.get("failed_items") or []),
+            "processed_count": int(task_result.get("processed_count") or 0),
+            "success_count": int(task_result.get("success_count") or 0),
+            "failed_count": int(task_result.get("failed_count") or 0),
+            "skipped_count": int(task_result.get("skipped_count") or 0),
+            "started_at": task_result.get("started_at"),
+            "finished_at": task_result.get("finished_at"),
+            "duration_seconds": float(task_result.get("duration_seconds") or 0.0),
+        }
     return entry
 
 
@@ -5098,6 +5579,8 @@ def _queue_status_color(status):
         return "#A7D39B"
     if status == "failed":
         return "#F0A6A6"
+    if status == "skipped":
+        return "#B5C0CC"
     if status == "running":
         return "#F6D28B"
     if status == "stopped":
@@ -5105,9 +5588,672 @@ def _queue_status_color(status):
     return globals().get("COLOR_TEXT_SOFT", "#B2C0C8")
 
 
+def _build_queue_history_search_blob(entry):
+    parts = [
+        entry.get("title", ""),
+        entry.get("input", ""),
+        entry.get("detail", ""),
+        entry.get("error", ""),
+        entry.get("output_root", ""),
+        _queue_status_text(entry.get("status")),
+    ]
+    task_result = entry.get("task_result")
+    if isinstance(task_result, dict):
+        failure_kind, failure_reason = _classify_failure_reason(entry)
+        parts.extend(
+            [
+                task_result.get("message", ""),
+                task_result.get("detail", ""),
+                task_result.get("error", ""),
+                task_result.get("output_root", ""),
+                failure_kind,
+                failure_reason,
+            ]
+        )
+        parts.extend(list(task_result.get("outputs") or []))
+        parts.extend(list(task_result.get("failed_items") or []))
+    return " ".join(str(item or "") for item in parts).lower()
+
+
+def _classify_failure_reason(entry):
+    item = dict(entry or {})
+    task_result = item.get("task_result") if isinstance(item.get("task_result"), dict) else {}
+    error_text = str(task_result.get("error") or item.get("error") or "").strip()
+    detail_text = str(task_result.get("detail") or item.get("detail") or "").strip()
+    logs = [str(text).strip() for text in (item.get("logs") or []) if str(text).strip()]
+    failed_items = list(task_result.get("failed_items") or item.get("failed_items") or [])
+    reason_text = error_text or detail_text
+    if not reason_text and logs:
+        reason_text = logs[-1]
+    reason_lower = reason_text.lower()
+    if any(marker in reason_lower for marker in ("路径不存在", "not found", "no such file", "找不到", "不存在")):
+        return "path_missing", reason_text
+    if any(marker in reason_lower for marker in ("权限", "access denied", "permission", "拒绝访问")):
+        return "permission", reason_text
+    if any(marker in reason_lower for marker in ("超时", "timeout", "timed out")):
+        return "timeout", reason_text
+    if any(marker in reason_lower for marker in ("依赖", "dll", "库", "module", "import", "onnxruntime", "com")):
+        return "dependency", reason_text
+    if failed_items:
+        return "partial_failure", reason_text or f"{len(failed_items)} 个失败项"
+    if any(marker in " ".join(logs).lower() for marker in ("❌", "🔥", "错误", "失败", "error", "failed", "traceback")):
+        return "log_failure", reason_text or "日志包含失败标记"
+    if reason_text:
+        return "generic_failure", reason_text
+    return "unknown", ""
+
+
+def _filter_queue_history_entries(
+    entries,
+    status_filter=QUEUE_HISTORY_STATUS_DEFAULT,
+    task_filter=QUEUE_HISTORY_TASK_DEFAULT,
+    failure_filter=QUEUE_HISTORY_FAILURE_DEFAULT,
+    keyword="",
+):
+    status_value = QUEUE_HISTORY_STATUS_LABEL_TO_VALUE.get(str(status_filter or "").strip(), "")
+    task_value = QUEUE_HISTORY_TASK_LABEL_TO_VALUE.get(str(task_filter or "").strip(), "")
+    failure_value = QUEUE_HISTORY_FAILURE_LABEL_TO_VALUE.get(str(failure_filter or "").strip(), "")
+    normalized_keyword = str(keyword or "").strip().lower()
+    filtered = []
+    for entry in list(entries or []):
+        if status_value and str(entry.get("status") or "") != status_value:
+            continue
+        if task_value and str(entry.get("task_type") or "") != task_value:
+            continue
+        if failure_value:
+            failure_kind, _failure_reason = _classify_failure_reason(entry)
+            if failure_kind != failure_value:
+                continue
+        if normalized_keyword and normalized_keyword not in _build_queue_history_search_blob(entry):
+            continue
+        filtered.append(entry)
+    return filtered
+
+
+def _get_queue_history_filters(app):
+    try:
+        status_filter = getattr(app, "_fx_history_filter_status_var", None)
+        status_filter = status_filter.get() if status_filter is not None else QUEUE_HISTORY_STATUS_DEFAULT
+    except Exception:
+        status_filter = QUEUE_HISTORY_STATUS_DEFAULT
+    try:
+        task_filter = getattr(app, "_fx_history_filter_task_var", None)
+        task_filter = task_filter.get() if task_filter is not None else QUEUE_HISTORY_TASK_DEFAULT
+    except Exception:
+        task_filter = QUEUE_HISTORY_TASK_DEFAULT
+    try:
+        failure_filter = getattr(app, "_fx_history_filter_failure_var", None)
+        failure_filter = failure_filter.get() if failure_filter is not None else QUEUE_HISTORY_FAILURE_DEFAULT
+    except Exception:
+        failure_filter = QUEUE_HISTORY_FAILURE_DEFAULT
+    try:
+        keyword = getattr(app, "_fx_history_search_var", None)
+        keyword = keyword.get() if keyword is not None else ""
+    except Exception:
+        keyword = ""
+    return (
+        str(status_filter or QUEUE_HISTORY_STATUS_DEFAULT),
+        str(task_filter or QUEUE_HISTORY_TASK_DEFAULT),
+        str(failure_filter or QUEUE_HISTORY_FAILURE_DEFAULT),
+        str(keyword or ""),
+    )
+
+
+def _get_filtered_queue_history(app):
+    status_filter, task_filter, failure_filter, keyword = _get_queue_history_filters(app)
+    history = list(getattr(app, "_fx_task_history", []) or [])
+    return _filter_queue_history_entries(
+        history,
+        status_filter=status_filter,
+        task_filter=task_filter,
+        failure_filter=failure_filter,
+        keyword=keyword,
+    )
+
+
+def _refresh_history_summary(app, filtered_history=None, full_history=None):
+    summary_var = getattr(app, "_fx_history_summary_var", None)
+    if summary_var is None:
+        return
+    if full_history is None:
+        full_history = list(getattr(app, "_fx_task_history", []) or [])
+    if filtered_history is None:
+        filtered_history = _get_filtered_queue_history(app)
+    shown = len(filtered_history)
+    total = len(full_history)
+    failed = sum(1 for item in filtered_history if item.get("status") == "failed")
+    try:
+        summary_var.set(f"显示 {shown}/{total} 条 · 当前失败 {failed}")
+    except Exception:
+        pass
+
+
+def _build_task_history_detail_text(entry):
+    item = dict(entry or {})
+    task_result = item.get("task_result") if isinstance(item.get("task_result"), dict) else {}
+    lines = [
+        f"标题：{item.get('title', '')}",
+        f"功能：{QUEUE_TASK_LABELS.get(item.get('task_type'), item.get('task_type') or '未知任务')}",
+        f"状态：{_queue_status_text(item.get('status'))}",
+        f"输入：{item.get('input', '')}",
+        f"创建时间：{_format_queue_time(item.get('created_at'))}",
+        f"结束时间：{_format_queue_time(item.get('finished_at') or item.get('created_at'))}",
+    ]
+    duration_seconds = task_result.get("duration_seconds", item.get("duration_seconds", 0.0))
+    try:
+        duration_seconds = float(duration_seconds or 0.0)
+    except Exception:
+        duration_seconds = 0.0
+    if duration_seconds > 0:
+        lines.append(f"耗时：{duration_seconds:.3f}s")
+    detail = task_result.get("detail") or item.get("detail", "")
+    if detail:
+        lines.append(f"详情：{detail}")
+    error = task_result.get("error") or item.get("error", "")
+    if error:
+        lines.append(f"错误：{error}")
+    output_root = task_result.get("output_root") or item.get("output_root", "")
+    if output_root:
+        lines.append(f"输出目录：{output_root}")
+    outputs = list(task_result.get("outputs") or item.get("outputs") or [])
+    if outputs:
+        lines.append("")
+        lines.append("输出文件：")
+        lines.extend(f"- {path}" for path in outputs)
+    failed_items = list(task_result.get("failed_items") or item.get("failed_items") or [])
+    logs = [str(text).strip() for text in (item.get("logs") or []) if str(text).strip()]
+    if item.get("status") == "failed" or error or failed_items:
+        lines.append("")
+        lines.append("失败概览：")
+        lines.append(f"- 状态：{_queue_status_text(item.get('status'))}")
+        if error:
+            lines.append(f"- 失败原因：{error}")
+        elif detail:
+            lines.append(f"- 失败原因：{detail}")
+        if failed_items:
+            lines.append(f"- 失败项数量：{len(failed_items)}")
+        failed_log_lines = [
+            text for text in logs if any(marker in text.lower() for marker in ("❌", "🔥", "错误", "失败", "error", "failed", "traceback"))
+        ]
+        if failed_log_lines:
+            lines.append(f"- 关键失败日志：{len(failed_log_lines)} 条")
+    if error:
+        lines.append("")
+        lines.append("失败原因：")
+        lines.append(f"- {error}")
+    elif item.get("status") == "failed" and detail:
+        lines.append("")
+        lines.append("失败原因：")
+        lines.append(f"- {detail}")
+    if failed_items:
+        lines.append("")
+        lines.append("失败项：")
+        lines.extend(f"- {path}" for path in failed_items)
+    failed_log_lines = [
+        text for text in logs if any(marker in text.lower() for marker in ("❌", "🔥", "错误", "失败", "error", "failed", "traceback"))
+    ]
+    if failed_log_lines:
+        lines.append("")
+        lines.append("关键日志：")
+        lines.extend(f"- {text}" for text in failed_log_lines[-8:])
+    if logs:
+        lines.append("")
+        lines.append("日志片段：")
+        lines.extend(f"- {text}" for text in logs[-12:])
+    lines.append("")
+    lines.append("结构化结果 JSON：")
+    lines.append(json.dumps(task_result, ensure_ascii=False, indent=2) if task_result else "{}")
+    return "\n".join(lines)
+
+
+def _apply_task_history_detail_highlights(detail_box, detail_text, entry):
+    if detail_box is None:
+        return
+    try:
+        detail_box.tag_remove("fx_history_fail_header", "1.0", "end")
+        detail_box.tag_remove("fx_history_fail_text", "1.0", "end")
+        detail_box.tag_remove("fx_history_fail_item", "1.0", "end")
+        detail_box.tag_remove("fx_history_log_error", "1.0", "end")
+        detail_box.tag_config("fx_history_fail_header", foreground="#F6C66A")
+        detail_box.tag_config("fx_history_fail_text", foreground="#FF8A80")
+        detail_box.tag_config("fx_history_fail_item", foreground="#FFD6A5")
+        detail_box.tag_config("fx_history_log_error", foreground="#FFB4AB")
+    except Exception:
+        return
+
+    item = dict(entry or {})
+    task_result = item.get("task_result") if isinstance(item.get("task_result"), dict) else {}
+    failed_items = list(task_result.get("failed_items") or item.get("failed_items") or [])
+    status = str(item.get("status") or "")
+    error = str(task_result.get("error") or item.get("error") or "").strip()
+    detail = str(task_result.get("detail") or item.get("detail") or "").strip()
+    logs = [str(text).strip() for text in (item.get("logs") or []) if str(text).strip()]
+    highlight_lines = []
+    if status == "failed":
+        highlight_lines.append(("状态：失败", "fx_history_fail_text"))
+    if error:
+        highlight_lines.append((f"错误：{error}", "fx_history_fail_text"))
+        highlight_lines.append((f"- {error}", "fx_history_fail_text"))
+    elif status == "failed" and detail:
+        highlight_lines.append((f"- {detail}", "fx_history_fail_text"))
+    for header in ("失败概览：", "失败原因：", "失败项：", "关键日志："):
+        highlight_lines.append((header, "fx_history_fail_header"))
+    for item_path in failed_items:
+        highlight_lines.append((f"- {item_path}", "fx_history_fail_item"))
+    for log_line in logs:
+        lowered = log_line.lower()
+        if any(marker in lowered for marker in ("❌", "🔥", "错误", "失败", "error", "failed", "traceback")):
+            highlight_lines.append((f"- {log_line}", "fx_history_log_error"))
+
+    for text, tag in highlight_lines:
+        if not text:
+            continue
+        start_index = "1.0"
+        while True:
+            try:
+                match_index = detail_box.search(text, start_index, stopindex="end")
+            except Exception:
+                match_index = ""
+            if not match_index:
+                break
+            end_index = f"{match_index}+{len(text)}c"
+            try:
+                detail_box.tag_add(tag, match_index, end_index)
+            except Exception:
+                break
+            start_index = end_index
+
+
+def _build_task_history_export_filename(entry):
+    item = dict(entry or {})
+    task_type = QUEUE_TASK_LABELS.get(item.get("task_type"), item.get("task_type") or "task")
+    task_slug = _sanitize_filename_component(task_type, fallback="task")
+    title_slug = _sanitize_filename_component(item.get("title") or item.get("input") or "history", fallback="history")
+    timestamp = _sanitize_filename_component(_format_queue_time(item.get("finished_at") or item.get("created_at")), fallback="time")
+    return f"fengxi_task_result_{task_slug}_{title_slug}_{timestamp}.json"
+
+
+def _export_task_history_entry(entry, output_path):
+    item = dict(entry or {})
+    task_result = item.get("task_result") if isinstance(item.get("task_result"), dict) else {}
+    if not task_result:
+        return False, "当前历史记录没有可导出的结构化结果。"
+    normalized_output = _normalize_input_path_value(output_path)
+    if not normalized_output:
+        return False, "未选择导出位置。"
+    ok = _export_task_result(task_result, normalized_output)
+    if not ok:
+        return False, f"导出失败：{normalized_output}"
+    return True, normalized_output
+
+
+def _prompt_export_task_history_entry(app, entry, output_path=None):
+    item = dict(entry or {})
+    task_result = item.get("task_result") if isinstance(item.get("task_result"), dict) else {}
+    if not task_result:
+        try:
+            tkinter.messagebox.showwarning("导出结果", "当前历史记录没有可导出的结构化结果。", parent=app)
+        except Exception:
+            pass
+        return False
+    selected_path = output_path
+    if not selected_path:
+        initial_dir = task_result.get("output_root") or os.path.dirname(_normalize_input_path_value(item.get("input"))) or str(Path.cwd())
+        try:
+            selected_path = tkinter.filedialog.asksaveasfilename(
+                title="导出任务结果",
+                parent=app,
+                defaultextension=".json",
+                initialdir=_normalize_input_path_value(initial_dir) or str(Path.cwd()),
+                initialfile=_build_task_history_export_filename(item),
+                filetypes=[("JSON 文件", "*.json"), ("所有文件", "*.*")],
+            )
+        except Exception as exc:
+            _debug(f"queue:history_export_dialog_error:{exc}")
+            selected_path = ""
+    ok, payload = _export_task_history_entry(item, selected_path)
+    try:
+        if ok:
+            tkinter.messagebox.showinfo("导出结果", f"任务结果已导出到：\n{payload}", parent=app)
+        elif selected_path:
+            tkinter.messagebox.showerror("导出结果", payload, parent=app)
+    except Exception:
+        pass
+    if ok:
+        try:
+            app.log(f"[任务历史] 已导出结果：{payload}")
+        except Exception:
+            pass
+    return ok
+
+
+def _build_task_history_log_export_text(entry):
+    item = dict(entry or {})
+    task_result = item.get("task_result") if isinstance(item.get("task_result"), dict) else {}
+    logs = list(item.get("logs") or task_result.get("logs") or task_result.get("log_lines") or [])
+    lines = [
+        f"标题：{item.get('title', '')}",
+        f"功能：{QUEUE_TASK_LABELS.get(item.get('task_type'), item.get('task_type') or '未知任务')}",
+        f"状态：{_queue_status_text(item.get('status'))}",
+        f"输入：{item.get('input', '')}",
+        f"创建时间：{_format_queue_time(item.get('created_at'))}",
+        f"结束时间：{_format_queue_time(item.get('finished_at') or item.get('created_at'))}",
+        "",
+        "日志：",
+    ]
+    if logs:
+        lines.extend(f"- {text}" for text in logs)
+    else:
+        lines.append("- (empty)")
+    return "\n".join(lines)
+
+
+def _build_task_history_log_export_filename(entry):
+    item = dict(entry or {})
+    task_type = QUEUE_TASK_LABELS.get(item.get("task_type"), item.get("task_type") or "task")
+    task_slug = _sanitize_filename_component(task_type, fallback="task")
+    title_slug = _sanitize_filename_component(item.get("title") or item.get("input") or "history", fallback="history")
+    timestamp = _sanitize_filename_component(_format_queue_time(item.get("finished_at") or item.get("created_at")), fallback="time")
+    return f"fengxi_task_log_{task_slug}_{title_slug}_{timestamp}.txt"
+
+
+def _export_task_history_log(entry, output_path):
+    item = dict(entry or {})
+    text = _build_task_history_log_export_text(item)
+    normalized_output = _normalize_input_path_value(output_path)
+    if not normalized_output:
+        return False, "未选择导出位置。"
+    try:
+        path = Path(normalized_output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return True, normalized_output
+    except Exception as exc:
+        _debug(f"queue:history_log_export_error:{exc}")
+        return False, f"导出失败：{normalized_output}"
+
+
+def _prompt_export_task_history_log(app, entry, output_path=None):
+    item = dict(entry or {})
+    selected_path = output_path
+    if not selected_path:
+        initial_dir = _normalize_input_path_value(item.get("input")) or str(Path.cwd())
+        try:
+            selected_path = tkinter.filedialog.asksaveasfilename(
+                title="导出任务日志",
+                parent=app,
+                defaultextension=".txt",
+                initialdir=initial_dir,
+                initialfile=_build_task_history_log_export_filename(item),
+                filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
+            )
+        except Exception as exc:
+            _debug(f"queue:history_log_export_dialog_error:{exc}")
+            selected_path = ""
+    ok, payload = _export_task_history_log(item, selected_path)
+    try:
+        if ok:
+            tkinter.messagebox.showinfo("导出日志", f"任务日志已导出到：\n{payload}", parent=app)
+        elif selected_path:
+            tkinter.messagebox.showerror("导出日志", payload, parent=app)
+    except Exception:
+        pass
+    if ok:
+        try:
+            app.log(f"[任务历史] 已导出日志：{payload}")
+        except Exception:
+            pass
+    return ok
+
+
+def _resolve_task_history_open_target(entry):
+    item = dict(entry or {})
+    task_result = item.get("task_result") if isinstance(item.get("task_result"), dict) else {}
+    candidates = [
+        task_result.get("output_root"),
+        item.get("output_root"),
+    ]
+    outputs = list(task_result.get("outputs") or item.get("outputs") or [])
+    if outputs:
+        candidates.extend(outputs)
+    candidates.append(item.get("input"))
+    for value in candidates:
+        normalized = _normalize_input_path_value(value)
+        if not normalized:
+            continue
+        if os.path.isdir(normalized):
+            return normalized
+        if os.path.isfile(normalized):
+            return os.path.dirname(normalized)
+    return ""
+
+
+def _open_task_history_output(entry):
+    target = _resolve_task_history_open_target(entry)
+    if not target:
+        return False, "当前历史记录没有可打开的输出位置。"
+    try:
+        os.startfile(target)
+        return True, target
+    except Exception as exc:
+        _debug(f"queue:history_open_output_error:{exc}")
+        return False, f"打开失败：{target}"
+
+
+def _prompt_open_task_history_output(app, entry):
+    ok, payload = _open_task_history_output(entry)
+    try:
+        if (not ok) and payload:
+            tkinter.messagebox.showwarning("打开输出位置", payload, parent=app)
+    except Exception:
+        pass
+    if ok:
+        try:
+            app.log(f"[任务历史] 已打开输出位置：{payload}")
+        except Exception:
+            pass
+    return ok
+
+
+def _show_task_history_detail(app, entry):
+    _ensure_queue_state(app)
+    detail_text = _build_task_history_detail_text(entry)
+    detail_window = getattr(app, "_fx_history_detail_window", None)
+    try:
+        if detail_window is not None and detail_window.winfo_exists():
+            detail_window.deiconify()
+            detail_window.lift()
+        else:
+            detail_window = customtkinter.CTkToplevel(app)
+            _apply_window_icon(detail_window)
+            app._fx_history_detail_window = detail_window
+            detail_window.title("任务历史详情")
+            detail_window.geometry("820x620")
+            detail_window.minsize(680, 480)
+            try:
+                detail_window.configure(fg_color=globals().get("COLOR_CARD_ALT", "#303030"))
+            except Exception:
+                pass
+            detail_window.grid_columnconfigure(0, weight=1)
+            detail_window.grid_rowconfigure(1, weight=1)
+            customtkinter.CTkLabel(
+                detail_window,
+                text="任务历史详情",
+                text_color=globals().get("COLOR_TEXT", "#E6EEF2"),
+                font=customtkinter.CTkFont(size=20, weight="bold"),
+                anchor="w",
+            ).grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 8))
+            detail_box = customtkinter.CTkTextbox(
+                detail_window,
+                wrap="word",
+                fg_color=globals().get("COLOR_CARD", "#2B2B2B"),
+                text_color=globals().get("COLOR_TEXT", "#E6EEF2"),
+                border_width=1,
+                border_color=globals().get("COLOR_BORDER", "#3A3A3A"),
+                corner_radius=12,
+            )
+            detail_box.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 12))
+            detail_window._fx_detail_box = detail_box
+            actions = customtkinter.CTkFrame(detail_window, fg_color="transparent")
+            actions.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 16))
+            actions.grid_columnconfigure(0, weight=1)
+
+            def copy_detail():
+                try:
+                    app.clipboard_clear()
+                    app.clipboard_append(detail_window._fx_detail_box.get("1.0", "end-1c"))
+                    app.update()
+                except Exception as exc:
+                    _debug(f"queue:history_detail_copy_error:{exc}")
+
+            def export_detail_result():
+                current_entry = getattr(detail_window, "_fx_entry", None)
+                _prompt_export_task_history_entry(app, current_entry)
+
+            def export_detail_log():
+                current_entry = getattr(detail_window, "_fx_entry", None)
+                _prompt_export_task_history_log(app, current_entry)
+
+            def open_output_location():
+                current_entry = getattr(detail_window, "_fx_entry", None)
+                _prompt_open_task_history_output(app, current_entry)
+
+            customtkinter.CTkButton(
+                actions,
+                text="导出结果",
+                command=export_detail_result,
+                height=34,
+                width=92,
+                corner_radius=10,
+                fg_color="#56603D",
+                hover_color="#68714A",
+                text_color="#F5F8EA",
+            ).grid(row=0, column=1, sticky="e", padx=(0, 8))
+            customtkinter.CTkButton(
+                actions,
+                text="打开位置",
+                command=open_output_location,
+                height=34,
+                width=92,
+                corner_radius=10,
+                fg_color="#3F5B57",
+                hover_color="#4D6C67",
+                text_color="#EAF6F3",
+            ).grid(row=0, column=2, sticky="e", padx=(0, 8))
+            customtkinter.CTkButton(
+                actions,
+                text="导出日志",
+                command=export_detail_log,
+                height=34,
+                width=92,
+                corner_radius=10,
+                fg_color="#5A4E3D",
+                hover_color="#6A5B49",
+                text_color="#F8F1E6",
+            ).grid(row=0, column=3, sticky="e", padx=(0, 8))
+
+            customtkinter.CTkButton(
+                actions,
+                text="复制详情",
+                command=copy_detail,
+                height=34,
+                width=92,
+                corner_radius=10,
+                fg_color="#44566C",
+                hover_color="#51657D",
+                text_color="#EEF5FF",
+            ).grid(row=0, column=4, sticky="e")
+        detail_box = getattr(detail_window, "_fx_detail_box", None)
+        detail_window._fx_entry = dict(entry or {})
+        if detail_box is not None:
+            detail_box.delete("1.0", "end")
+            detail_box.insert("1.0", detail_text)
+            _apply_task_history_detail_highlights(detail_box, detail_text, detail_window._fx_entry)
+            detail_box.see("1.0")
+    except Exception as exc:
+        _debug(f"queue:history_detail_error:{exc}")
+
+
+def _reset_queue_history_filters(app):
+    try:
+        getattr(app, "_fx_history_filter_status_var", None).set(QUEUE_HISTORY_STATUS_DEFAULT)
+    except Exception:
+        pass
+    try:
+        getattr(app, "_fx_history_filter_task_var", None).set(QUEUE_HISTORY_TASK_DEFAULT)
+    except Exception:
+        pass
+    try:
+        getattr(app, "_fx_history_filter_failure_var", None).set(QUEUE_HISTORY_FAILURE_DEFAULT)
+    except Exception:
+        pass
+    try:
+        getattr(app, "_fx_history_search_var", None).set("")
+    except Exception:
+        pass
+    _refresh_history_panel(app)
+
+
+def _install_queue_history_filter_hooks(app):
+    if getattr(app, "_fx_history_filter_hooks_ready", False):
+        return
+
+    def on_change(*_args):
+        _refresh_history_panel(app)
+
+    app._fx_history_filter_trace_callback = on_change
+    for attr in ("_fx_history_filter_status_var", "_fx_history_filter_task_var", "_fx_history_filter_failure_var", "_fx_history_search_var"):
+        var = getattr(app, attr, None)
+        if isinstance(var, tkinter.Variable):
+            try:
+                var.trace_add("write", on_change)
+            except Exception:
+                pass
+    app._fx_history_filter_hooks_ready = True
+
+
+def _task_result_matches_task(task_result, task):
+    if not isinstance(task_result, dict) or not isinstance(task, dict):
+        return False
+    task_input = _normalize_input_path_value(task.get("input"))
+    result_input = _normalize_input_path_value(task_result.get("input"))
+    task_type = str(task.get("task_type") or "")
+    result_type = str(task_result.get("task_type") or "")
+    if task_input and result_input and os.path.normcase(task_input) != os.path.normcase(result_input):
+        return False
+    if task_type and result_type and task_type != result_type:
+        return False
+    return True
+
+
 def _queue_set_task_status(app, task, status, detail=""):
+    task_result = task.get("task_result")
+    if not _task_result_matches_task(task_result, task):
+        task_result = _get_last_task_result(app)
+    if not _task_result_matches_task(task_result, task):
+        task_result = None
+    if task_result is None and str(status or "") in {"success", "failed", "stopped", "skipped"}:
+        task_result = _new_task_result(task.get("input"), task.get("task_type"))
+        _set_task_result_finished(
+            task_result,
+            status=status,
+            message=str(detail or status),
+            detail=str(detail or status),
+            error=str(detail or "") if str(status or "") == "failed" else "",
+            stopped=str(status or "") == "stopped",
+            skipped=str(status or "") == "skipped",
+        )
+    if isinstance(task_result, dict):
+        task["task_result"] = dict(task_result)
+        detail = task_result.get("detail") or detail
+        task["output_root"] = task_result.get("output_root", "")
+        task["outputs"] = list(task_result.get("outputs") or [])
+        task["error"] = task_result.get("error", "")
+        task["duration_seconds"] = task_result.get("duration_seconds", 0.0)
+        task["skipped"] = bool(task_result.get("skipped", False))
+        status = task_result.get("status") or status
     task["status"] = status
-    task["finished_at"] = time.time() if status in {"success", "failed", "stopped"} else task.get("finished_at")
+    task["finished_at"] = time.time() if status in {"success", "failed", "stopped", "skipped"} else task.get("finished_at")
     if detail:
         task["detail"] = str(detail)
     status_var = task.get("status_var")
@@ -5128,6 +6274,12 @@ def _queue_set_task_status(app, task, status, detail=""):
 
 
 def _queue_task_had_errors(task):
+    task_result = task.get("task_result")
+    if isinstance(task_result, dict):
+        if task_result.get("status") in {"failed"} or task_result.get("error"):
+            return True
+        if task_result.get("failed_items"):
+            return True
     if task.get("exception"):
         return True
     logs = task.get("logs") or []
@@ -5143,10 +6295,21 @@ def _queue_capture_task_logs(app, task):
         return None
 
     def patched_log(message, *args, **kwargs):
+        text = str(message)
         try:
-            task.setdefault("logs", []).append(str(message))
+            task.setdefault("logs", []).append(text)
         except Exception:
             pass
+        task_result = _get_last_task_result(app)
+        if _task_result_matches_task(task_result, task):
+            try:
+                task_result.setdefault("logs", []).append(text)
+            except Exception:
+                pass
+            try:
+                task_result.setdefault("log_lines", []).append(text)
+            except Exception:
+                pass
         return original_log(message, *args, **kwargs)
 
     app.log = patched_log
@@ -5159,6 +6322,92 @@ def _queue_restore_task_logs(app, original_log):
             app.log = original_log
         except Exception:
             pass
+
+
+def _split_failed_item_path(item):
+    text = str(item or "").strip()
+    if not text:
+        return ""
+    if ": " in text:
+        head, _tail = text.split(": ", 1)
+        if head and os.path.exists(head):
+            return head
+    return text
+
+
+def _resolve_retry_failed_item_paths(source):
+    if not isinstance(source, dict):
+        return []
+    source_input = _normalize_input_path_value(source.get("input"))
+    if not source_input:
+        return []
+    input_root = os.path.dirname(source_input) if os.path.isfile(source_input) else source_input
+    task_result = source.get("task_result") if isinstance(source.get("task_result"), dict) else {}
+    failed_items = list(task_result.get("failed_items") or source.get("failed_items") or [])
+    resolved = []
+    seen = set()
+    for item in failed_items:
+        path_value = _split_failed_item_path(item)
+        if not path_value:
+            continue
+        normalized = _normalize_input_path_value(path_value)
+        if normalized and os.path.exists(normalized):
+            candidate = normalized
+        else:
+            candidate = _normalize_input_path_value(os.path.join(input_root, path_value)) if input_root else ""
+        if not candidate or not os.path.exists(candidate):
+            continue
+        key = os.path.normcase(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(candidate)
+    return resolved
+
+
+def _build_retry_subset_input(app, source):
+    if not isinstance(source, dict):
+        return None
+    failed_paths = _resolve_retry_failed_item_paths(source)
+    if not failed_paths:
+        return None
+    source_input = _normalize_input_path_value(source.get("input"))
+    if len(failed_paths) == 1 and os.path.isfile(failed_paths[0]):
+        return {
+            "mode": "single_file",
+            "input": failed_paths[0],
+            "failed_items": failed_paths,
+            "cleanup": None,
+        }
+    task_type = str(source.get("task_type") or "")
+    if task_type not in {"pdf", "image", "remove_wm"}:
+        return None
+    try:
+        staging_root = Path(tempfile.mkdtemp(prefix="fx_retry_subset_"))
+        for src in failed_paths:
+            if os.path.isfile(source_input):
+                relative = os.path.basename(src)
+            else:
+                try:
+                    relative = os.path.relpath(src, source_input)
+                except Exception:
+                    relative = os.path.basename(src)
+            dst = staging_root / relative
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        return {
+            "mode": "staging_dir",
+            "input": str(staging_root),
+            "failed_items": failed_paths,
+            "cleanup": str(staging_root),
+        }
+    except Exception as exc:
+        _debug(f"queue:retry_subset_build_error:{exc}")
+        try:
+            shutil.rmtree(staging_root, ignore_errors=True)
+        except Exception:
+            pass
+        return None
 
 
 def _queue_build_task(app, input_path=None, task_type=None, retry_source=None):
@@ -5200,6 +6449,16 @@ def _ensure_queue_state(app):
         app._fx_task_queue_running = False
     if not hasattr(app, "_fx_queue_window"):
         app._fx_queue_window = None
+    if not hasattr(app, "_fx_history_filter_status_var"):
+        app._fx_history_filter_status_var = tkinter.StringVar(master=app, value=QUEUE_HISTORY_STATUS_DEFAULT)
+    if not hasattr(app, "_fx_history_filter_task_var"):
+        app._fx_history_filter_task_var = tkinter.StringVar(master=app, value=QUEUE_HISTORY_TASK_DEFAULT)
+    if not hasattr(app, "_fx_history_filter_failure_var"):
+        app._fx_history_filter_failure_var = tkinter.StringVar(master=app, value=QUEUE_HISTORY_FAILURE_DEFAULT)
+    if not hasattr(app, "_fx_history_search_var"):
+        app._fx_history_search_var = tkinter.StringVar(master=app, value="")
+    if not hasattr(app, "_fx_history_summary_var"):
+        app._fx_history_summary_var = tkinter.StringVar(master=app, value="")
 
 
 def _refresh_queue_status_summary(app):
@@ -5281,12 +6540,14 @@ def _refresh_queue_panel(app):
 
 def _refresh_history_panel(app):
     panel = getattr(app, "_fx_history_list_frame", None)
+    history = list(getattr(app, "_fx_task_history", []) or [])
+    filtered_history = _get_filtered_queue_history(app)
+    _refresh_history_summary(app, filtered_history=filtered_history, full_history=history)
     if panel is None:
         return
     try:
         for child in panel.winfo_children():
             child.destroy()
-        history = list(getattr(app, "_fx_task_history", []) or [])
         if not history:
             customtkinter.CTkLabel(
                 panel,
@@ -5296,7 +6557,16 @@ def _refresh_history_panel(app):
                 justify="left",
             ).pack(anchor="w", padx=16, pady=14)
             return
-        for item in reversed(history[-QUEUE_HISTORY_LIMIT:]):
+        if not filtered_history:
+            customtkinter.CTkLabel(
+                panel,
+                text="没有符合筛选条件的历史记录。可以调整状态、功能类型或搜索关键词。",
+                text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+                font=customtkinter.CTkFont(size=12),
+                justify="left",
+            ).pack(anchor="w", padx=16, pady=14)
+            return
+        for item in reversed(filtered_history[-QUEUE_HISTORY_LIMIT:]):
             row = customtkinter.CTkFrame(panel, fg_color=globals().get("COLOR_CARD_ALT", "#303030"), corner_radius=10)
             row.pack(fill="x", padx=10, pady=(6, 4))
             row.grid_columnconfigure(0, weight=1)
@@ -5317,10 +6587,47 @@ def _refresh_history_panel(app):
                 font=customtkinter.CTkFont(size=12, weight="bold"),
                 width=58,
             ).grid(row=0, column=1, padx=(8, 0), sticky="e")
+            task_result = item.get("task_result") if isinstance(item.get("task_result"), dict) else {}
+            stats_parts = []
+            processed_count = int(task_result.get("processed_count") or 0)
+            success_count = int(task_result.get("success_count") or 0)
+            failed_count = int(task_result.get("failed_count") or 0)
+            skipped_count = int(task_result.get("skipped_count") or 0)
+            duration_seconds = float(task_result.get("duration_seconds") or item.get("duration_seconds") or 0.0)
+            if processed_count:
+                stats_parts.append(f"结果 {success_count}/{processed_count}")
+            if failed_count:
+                stats_parts.append(f"失败 {failed_count}")
+            if skipped_count:
+                stats_parts.append(f"跳过 {skipped_count}")
+            if duration_seconds > 0:
+                stats_parts.append(f"耗时 {duration_seconds:.2f}s")
             detail_lines = [
                 item.get("input", ""),
-                f"时间：{_format_queue_time(item.get('finished_at') or item.get('created_at'))}",
+                f"功能：{QUEUE_TASK_LABELS.get(item.get('task_type'), item.get('task_type') or '未知任务')} · 时间：{_format_queue_time(item.get('finished_at') or item.get('created_at'))}",
             ]
+            if stats_parts:
+                detail_lines.append(" · ".join(stats_parts))
+            output_root = task_result.get("output_root") or item.get("output_root", "")
+            if output_root:
+                detail_lines.append(f"输出：{output_root}")
+            error_text = task_result.get("error") or item.get("error", "")
+            if error_text:
+                detail_lines.append(str(error_text)[:160])
+            failure_kind, failure_reason = _classify_failure_reason(item)
+            if item.get("status") == "failed" and failure_kind and failure_kind != "unknown":
+                failure_labels = {
+                    "path_missing": "路径缺失",
+                    "permission": "权限问题",
+                    "timeout": "超时",
+                    "dependency": "依赖问题",
+                    "partial_failure": "部分失败",
+                    "log_failure": "日志失败",
+                    "generic_failure": "普通失败",
+                }
+                detail_lines.append(f"失败分类：{failure_labels.get(failure_kind, failure_kind)}")
+                if failure_reason:
+                    detail_lines.append(failure_reason[:120])
             if item.get("detail"):
                 detail_lines.append(str(item.get("detail"))[:160])
             customtkinter.CTkLabel(
@@ -5331,18 +6638,35 @@ def _refresh_history_panel(app):
                 justify="left",
                 anchor="w",
             ).grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
-            if item.get("status") == "failed":
-                customtkinter.CTkButton(
-                    row,
-                    text="重试",
-                    command=lambda source=item: _queue_retry_history_task(app, source),
-                    height=30,
-                    width=72,
-                    corner_radius=8,
-                    fg_color="#6D4F3B",
-                    hover_color="#7C5B43",
-                    text_color="#FFF6E6",
-                ).grid(row=0, column=1, rowspan=2, padx=(0, 10), pady=8, sticky="e")
+            is_failed = item.get("status") == "failed"
+            action_col = customtkinter.CTkFrame(row, fg_color="transparent")
+            action_col.grid(row=0, column=1, rowspan=2, padx=(0, 10), pady=8, sticky="ne")
+            customtkinter.CTkButton(
+                action_col,
+                text="详情",
+                command=lambda source=item: _show_task_history_detail(app, source),
+                height=30,
+                width=72,
+                corner_radius=8,
+                fg_color="transparent",
+                hover_color="#303030",
+                border_width=1,
+                border_color="#566274",
+                text_color="#E8EDF5",
+            ).pack(anchor="e", pady=(0, 6))
+            customtkinter.CTkButton(
+                action_col,
+                text="重试" if is_failed else "回放",
+                command=(lambda source=item: _queue_retry_history_task(app, source))
+                if is_failed
+                else (lambda source=item: _queue_replay_history_task(app, source)),
+                height=30,
+                width=72,
+                corner_radius=8,
+                fg_color="#6D4F3B" if is_failed else "#44566C",
+                hover_color="#7C5B43" if is_failed else "#51657D",
+                text_color="#FFF6E6" if is_failed else "#EEF5FF",
+            ).pack(anchor="e")
     except Exception as exc:
         _debug(f"queue:refresh_history_error:{exc}")
 
@@ -5361,6 +6685,7 @@ def _show_task_queue_window(app):
         pass
 
     window = customtkinter.CTkToplevel(app)
+    _apply_window_icon(window)
     app._fx_queue_window = window
     window.title("任务队列与历史记录")
     window.geometry("860x620")
@@ -5433,19 +6758,63 @@ def _show_task_queue_window(app):
 
     history_card = customtkinter.CTkFrame(window, fg_color=globals().get("COLOR_CARD", "#2B2B2B"), corner_radius=14, border_width=1, border_color=globals().get("COLOR_BORDER", "#3A3A3A"))
     history_card.grid(row=1, column=1, sticky="nsew", padx=(8, 18), pady=(0, 16))
-    history_card.grid_rowconfigure(1, weight=1)
+    history_card.grid_rowconfigure(2, weight=1)
     history_card.grid_columnconfigure(0, weight=1)
+    history_header = customtkinter.CTkFrame(history_card, fg_color="transparent")
+    history_header.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
+    history_header.grid_columnconfigure(0, weight=1)
     customtkinter.CTkLabel(
-        history_card,
+        history_header,
         text="历史与失败重试",
         text_color=globals().get("COLOR_TEXT", "#E6EEF2"),
         font=customtkinter.CTkFont(size=14, weight="bold"),
         anchor="w",
-    ).grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
+    ).grid(row=0, column=0, sticky="w")
+    customtkinter.CTkLabel(
+        history_header,
+        textvariable=app._fx_history_summary_var,
+        text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+        font=customtkinter.CTkFont(size=11),
+        anchor="e",
+    ).grid(row=0, column=1, sticky="e", padx=(12, 0))
+    history_filters = customtkinter.CTkFrame(history_card, fg_color="transparent")
+    history_filters.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+    history_filters.grid_columnconfigure(3, weight=1)
+    customtkinter.CTkOptionMenu(
+        history_filters,
+        variable=app._fx_history_filter_status_var,
+        values=[label for label, _value in QUEUE_HISTORY_STATUS_OPTIONS],
+        command=lambda _value, target=app: _refresh_history_panel(target),
+        height=32,
+        width=110,
+    ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+    customtkinter.CTkOptionMenu(
+        history_filters,
+        variable=app._fx_history_filter_task_var,
+        values=[label for label, _value in QUEUE_HISTORY_TASK_OPTIONS],
+        command=lambda _value, target=app: _refresh_history_panel(target),
+        height=32,
+        width=124,
+    ).grid(row=0, column=1, padx=(0, 8), sticky="w")
+    customtkinter.CTkOptionMenu(
+        history_filters,
+        variable=app._fx_history_filter_failure_var,
+        values=[label for label, _value in QUEUE_HISTORY_FAILURE_OPTIONS],
+        command=lambda _value, target=app: _refresh_history_panel(target),
+        height=32,
+        width=118,
+    ).grid(row=0, column=2, padx=(0, 8), sticky="w")
+    app._fx_history_search_entry = customtkinter.CTkEntry(
+        history_filters,
+        textvariable=app._fx_history_search_var,
+        height=32,
+        placeholder_text="搜索路径、错误、失败原因、输出位置...",
+    )
+    app._fx_history_search_entry.grid(row=0, column=3, sticky="ew")
     app._fx_history_list_frame = customtkinter.CTkScrollableFrame(history_card, fg_color="transparent")
-    app._fx_history_list_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+    app._fx_history_list_frame.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
     history_actions = customtkinter.CTkFrame(history_card, fg_color="transparent")
-    history_actions.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 12))
+    history_actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 12))
     history_actions.grid_columnconfigure(0, weight=1)
     customtkinter.CTkButton(
         history_actions,
@@ -5459,6 +6828,19 @@ def _show_task_queue_window(app):
     ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
     customtkinter.CTkButton(
         history_actions,
+        text="重置筛选",
+        command=lambda target=app: _reset_queue_history_filters(target),
+        height=34,
+        width=92,
+        corner_radius=10,
+        fg_color="transparent",
+        hover_color="#303030",
+        border_width=1,
+        border_color="#566274",
+        text_color="#E8EDF5",
+    ).grid(row=0, column=1, sticky="e", padx=(0, 8))
+    customtkinter.CTkButton(
+        history_actions,
         text="刷新",
         command=lambda target=app: (_refresh_queue_panel(target), _refresh_history_panel(target)),
         height=34,
@@ -5469,7 +6851,7 @@ def _show_task_queue_window(app):
         border_width=1,
         border_color="#566274",
         text_color="#E8EDF5",
-    ).grid(row=0, column=1, sticky="e")
+    ).grid(row=0, column=2, sticky="e")
 
     def on_close():
         try:
@@ -5478,6 +6860,7 @@ def _show_task_queue_window(app):
             pass
 
     window.protocol("WM_DELETE_WINDOW", on_close)
+    _install_queue_history_filter_hooks(app)
     _refresh_queue_panel(app)
     _refresh_history_panel(app)
     return window
@@ -5518,17 +6901,46 @@ def _clear_queued_tasks(app):
 
 
 def _queue_retry_history_task(app, source):
+    return _queue_replay_history_task(app, source, action_name="重试", prefer_failed_subset=True)
+
+
+def _queue_replay_history_task(app, source, action_name="回放", prefer_failed_subset=False):
     _ensure_queue_state(app)
     try:
-        task = _queue_build_task(app, source.get("input"), source.get("task_type"), retry_source=source)
+        retry_input = source.get("input")
+        retry_mode = "full"
+        retry_failed_items = []
+        retry_cleanup = None
+        if prefer_failed_subset:
+            subset = _build_retry_subset_input(app, source)
+            if isinstance(subset, dict) and subset.get("input"):
+                retry_input = subset.get("input")
+                retry_mode = str(subset.get("mode") or "subset")
+                retry_failed_items = list(subset.get("failed_items") or [])
+                retry_cleanup = subset.get("cleanup")
+        task = _queue_build_task(app, retry_input, source.get("task_type"), retry_source=source)
+        if isinstance(source.get("task_result"), dict):
+            task["snapshot"]["task_result"] = dict(source.get("task_result"))
+        task["history_source_id"] = source.get("id")
+        task["retry_mode"] = retry_mode
+        if retry_failed_items:
+            task["retry_failed_items"] = list(retry_failed_items)
+        if retry_cleanup:
+            task["retry_staging_root"] = retry_cleanup
         app._fx_task_queue.append(task)
-        app.log(f"🔁 [队列] 已加入重试：{task['title']}")
+        if prefer_failed_subset and retry_mode != "full":
+            app.log(f"🔁 [队列] 已加入{action_name}：{task['title']}（仅失败项）")
+        else:
+            app.log(f"🔁 [队列] 已加入{action_name}：{task['title']}")
+        _refresh_queue_panel(app)
+        return task
     except Exception as exc:
         try:
-            app.log(f"❌ [队列] 重试失败：{exc}")
+            app.log(f"❌ [队列] {action_name}失败：{exc}")
         except Exception:
             pass
     _refresh_queue_panel(app)
+    return None
 
 
 def _queue_retry_failed_history(app):
@@ -5562,6 +6974,8 @@ def _run_task_queue_worker(app):
             time.sleep(0.05)
             original_log = _queue_capture_task_logs(app, task)
             try:
+                _clear_last_task_result(app)
+                _start_task_result(app, task.get("input"), task.get("task_type"))
                 app.stop_event = False
                 app.is_running = True
                 try:
@@ -5569,7 +6983,17 @@ def _run_task_queue_worker(app):
                 except Exception:
                     pass
                 app.run_process(task.get("input"), task.get("task_type"))
-                if getattr(app, "stop_event", False):
+                task_result = _infer_task_result_from_context(
+                    app,
+                    task.get("input"),
+                    task.get("task_type"),
+                    return_value=None,
+                    logs=task.get("logs"),
+                )
+                if isinstance(task_result, dict):
+                    task["task_result"] = dict(task_result)
+                    _queue_set_task_status(app, task, task_result.get("status", "unknown"), task_result.get("detail", ""))
+                elif getattr(app, "stop_event", False):
                     _queue_set_task_status(app, task, "stopped", "用户停止")
                 elif _queue_task_had_errors(task):
                     _queue_set_task_status(app, task, "failed", "执行日志中包含失败或错误信息")
@@ -5589,6 +7013,13 @@ def _run_task_queue_worker(app):
                 except Exception:
                     pass
                 _append_queue_history(app, task)
+                _clear_last_task_result(app)
+                retry_cleanup = task.get("retry_staging_root")
+                if retry_cleanup:
+                    try:
+                        shutil.rmtree(retry_cleanup, ignore_errors=True)
+                    except Exception:
+                        pass
                 try:
                     app._fx_task_queue = [item for item in app._fx_task_queue if item.get("id") != task.get("id")]
                 except Exception:
@@ -5731,7 +7162,9 @@ def _patch_runtime_progress_reporting():
     site_map = _build_runtime_progress_site_map(runtime_run_process)
 
     def patched_run_process(self, input_folder, task_type):
+        _start_task_result(self, input_folder, task_type)
         tracker = None
+        result = None
         try:
             tracker = _install_run_progress_tracker(
                 self,
@@ -5740,7 +7173,17 @@ def _patch_runtime_progress_reporting():
                 runtime_run_process=runtime_run_process,
                 site_map=site_map,
             )
-            return original_run_process(self, input_folder, task_type)
+            result = original_run_process(self, input_folder, task_type)
+            return result
+        except Exception as exc:
+            _finalize_current_task_result(
+                self,
+                "failed",
+                message=str(exc),
+                detail=str(exc),
+                error=str(exc),
+            )
+            raise
         finally:
             if tracker is not None:
                 try:
@@ -5751,6 +7194,16 @@ def _patch_runtime_progress_reporting():
                     tracker.restore()
                 except Exception as exc:
                     _debug(f"patch_runtime_progress:restore_error:{exc}")
+            try:
+                _infer_task_result_from_context(
+                    self,
+                    input_folder,
+                    task_type,
+                    return_value=result,
+                    logs=getattr(self, "_fx_last_task_logs", None),
+                )
+            except Exception as exc:
+                _debug(f"patch_runtime_progress:finalize_result_error:{exc}")
 
     patched_run_process.__fx_runtime_progress_patch__ = True
     FengxiToolboxApp.run_process = patched_run_process

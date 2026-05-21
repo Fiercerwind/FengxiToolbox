@@ -1,5 +1,80 @@
 # 调试状态
 
+## 2026-05-21 子窗口图标与失败原因筛选
+- 本轮目标：
+  - 让子页面窗口也统一使用风兮自己的应用图标。
+  - 把上一步未完成的“失败原因筛选”正式接入任务历史窗口。
+- 关键修复：
+  - `Fengxi_Toolbox.py` 新增 `_apply_window_icon(...)`，统一给子窗口应用 `assets/fengxi_app_icon.ico/png`。
+  - 统一文件/文件夹选择器、任务历史详情窗口、任务队列与历史窗口都改为使用风兮图标。
+  - 历史筛选新增失败类别维度：路径缺失、权限问题、超时、依赖问题、部分失败、日志失败、普通失败、未知失败。
+  - `_filter_queue_history_entries(...)`、`_get_queue_history_filters(...)`、`_get_filtered_queue_history(...)`、重置逻辑与 UI 状态变量均已接入失败筛选。
+  - `full_debug_test.py` 新增 `task_history_failure_filter_path_missing` 与 `task_history_failure_filter_state_vars` 回归。
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：83/83 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未动 `批量压缩` 与 `添加水印` 的核心处理逻辑。
+
+## 2026-05-21 任务历史失败分类预览
+- 本轮目标：
+  - 在失败详情分组之后，再把失败原因做一层轻量分类，让历史列表能先看出是路径、权限、超时、依赖还是普通失败。
+- 关键修复：
+  - `Fengxi_Toolbox.py` 新增 `_classify_failure_reason(...)`，对失败记录做轻量分类预览。
+  - 历史搜索 blob 现在会带上失败类别和失败原因，方便按关键字直接检索。
+  - 历史列表详情行会显示失败分类提示，帮助快速判断问题类型。
+  - `full_debug_test.py` 新增 `task_history_failure_reason_classification` 与 `task_history_failure_reason_search_blob` 回归。
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：81/81 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未动 `批量压缩` 与 `添加水印` 的核心处理逻辑。
+
+## 2026-05-21 任务历史失败详情归类
+- 本轮目标：
+  - 让任务历史详情对失败记录更直观，分出失败概览、失败原因、失败项和关键日志，并在详情框内高亮失败相关文本。
+- 关键修复：
+  - `Fengxi_Toolbox.py` 的 `_build_task_history_detail_text(...)` 新增失败概览分组，单独展示失败原因、失败项数量与关键失败日志。
+  - 新增 `_apply_task_history_detail_highlights(...)`，为历史详情文本框中的失败标题、错误行、失败项和错误日志添加标签高亮。
+  - `_show_task_history_detail(...)` 在写入详情文本后立即应用高亮标签。
+  - `full_debug_test.py` 新增 `task_history_failed_detail_groups` 与 `task_history_failed_detail_highlight_tags` 回归。
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：79/79 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未动 `批量压缩` 与 `添加水印` 的核心处理逻辑。
+
+## 2026-05-21 统一任务结果模型回归
+- 本轮目标：
+  - 统一任务执行后的结构化结果口径，不再让队列历史主要依赖日志关键词猜成功/失败。
+- 关键修复：
+  - `Fengxi_Toolbox.py` 新增统一 `task_result` 结构，并挂载到 `app._fx_last_task_result`。
+  - `run_process()` 最外层补丁会在任务开始时创建结果对象，在任务结束时统一补齐状态、耗时和错误信息。
+  - 自定义工作流已接入结构化结果写入：
+    - `remove_wm`
+    - `pdf -> ocr`
+    - `pdf -> compress`
+    - `image -> to_pdf / merge_pdf`
+    - 单文件 `zip` 包装路径
+  - 队列 worker 与历史记录现在优先消费 `task_result`，日志关键词退为兜底。
+  - 历史记录保存裁剪后的 `task_result` 快照，新增结果导出辅助函数 `_export_task_result(...)`。
+- 新增回归：
+  - `task_queue_structured_result`
+  - `single_file_input_pdf_compress_result_model`
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py smoke_test.py tools\fx_pdf_ocr.py tools\fx_workspace_tools.py tools\generate_fengxi_icon.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：61/61 通过。
+- 改动边界：
+  - 本轮仍不修改 `fengxi_runtime.bin`。
+  - `批量压缩` 与 `添加水印` 核心业务逻辑未改。
+
 ## 2026-05-20 批量水印文件名规则 UI 与记忆回归
 - 本轮目标：
   - 修复 `按文件名规则跳过` 行里的 `留空默认` 提示显示不全。
@@ -529,3 +604,36 @@
 - 当前结论：
   - “找不到库”问题已从打包版复现状态转为已修复状态。
   - 若后续再次复发，优先比对新包 `_internal` 中是否重新出现 `msvcp140*.dll`、`vcruntime140*.dll`、`ucrtbase.dll`、`api-ms-win-crt-*.dll`。
+
+## 2026-05-21 任务历史筛选与回放回归
+- 本轮目标：
+  - 让任务历史变成可检索、可筛选、可回放的入口，而不是只列出历史和失败重试。
+- 关键修复：
+  - 历史窗口新增状态筛选、功能筛选、关键词筛选。
+  - 成功历史也支持回放入队，失败历史保留重试。
+  - 历史摘要会显示“当前可见条数 / 总条数”。
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` 通过。
+  - `python smoke_test.py` 14/14 通过。
+  - `python full_debug_test.py` 65/65 通过。
+- 改动边界：
+  - 仍只改 `Fengxi_Toolbox.py` 加载器层与 `full_debug_test.py`。
+  - 未触碰 `批量压缩` / `添加水印` 核心业务实现。
+
+
+## 2026-05-21 16:48:24
+- Status: history detail export done
+- Scope: task history detail dialog
+- Result: export button added; it saves structured task_result JSON for the current history entry and rejects empty entries cleanly. Test suite: py_compile passed, smoke_test 14/14, full_debug_test 71/71.
+
+
+## 2026-05-21 16:59:33
+- Status: history detail log export done
+- Scope: task history detail dialog
+- Result: added 导出日志 beside 导出结果. The exported TXT is a plain text snapshot of the current entry's title, task, status, timestamps, and log lines, with a safe default filename and clean empty-log fallback. Test suite: py_compile passed, smoke_test 14/14, full_debug_test 74/74.
+
+
+## 2026-05-21 18:14:31
+- Status: history detail open output location done
+- Scope: task history detail dialog
+- Result: added 打开位置 beside 导出结果/导出日志/复制详情. The action opens the best available target for the current entry, preferring output_root and falling back to an output file's parent directory. Test suite: py_compile passed, smoke_test 14/14, full_debug_test 77/77.
