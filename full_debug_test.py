@@ -31,6 +31,11 @@ class DummyApp:
         self.logs.append(msg)
 
 
+class AttrBox:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
 def make_pdf(path, lines):
     pdf = canvas.Canvas(str(path))
     for index, line in enumerate(lines):
@@ -49,13 +54,16 @@ def wait_for(condition, timeout=15, interval=0.2):
     return condition()
 
 
-def office_available(progid):
+def office_available(progid, mod=None):
     import pythoncom
     import win32com.client
 
     pythoncom.CoInitialize()
     try:
-        app = win32com.client.DispatchEx(progid)
+        if mod is not None and progid == "Word.Application":
+            app = mod._create_hidden_word_app()
+        else:
+            app = win32com.client.DispatchEx(progid)
         version = getattr(app, "Version", None)
         app.Quit()
         return True, version
@@ -118,10 +126,425 @@ def main():
     tracker.note_process_single_complete()
     record("progress_tracker_process_single", tracker_values == [0.0, 0.5, 0.5, 1.0], tracker_values)
 
+    progress_status_values = []
+
+    class ProgressStatusVar:
+        def set(self, value):
+            progress_status_values.append(value)
+
+    status_app = type("FakeProgressStatusApp", (), {"stop_event": False})()
+    status_app._fx_progress_status_var = ProgressStatusVar()
+    tracker = mod._FxRunProgressTracker(
+        status_app,
+        total_units=2,
+        original_progress_set=lambda value: None,
+        runtime_run_process=runtime_run_process,
+        site_map=runtime_progress_map,
+    )
+    tracker.started_at = time.time() - 30
+    tracker.set_current_item("D:/probe/scan.pdf", "OCR 准备")
+    tracker.set_current_item_fraction(0.5, stage="OCR 第 1/2 页", current_file="D:/probe/scan.pdf")
+    latest_progress_status = getattr(status_app, "_fx_last_progress_status", "")
+    record(
+        "progress_tracker_status_text",
+        "当前：scan.pdf" in latest_progress_status
+        and "阶段：OCR 第 1/2 页" in latest_progress_status
+        and "文件：0/2" in latest_progress_status
+        and "总进度：25%" in latest_progress_status
+        and "预计剩余：" in latest_progress_status,
+        latest_progress_status,
+    )
+    record(
+        "progress_eta_format",
+        mod._format_progress_eta(None) == "--"
+        and mod._format_progress_eta(0.2) == "<1秒"
+        and mod._format_progress_eta(65) == "01:05",
+        {
+            "none": mod._format_progress_eta(None),
+            "short": mod._format_progress_eta(0.2),
+            "minute": mod._format_progress_eta(65),
+        },
+    )
+
+    history_path = mod._get_queue_history_file()
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    old_entry = {
+        "id": "old_history",
+        "title": "old history",
+        "status": "success",
+        "task_type": "pdf",
+        "finished_at": now - (mod.QUEUE_HISTORY_RETENTION_DAYS + 2) * 86400,
+    }
+    recent_entry = {
+        "id": "recent_history",
+        "title": "recent history",
+        "status": "failed",
+        "task_type": "zip",
+        "finished_at": now - 3600,
+    }
+    undated_entry = {
+        "id": "undated_history",
+        "title": "undated history",
+        "status": "skipped",
+        "task_type": "file",
+    }
+    history_path.write_text(
+        json.dumps([old_entry, recent_entry, undated_entry], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    loaded_history = mod._load_queue_history()
+    persisted_history = json.loads(history_path.read_text(encoding="utf-8"))
+    record(
+        "queue_history_auto_prune_old",
+        [item.get("id") for item in loaded_history] == ["recent_history", "undated_history"]
+        and [item.get("id") for item in persisted_history] == ["recent_history", "undated_history"],
+        persisted_history,
+    )
+    mod._save_queue_history([])
+
     app = mod.FengxiToolboxApp()
     app.withdraw()
     app._fx_disable_fast_close_force_exit = True
     record("app_init", True, "current_task=" + str(getattr(app, "current_task", None)))
+    sidebar_preset_button = getattr(app, "btn_preset_center_sidebar", None)
+    bottom_preset_button = getattr(app, "btn_preset_center", None)
+    record(
+        "last_settings_no_dedicated_preset_center",
+        sidebar_preset_button is None
+        and bottom_preset_button is None
+        and not callable(getattr(mod, "_show_preset_center", None)),
+        {
+            "exists": sidebar_preset_button is not None,
+            "text": sidebar_preset_button.cget("text") if sidebar_preset_button is not None else "",
+            "bottom_exists": bottom_preset_button is not None,
+            "window_func": callable(getattr(mod, "_show_preset_center", None)),
+        },
+    )
+
+    def collect_widget_texts(widget):
+        texts = []
+        stack = [widget]
+        while stack:
+            current = stack.pop()
+            try:
+                text = current.cget("text")
+            except Exception:
+                text = None
+            if isinstance(text, str) and text:
+                texts.append(text)
+            try:
+                stack.extend(current.winfo_children())
+            except Exception:
+                pass
+        return texts
+
+    donate_toplevel_calls = []
+    original_ctk_toplevel = mod.customtkinter.CTkToplevel
+
+    def forbidden_donate_toplevel(*args, **kwargs):
+        donate_toplevel_calls.append(True)
+        raise AssertionError("donate should render inline, not open a popup")
+
+    mod.customtkinter.CTkToplevel = forbidden_donate_toplevel
+    try:
+        app.show_donate_window()
+        selected_tab = app.main_panel.get()
+        donate_texts = "\n".join(collect_widget_texts(getattr(app, "tab_donate", app)))
+        run_button_text = app.btn_run.cget("text")
+    finally:
+        mod.customtkinter.CTkToplevel = original_ctk_toplevel
+    record(
+        "inline_donate_page_no_popup",
+        not donate_toplevel_calls
+        and getattr(app, "current_task", None) == "donate"
+        and selected_tab == mod.DONATE_TAB_TITLE
+        and mod.DONATE_SUPPORT_SENTENCE in donate_texts
+        and run_button_text == "查看赞助作者中",
+        {
+            "toplevel_calls": len(donate_toplevel_calls),
+            "current_task": getattr(app, "current_task", None),
+            "selected_tab": selected_tab,
+            "has_sentence": mod.DONATE_SUPPORT_SENTENCE in donate_texts,
+            "run_button": run_button_text,
+        },
+    )
+
+    donate_toplevel_calls = []
+    mod.customtkinter.CTkToplevel = forbidden_donate_toplevel
+    try:
+        app.switch_tab("watermark", app.btn_nav_wm)
+        app.btn_donate.invoke()
+        button_selected_tab = app.main_panel.get()
+    finally:
+        mod.customtkinter.CTkToplevel = original_ctk_toplevel
+    record(
+        "inline_donate_sidebar_button",
+        not donate_toplevel_calls
+        and getattr(app, "current_task", None) == "donate"
+        and button_selected_tab == mod.DONATE_TAB_TITLE,
+        {
+            "toplevel_calls": len(donate_toplevel_calls),
+            "current_task": getattr(app, "current_task", None),
+            "selected_tab": button_selected_tab,
+        },
+    )
+    app.switch_tab("watermark", app.btn_nav_wm)
+
+    parallel_switch_text = ""
+    try:
+        parallel_switch_text = app.chk_multithread.cget("text")
+    except Exception:
+        pass
+    record(
+        "parallel_mode_label_truthful",
+        parallel_switch_text == mod.PARALLEL_SWITCH_TEXT
+        and "极速模式" not in parallel_switch_text
+        and "可提速" in mod._get_parallel_mode_message(app, "watermark"),
+        {
+            "switch": parallel_switch_text,
+            "watermark": mod._get_parallel_mode_message(app, "watermark"),
+        },
+    )
+    mod._ensure_lazy_tab_initialized(app, "pdf")
+    app.pdf_mode_var.set("ocr")
+    record(
+        "parallel_mode_forced_single_hints",
+        "稳定单线程" in mod._get_parallel_mode_message(app, "pdf")
+        and "OCR" in mod._get_parallel_mode_message(app, "pdf"),
+        mod._get_parallel_mode_message(app, "pdf"),
+    )
+    app.pdf_mode_var.set("compress")
+    record(
+        "parallel_mode_pdf_compress_available",
+        "可提速" in mod._get_parallel_mode_message(app, "pdf")
+        and "压缩" in mod._get_parallel_mode_message(app, "pdf"),
+        mod._get_parallel_mode_message(app, "pdf"),
+    )
+    mod._ensure_lazy_tab_initialized(app, "image")
+    app.img_mode_var.set("to_pdf")
+    record(
+        "parallel_mode_image_to_pdf_available",
+        "可提速" in mod._get_parallel_mode_message(app, "image")
+        and "转 PDF" in mod._get_parallel_mode_message(app, "image"),
+        mod._get_parallel_mode_message(app, "image"),
+    )
+    record(
+        "parallel_hint_removed_queue_actions_kept",
+        getattr(app, "_fx_parallel_hint_label", None) is None
+        and getattr(app, "_fx_parallel_hint_var", None).get() == ""
+        and hasattr(app, "btn_queue_add")
+        and hasattr(app, "btn_queue_panel"),
+        {
+            "parallel_label": str(getattr(app, "_fx_parallel_hint_label", None)),
+            "parallel_hint": getattr(app, "_fx_parallel_hint_var", None).get()
+            if getattr(app, "_fx_parallel_hint_var", None) is not None
+            else None,
+            "queue_add": hasattr(app, "btn_queue_add"),
+            "queue_panel": hasattr(app, "btn_queue_panel"),
+        },
+    )
+
+    mod._save_output_strategy("overwrite")
+    app._fx_output_strategy_memory_ready = False
+    mod._install_output_strategy_memory(app)
+    record(
+        "output_strategy_memory_save_load",
+        mod._get_saved_output_strategy() == "overwrite"
+        and getattr(app, "output_strategy_var", None).get() == mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["overwrite"],
+        {
+            "saved": mod._get_saved_output_strategy(),
+            "ui": getattr(app, "output_strategy_var", None).get(),
+        },
+    )
+    mod._save_output_strategy("result_folder")
+    app._fx_output_strategy_memory_ready = False
+    mod._install_output_strategy_memory(app)
+
+    mod._save_remove_wm_mode("aggressive")
+    remove_mode_probe = type("RemoveWmModeProbe", (), {})()
+    remove_mode_probe.rm_wm_mode_var = mod.tkinter.StringVar(master=app, value="")
+    remove_mode_probe.rm_wm_mode_hint_var = mod.tkinter.StringVar(master=app, value="")
+    mod._install_remove_wm_mode_memory(remove_mode_probe)
+    record(
+        "remove_wm_mode_memory_save_load",
+        mod._get_saved_remove_wm_mode() == "aggressive"
+        and remove_mode_probe.rm_wm_mode_var.get() == mod.REMOVE_WM_MODE_VALUE_TO_LABEL["aggressive"]
+        and "强力模式" in remove_mode_probe.rm_wm_mode_hint_var.get(),
+        {
+            "saved": mod._get_saved_remove_wm_mode(),
+            "ui": remove_mode_probe.rm_wm_mode_var.get(),
+            "hint": remove_mode_probe.rm_wm_mode_hint_var.get(),
+        },
+    )
+    remove_mode_probe.rm_wm_mode_var.set(mod.REMOVE_WM_MODE_VALUE_TO_LABEL["standard"])
+    record(
+        "remove_wm_mode_memory_trace_save",
+        mod._get_saved_remove_wm_mode() == "standard",
+        mod._get_saved_remove_wm_mode(),
+    )
+    mod._save_remove_wm_mode("conservative")
+
+    standard_shape_candidate = AttrBox(
+        Name="",
+        AlternativeText="",
+        Title="",
+        TextEffect=AttrBox(Text=""),
+        TextFrame=AttrBox(HasText=False),
+        Width=360,
+        Height=210,
+        Left=320,
+        Top=395,
+        Rotation=15,
+        Fill=AttrBox(Transparency=0.16),
+    )
+    shape_mode_checks = {
+        mode: mod._shape_looks_like_watermark(standard_shape_candidate, 1000, 1000, mode=mode)
+        for mode in ("conservative", "standard", "aggressive")
+    }
+    record(
+        "remove_wm_mode_shape_thresholds",
+        shape_mode_checks == {"conservative": False, "standard": True, "aggressive": True},
+        shape_mode_checks,
+    )
+
+    standard_inline_candidate = AttrBox(
+        AlternativeText="",
+        Title="",
+        Range=AttrBox(Text=""),
+        Width=500,
+        Height=170,
+    )
+    inline_mode_checks = {
+        mode: mod._inline_shape_looks_like_watermark(standard_inline_candidate, 1000, 1000, mode=mode)
+        for mode in ("conservative", "standard", "aggressive")
+    }
+    record(
+        "remove_wm_mode_inline_thresholds",
+        inline_mode_checks == {"conservative": False, "standard": True, "aggressive": True},
+        inline_mode_checks,
+    )
+
+    mod._safe_named_widget_set(app, "wm_text", "Preset Watermark\nCONFIDENTIAL")
+    app.selected_font.set("SmileySans-Oblique")
+    app.wm_range_var.set("first")
+    app.wm_overwrite_var.set("force")
+    app.wm_skip_hyphen_var.set(True)
+    app.wm_skip_name_position_var.set("开头")
+    app.wm_skip_name_text_var.set("FX")
+    mod._safe_named_widget_set(app, "slider_size", 72)
+    mod._safe_named_widget_set(app, "slider_opacity", 0.22)
+    mod._safe_named_widget_set(app, "slider_angle", 30)
+    watermark_last = mod._save_last_settings_category(app, "watermark")
+    saved_slider_size = float(watermark_last["settings"]["slider_size"])
+    mod._safe_named_widget_set(app, "wm_text", "changed")
+    app.wm_range_var.set("all")
+    app.wm_skip_name_text_var.set("ZZ")
+    mod._safe_named_widget_set(app, "slider_size", 20)
+    apply_ok, apply_message = mod._restore_last_settings_category(app, "watermark")
+    loaded_last = mod._load_last_settings().get("watermark")
+    record(
+        "last_settings_watermark_save_restore",
+        apply_ok
+        and isinstance(loaded_last, dict)
+        and mod._read_watermark_text_widget(app) == "Preset Watermark\nCONFIDENTIAL"
+        and app.wm_range_var.get() == "first"
+        and app.wm_skip_name_text_var.get() == "FX"
+        and abs(float(app.slider_size.get()) - saved_slider_size) < 0.01,
+        {
+            "message": apply_message,
+            "loaded": loaded_last,
+            "slider_size": app.slider_size.get(),
+            "saved_slider_size": saved_slider_size,
+        },
+    )
+
+    mod._ensure_lazy_tab_initialized(app, "pdf")
+    backend_values = list(getattr(app, "_fx_pdf_ocr_backend_map", {}).keys())
+    lang_values = list(getattr(app, "_fx_pdf_ocr_lang_map", {}).keys())
+    mode_values = list(getattr(app, "_fx_pdf_ocr_mode_map", {}).keys())
+    chosen_backend = backend_values[-1] if backend_values else app.pdf_ocr_backend.get()
+    chosen_lang = lang_values[-1] if lang_values else app.pdf_ocr_language.get()
+    chosen_mode = mode_values[-1] if mode_values else app.pdf_ocr_mode.get()
+    app.pdf_ocr_backend.set(chosen_backend)
+    app.pdf_ocr_language.set(chosen_lang)
+    app.pdf_ocr_mode.set(chosen_mode)
+    app.pdf_ocr_model_root.set(str(root / "ocr_models_probe"))
+    app.pdf_ocr_cls.set(True)
+    app.pdf_ocr_compare_report.set(True)
+    ocr_last = mod._save_last_settings_category(app, "ocr")
+    app.pdf_ocr_backend.set(backend_values[0] if backend_values else chosen_backend)
+    app.pdf_ocr_model_root.set("")
+    app.pdf_ocr_cls.set(False)
+    app.pdf_ocr_compare_report.set(False)
+    ocr_apply_ok, _ocr_apply_message = mod._restore_last_settings_category(app, "ocr")
+    record(
+        "last_settings_ocr_save_restore",
+        ocr_apply_ok
+        and isinstance(ocr_last, dict)
+        and app.pdf_mode_var.get() == "ocr"
+        and app.pdf_ocr_backend.get() == chosen_backend
+        and app.pdf_ocr_language.get() == chosen_lang
+        and app.pdf_ocr_mode.get() == chosen_mode
+        and app.pdf_ocr_model_root.get() == str(root / "ocr_models_probe")
+        and bool(app.pdf_ocr_cls.get())
+        and bool(app.pdf_ocr_compare_report.get()),
+        {
+            "backend": app.pdf_ocr_backend.get(),
+            "language": app.pdf_ocr_language.get(),
+            "mode": app.pdf_ocr_mode.get(),
+        },
+    )
+
+    app.pdf_compress_level_var.set("强力")
+    app.pdf_image_compress_level_var.set("轻度")
+    compress_last = mod._save_last_settings_category(app, "pdf_compress")
+    app.pdf_compress_level_var.set("轻度")
+    app.pdf_image_compress_level_var.set("保留原图")
+    compress_apply_ok, _compress_apply_message = mod._restore_last_settings_category(app, "pdf_compress")
+    record(
+        "last_settings_pdf_compress_save_restore",
+        compress_apply_ok
+        and isinstance(compress_last, dict)
+        and app.pdf_mode_var.get() == "compress"
+        and app.pdf_compress_level_var.get() == "强力"
+        and app.pdf_image_compress_level_var.get() == "轻度",
+        {
+            "pdf": app.pdf_compress_level_var.get(),
+            "image": app.pdf_image_compress_level_var.get(),
+        },
+    )
+
+    mod._ensure_lazy_tab_initialized(app, "file")
+    app.rename_type_var.set("replace")
+    mod._safe_named_widget_set(app, "rename_prefix", "PRE_")
+    mod._safe_named_widget_set(app, "rename_suffix", "_SUF")
+    mod._safe_named_widget_set(app, "rename_find", "old")
+    mod._safe_named_widget_set(app, "rename_rep", "new")
+    mod._safe_named_widget_set(app, "rename_cut_head", "1")
+    mod._safe_named_widget_set(app, "rename_cut_tail", "2")
+    rename_last = mod._save_last_settings_category(app, "rename")
+    app.rename_type_var.set("add")
+    mod._safe_named_widget_set(app, "rename_prefix", "")
+    mod._safe_named_widget_set(app, "rename_find", "")
+    rename_apply_ok, _rename_apply_message = mod._restore_last_settings_category(app, "rename")
+    record(
+        "last_settings_rename_save_restore",
+        rename_apply_ok
+        and isinstance(rename_last, dict)
+        and app.rename_type_var.get() == "replace"
+        and app.rename_prefix.get() == "PRE_"
+        and app.rename_suffix.get() == "_SUF"
+        and app.rename_find.get() == "old"
+        and app.rename_rep.get() == "new"
+        and app.rename_cut_head.get() == "1"
+        and app.rename_cut_tail.get() == "2",
+        {
+            "type": app.rename_type_var.get(),
+            "prefix": app.rename_prefix.get(),
+            "find": app.rename_find.get(),
+        },
+    )
 
     app.wm_skip_hyphen_var.set(True)
     app.wm_skip_name_position_var.set("开头")
@@ -308,6 +731,33 @@ def main():
         and "日志：" in (root / "empty_log.txt").read_text(encoding="utf-8"),
         empty_log_payload,
     )
+    report_filename = mod._build_task_history_report_export_filename(success_history[-1] if success_history else {})
+    record(
+        "task_history_report_export_filename",
+        report_filename.endswith(".md")
+        and "fengxi_task_report_" in report_filename
+        and all(char not in report_filename for char in '<>:\"/\\\\|?*'),
+        report_filename,
+    )
+    report_path = root / "task_history_report.md"
+    report_ok, report_payload = mod._export_task_history_report(success_history[-1] if success_history else {}, str(report_path))
+    report_text = report_path.read_text(encoding="utf-8") if report_ok and report_path.exists() else ""
+    record(
+        "task_history_report_export_result",
+        report_ok
+        and report_payload == str(report_path.resolve())
+        and "# 风兮工具箱任务报告" in report_text
+        and "## 基本信息" in report_text
+        and "## 结果统计" in report_text
+        and "queue fake success" in report_text,
+        report_text[:500],
+    )
+    empty_report_ok, empty_report_payload = mod._export_task_history_report({}, str(root / "empty_report.md"))
+    record(
+        "task_history_report_export_empty",
+        (not empty_report_ok) and ("无法导出任务报告" in empty_report_payload),
+        empty_report_payload,
+    )
     open_dir = root / "history_open_output"
     open_dir.mkdir(exist_ok=True)
     open_calls = []
@@ -423,6 +873,16 @@ def main():
         and str(queue_pdf) in failed_detail_text
         and "probe failed" in failed_detail_text,
         failed_detail_text[:500],
+    )
+    failed_report_text = mod._build_task_history_report_text(failed_source)
+    record(
+        "task_history_failed_report_sections",
+        "## 失败分析" in failed_report_text
+        and "失败分类：" in failed_report_text
+        and "部分失败" in failed_report_text
+        and str(queue_pdf) in failed_report_text
+        and "## 关键日志" in failed_report_text,
+        failed_report_text[:600],
     )
     mod._show_task_history_detail(app, failed_source)
     detail_window = getattr(app, "_fx_history_detail_window", None)
@@ -611,10 +1071,43 @@ def main():
         "single_file_input_pdf_compress_result_model",
         isinstance(single_compress_result, dict)
         and single_compress_result.get("status") == "success"
+        and single_compress_result.get("output_strategy_requested") == "result_folder"
+        and single_compress_result.get("output_strategy") == "result_folder"
         and str(single_compress_result.get("output_root", "")).endswith("【处理完成】结果文件夹")
         and str(single_compress_out) in list(single_compress_result.get("outputs") or [])
         and float(single_compress_result.get("duration_seconds") or 0.0) >= 0.0,
         single_compress_result,
+    )
+
+    parallel_pdf_root = root / "parallel_pdf_compress"
+    parallel_pdf_root.mkdir()
+    make_pdf(parallel_pdf_root / "a.pdf", ["parallel a"])
+    make_pdf(parallel_pdf_root / "b.pdf", ["parallel b"])
+    app.current_task = "pdf"
+    app.pdf_mode_var.set("compress")
+    if hasattr(app, "pdf_compress_level_var"):
+        app.pdf_compress_level_var.set("标准")
+    if hasattr(app, "pdf_image_compress_level_var"):
+        app.pdf_image_compress_level_var.set("保留原图")
+    app.enable_multithread.set(True)
+    pdf_executor_workers = []
+    original_executor = mod.concurrent.futures.ThreadPoolExecutor
+
+    class RecordingExecutor(original_executor):
+        def __init__(self, *args, **kwargs):
+            pdf_executor_workers.append(kwargs.get("max_workers") if "max_workers" in kwargs else (args[0] if args else None))
+            super().__init__(*args, **kwargs)
+
+    mod.concurrent.futures.ThreadPoolExecutor = RecordingExecutor
+    try:
+        app.run_process(str(parallel_pdf_root), "pdf")
+    finally:
+        mod.concurrent.futures.ThreadPoolExecutor = original_executor
+        app.enable_multithread.set(False)
+    record(
+        "pdf_compress_parallel_executor",
+        bool(pdf_executor_workers) and max(value or 0 for value in pdf_executor_workers) > 1,
+        pdf_executor_workers,
     )
 
     inp = root / "img_in"
@@ -648,6 +1141,33 @@ def main():
         "image_to_pdf_workflow",
         wait_for(lambda: image_to_pdf_out.exists() and image_to_pdf_out_2.exists()),
         image_to_pdf_out,
+    )
+
+    img_pdf_parallel_root = root / "image_to_pdf_parallel"
+    img_pdf_parallel_root.mkdir()
+    Image.new("RGB", (80, 60), "purple").save(img_pdf_parallel_root / "p1.png")
+    Image.new("RGB", (80, 60), "orange").save(img_pdf_parallel_root / "p2.jpg")
+    app.current_task = "image"
+    app.img_mode_var.set("to_pdf")
+    app.enable_multithread.set(True)
+    image_executor_workers = []
+    original_executor = mod.concurrent.futures.ThreadPoolExecutor
+
+    class RecordingImageExecutor(original_executor):
+        def __init__(self, *args, **kwargs):
+            image_executor_workers.append(kwargs.get("max_workers") if "max_workers" in kwargs else (args[0] if args else None))
+            super().__init__(*args, **kwargs)
+
+    mod.concurrent.futures.ThreadPoolExecutor = RecordingImageExecutor
+    try:
+        app.run_process(str(img_pdf_parallel_root), "image")
+    finally:
+        mod.concurrent.futures.ThreadPoolExecutor = original_executor
+        app.enable_multithread.set(False)
+    record(
+        "image_to_pdf_parallel_executor",
+        bool(image_executor_workers) and max(value or 0 for value in image_executor_workers) > 1,
+        image_executor_workers,
     )
 
     img_merge_root = root / "image_merge_pdf_workflow"
@@ -722,6 +1242,58 @@ def main():
     s2 = mod.convert_audio_format(str(wav), str(m4a), "m4a", "128k")
     record("video_to_audio", s1 == "SUCCESS" and mp3.exists() and mp3.stat().st_size > 0, s1)
     record("audio_convert", s2 == "SUCCESS" and m4a.exists() and m4a.stat().st_size > 0, s2)
+
+    audio_parallel_root = root / "audio_parallel"
+    audio_parallel_root.mkdir()
+    (audio_parallel_root / "a.wav").write_bytes(b"fake-audio-a")
+    (audio_parallel_root / "b.wav").write_bytes(b"fake-audio-b")
+    app.current_task = "audio"
+    mod._ensure_lazy_tab_initialized(app, "audio")
+    app.audio_mode_var.set("convert")
+    app.audio_target_fmt.set("mp3")
+    app.audio_bitrate.set("128k")
+    app.audio_delete_var.set(False)
+    app.enable_multithread.set(True)
+    audio_executor_workers = []
+    converted_audio = []
+    original_executor = mod.concurrent.futures.ThreadPoolExecutor
+    original_audio_convert = mod.convert_audio_format
+
+    class RecordingAudioExecutor(original_executor):
+        def __init__(self, *args, **kwargs):
+            audio_executor_workers.append(kwargs.get("max_workers") if "max_workers" in kwargs else (args[0] if args else None))
+            super().__init__(*args, **kwargs)
+
+    def fake_audio_convert(src, dst, target_fmt, bitrate="192k"):
+        converted_audio.append((Path(src).name, Path(dst).name, target_fmt, bitrate))
+        Path(dst).write_bytes(b"converted")
+        return "SUCCESS"
+
+    mod.concurrent.futures.ThreadPoolExecutor = RecordingAudioExecutor
+    mod.convert_audio_format = fake_audio_convert
+    try:
+        app.run_process(str(audio_parallel_root), "audio")
+        audio_parallel_result = dict(getattr(app, "_fx_last_task_result", {}) or {})
+    finally:
+        mod.convert_audio_format = original_audio_convert
+        mod.concurrent.futures.ThreadPoolExecutor = original_executor
+        app.enable_multithread.set(False)
+    audio_parallel_out = audio_parallel_root / mod.RESULT_FOLDER_NAME
+    record(
+        "audio_parallel_executor",
+        bool(audio_executor_workers)
+        and max(value or 0 for value in audio_executor_workers) > 1
+        and (audio_parallel_out / "a.mp3").exists()
+        and (audio_parallel_out / "b.mp3").exists()
+        and audio_parallel_result.get("status") == "success"
+        and audio_parallel_result.get("processed_count") == 2
+        and audio_parallel_result.get("success_count") == 2,
+        {
+            "workers": audio_executor_workers,
+            "converted": converted_audio,
+            "result": audio_parallel_result,
+        },
+    )
 
     for mode in ["total", "recursive", "smart_recursive"]:
         zroot = root / f"zip_{mode}"
@@ -932,94 +1504,95 @@ def main():
     import win32com.client
 
     for progid, name in [("Word.Application", "word"), ("PowerPoint.Application", "ppt")]:
-        ok, detail = office_available(progid)
+        ok, detail = office_available(progid, mod=mod)
         record(f"{name}_com_available", ok, detail, skipped=not ok)
 
-    word_available, _ = office_available("Word.Application")
+    word_available, _ = office_available("Word.Application", mod=mod)
     if word_available:
         pythoncom.CoInitialize()
         try:
-            word = win32com.client.DispatchEx("Word.Application")
+            word = mod._create_hidden_word_app()
             word.Visible = False
-            docx_src = root / "office_src.docx"
-            doc = word.Documents.Add()
-            doc.Content.Text = "hello word feature test"
-            doc.SaveAs2(str(docx_src.resolve()), FileFormat=16)
-            doc.Close(False)
+            with mod._DisableWin32ComGenCache():
+                docx_src = root / "office_src.docx"
+                doc = word.Documents.Add()
+                doc.Content.Text = "hello word feature test"
+                doc.SaveAs2(str(docx_src.resolve()), FileFormat=16)
+                doc.Close(False)
 
-            pdf_out = root / "office_word2pdf.pdf"
-            status = mod.convert_doc_to_pdf(word, str(docx_src.resolve()), str(pdf_out.resolve()))
-            record("word_to_pdf", status == "SUCCESS" and pdf_out.exists(), status)
+                pdf_out = root / "office_word2pdf.pdf"
+                status = mod.convert_doc_to_pdf(word, str(docx_src.resolve()), str(pdf_out.resolve()))
+                record("word_to_pdf", status == "SUCCESS" and pdf_out.exists(), status)
 
-            wm_docx = root / "office_word_wm.docx"
-            status = mod.add_watermark_to_word(word, str(docx_src.resolve()), str(wm_docx.resolve()), "XMU TEST", "SmileySans-Oblique", 24, 0.2, 45)
-            record("word_watermark", status == "SUCCESS" and wm_docx.exists(), status)
+                wm_docx = root / "office_word_wm.docx"
+                status = mod.add_watermark_to_word(word, str(docx_src.resolve()), str(wm_docx.resolve()), "XMU TEST", "SmileySans-Oblique", 24, 0.2, 45)
+                record("word_watermark", status == "SUCCESS" and wm_docx.exists(), status)
 
-            cleaned_docx = root / "office_word_clean.docx"
-            status = mod.remove_watermark_from_word(word, str(wm_docx.resolve()), str(cleaned_docx.resolve()), preserve_mine=False)
-            record("word_remove_wm", status == "SUCCESS" and cleaned_docx.exists(), status)
+                cleaned_docx = root / "office_word_clean.docx"
+                status = mod.remove_watermark_from_word(word, str(wm_docx.resolve()), str(cleaned_docx.resolve()), preserve_mine=False)
+                record("word_remove_wm", status == "SUCCESS" and cleaned_docx.exists(), status)
 
-            header_img = root / "office_header_inline.png"
-            Image.new("RGBA", (1200, 520), (255, 0, 0, 120)).save(header_img)
-            inline_docx = root / "office_header_inline.docx"
-            doc = word.Documents.Add()
-            doc.Content.Text = "header inline watermark probe"
-            header = doc.Sections(1).Headers(1)
-            header.Range.Text = "HEADER\r"
-            header.Range.Collapse(0)
-            header.Range.InlineShapes.AddPicture(str(header_img.resolve()))
-            doc.SaveAs2(str(inline_docx.resolve()), FileFormat=16)
-            doc.Close(False)
+                header_img = root / "office_header_inline.png"
+                Image.new("RGBA", (1200, 520), (255, 0, 0, 120)).save(header_img)
+                inline_docx = root / "office_header_inline.docx"
+                doc = word.Documents.Add()
+                doc.Content.Text = "header inline watermark probe"
+                header = doc.Sections(1).Headers(1)
+                header.Range.Text = "HEADER\r"
+                header.Range.Collapse(0)
+                header.Range.InlineShapes.AddPicture(str(header_img.resolve()))
+                doc.SaveAs2(str(inline_docx.resolve()), FileFormat=16)
+                doc.Close(False)
 
-            inline_cleaned_docx = root / "office_header_inline_clean.docx"
-            status = mod.remove_watermark_from_word(word, str(inline_docx.resolve()), str(inline_cleaned_docx.resolve()), preserve_mine=False)
-            inline_opened = word.Documents.Open(str(inline_cleaned_docx.resolve()))
-            inline_header = inline_opened.Sections(1).Headers(1)
-            inline_left = inline_header.Range.InlineShapes.Count
-            inline_opened.Close(False)
-            record(
-                "word_remove_wm_header_inline_image",
-                status == "SUCCESS" and inline_cleaned_docx.exists() and inline_left == 0,
-                f"status={status}, inline_left={inline_left}",
-            )
+                inline_cleaned_docx = root / "office_header_inline_clean.docx"
+                status = mod.remove_watermark_from_word(word, str(inline_docx.resolve()), str(inline_cleaned_docx.resolve()), preserve_mine=False)
+                inline_opened = word.Documents.Open(str(inline_cleaned_docx.resolve()))
+                inline_header = inline_opened.Sections(1).Headers(1)
+                inline_left = inline_header.Range.InlineShapes.Count
+                inline_opened.Close(False)
+                record(
+                    "word_remove_wm_header_inline_image",
+                    status == "SUCCESS" and inline_cleaned_docx.exists() and inline_left == 0,
+                    f"status={status}, inline_left={inline_left}",
+                )
 
-            header_logo = root / "office_header_logo.png"
-            Image.new("RGBA", (180, 60), (0, 120, 255, 255)).save(header_logo)
-            safe_header_docx = root / "office_header_safe.docx"
-            doc = word.Documents.Add()
-            doc.Content.Text = "normal header assets should stay"
-            header = doc.Sections(1).Headers(1)
-            header.Range.Text = "Fengxi Header\r"
-            header.Range.Collapse(0)
-            header.Range.InlineShapes.AddPicture(str(header_logo.resolve()))
-            note_shape = header.Shapes.AddTextEffect(0, "HEADER NOTE", "Arial", 12, False, False, 20, 10)
-            note_shape.Rotation = 0
-            note_shape.Left = 20
-            note_shape.Top = 10
-            safe_header_docx_out = root / "office_header_safe_clean.docx"
-            doc.SaveAs2(str(safe_header_docx.resolve()), FileFormat=16)
-            doc.Close(False)
+                header_logo = root / "office_header_logo.png"
+                Image.new("RGBA", (180, 60), (0, 120, 255, 255)).save(header_logo)
+                safe_header_docx = root / "office_header_safe.docx"
+                doc = word.Documents.Add()
+                doc.Content.Text = "normal header assets should stay"
+                header = doc.Sections(1).Headers(1)
+                header.Range.Text = "Fengxi Header\r"
+                header.Range.Collapse(0)
+                header.Range.InlineShapes.AddPicture(str(header_logo.resolve()))
+                note_shape = header.Shapes.AddTextEffect(0, "HEADER NOTE", "Arial", 12, False, False, 20, 10)
+                note_shape.Rotation = 0
+                note_shape.Left = 20
+                note_shape.Top = 10
+                safe_header_docx_out = root / "office_header_safe_clean.docx"
+                doc.SaveAs2(str(safe_header_docx.resolve()), FileFormat=16)
+                doc.Close(False)
 
-            status = mod.remove_watermark_from_word(word, str(safe_header_docx.resolve()), str(safe_header_docx_out.resolve()), preserve_mine=False)
-            safe_opened = word.Documents.Open(str(safe_header_docx_out.resolve()))
-            safe_header = safe_opened.Sections(1).Headers(1)
-            safe_inline_left = safe_header.Range.InlineShapes.Count
-            safe_shape_left = safe_header.Shapes.Count
-            safe_header_text = safe_header.Range.Text or ""
-            safe_opened.Close(False)
-            record(
-                "word_remove_wm_preserve_header_assets",
-                status == "SUCCESS"
-                and safe_header_docx_out.exists()
-                and safe_inline_left >= 1
-                and safe_shape_left >= 1
-                and "Fengxi Header" in safe_header_text,
-                f"status={status}, inline={safe_inline_left}, shapes={safe_shape_left}, text={safe_header_text!r}",
-            )
+                status = mod.remove_watermark_from_word(word, str(safe_header_docx.resolve()), str(safe_header_docx_out.resolve()), preserve_mine=False)
+                safe_opened = word.Documents.Open(str(safe_header_docx_out.resolve()))
+                safe_header = safe_opened.Sections(1).Headers(1)
+                safe_inline_left = safe_header.Range.InlineShapes.Count
+                safe_shape_left = safe_header.Shapes.Count
+                safe_header_text = safe_header.Range.Text or ""
+                safe_opened.Close(False)
+                record(
+                    "word_remove_wm_preserve_header_assets",
+                    status == "SUCCESS"
+                    and safe_header_docx_out.exists()
+                    and safe_inline_left >= 1
+                    and safe_shape_left >= 1
+                    and "Fengxi Header" in safe_header_text,
+                    f"status={status}, inline={safe_inline_left}, shapes={safe_shape_left}, text={safe_header_text!r}",
+                )
 
-            meta_docx = root / "office_meta.docx"
-            status = mod.modify_office_meta(word, str(docx_src.resolve()), str(meta_docx.resolve()), "AgentTester", app_type="word")
-            record("word_meta_author", status == "SUCCESS" and meta_docx.exists(), status)
+                meta_docx = root / "office_meta.docx"
+                status = mod.modify_office_meta(word, str(docx_src.resolve()), str(meta_docx.resolve()), "AgentTester", app_type="word")
+                record("word_meta_author", status == "SUCCESS" and meta_docx.exists(), status)
 
             word.Quit()
         finally:
@@ -1028,7 +1601,7 @@ def main():
         for name in ["word_to_pdf", "word_watermark", "word_remove_wm", "word_remove_wm_header_inline_image", "word_remove_wm_preserve_header_assets", "word_meta_author"]:
             record(name, True, "skipped_no_word_com", skipped=True)
 
-    ppt_available, _ = office_available("PowerPoint.Application")
+    ppt_available, _ = office_available("PowerPoint.Application", mod=mod)
     if ppt_available:
         pythoncom.CoInitialize()
         try:

@@ -22,6 +22,14 @@
   - `m4a`
 - 当前源码层用 ffmpeg 版 `_ffmpeg_convert` 覆盖了运行时里的 `convert_audio_format`。
 
+## 2026-05-22 音视频逐文件并行
+- `audio` 任务已在加载器层接入逐文件 `ThreadPoolExecutor` 并行，仅在 `enable_multithread` 开启且待处理文件数大于 1 时生效。
+- 支持扩展名集中在 `AUDIO_VALID_AUDIO_EXTS` 与 `AUDIO_VALID_VIDEO_EXTS`；视频源会抽取音频到目标格式，音频源会转换格式，其他文件原样复制。
+- 线程数上限继续使用 `PARALLEL_MAX_WORKERS = 4`，实际并行度取文件数与上限的较小值。
+- 线程内只做文件转换/复制，日志、进度、统一任务结果仍在主流程汇总，避免 Tk UI 跨线程写入。
+- 结构化结果会写回 `processed_count`、`success_count`、`failed_count`、`outputs`、`output_root`，失败时保留相对路径失败项。
+- 回归：`audio_parallel_executor` 会 monkeypatch `convert_audio_format` 与 `ThreadPoolExecutor`，确认多 worker、输出 `a.mp3`/`b.mp3`，且 `task_result.status == success`。
+
 ## 图片工厂
 - 任务类型：`image`
 - 模式：

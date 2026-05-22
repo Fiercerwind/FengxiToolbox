@@ -1,5 +1,102 @@
 # 调试状态
 
+## 2026-05-22 赞助作者内联页回归
+- 本轮目标：
+  - 用户要求 `赞助作者` 不再弹窗，直接显示在右侧内容区，并补一句希望赞助的话。
+- 关键修复：
+  - 新增 `DONATE_TAB_TITLE`、`DONATE_SUPPORT_SENTENCE` 和右侧内联赞助页构建函数。
+  - 侧栏 `btn_donate` 重新绑定到 `_show_inline_donate(...)`。
+  - 旧入口 `FengxiToolboxApp.show_donate_window` 也补丁为内联页，避免其他调用路径重新打开弹窗。
+  - 页面直接读取 `assets/donate_qr.png` 显示赞助二维码；缺失时显示替代说明。
+  - 赞助页期间禁用开始按钮并显示“查看赞助作者中”，`on_start_click` 对 `help` / `donate` 都只提示切回功能页。
+- 新增回归：
+  - `inline_donate_page_no_popup`
+  - `inline_donate_sidebar_button`
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：108/108 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未动 `批量压缩` 与 `添加水印` 的核心处理逻辑。
+
+## 2026-05-22 批量并行提速说明回归
+- 本轮目标：
+  - 回答“极速模式/多线程是否有用，是否应该清除”，并让软件界面真实展示哪些功能支持提速。
+- 关键结论：
+  - 不建议删除底层多线程能力；它对多文件、逐文件、彼此独立的任务仍有价值。
+  - 原“极速模式（多线程）”文案容易误导，已改为 `批量并行（部分生效）`。
+  - 新增当前功能提示，说明本页是“可提速”还是“稳定单线程”。
+- 当前可提速范围：
+  - 批量水印：多文件可并行，遇到 Word/PDF 特殊链路时自动保护。
+  - PDF 拆分/加密/压缩：多文件可并行；合并、OCR 不并行。
+  - 图片格式转换/压缩/逐张转 PDF：多文件可并行；多图合并 PDF 不并行。
+  - 音视频逐文件转换：可并行，但实际速度受 ffmpeg 与磁盘吞吐限制。
+  - 文件重命名：可并行；文件去重不并行。
+  - 普通文件时间修改：可并行；Office 元数据修改不并行。
+- 当前稳定单线程范围：
+  - 去水印、Office/PDF 转换、批量压缩、PDF 合并、PDF OCR、多图合并 PDF、文件去重。
+- 新增回归：
+  - `parallel_mode_label_truthful`
+  - `parallel_mode_forced_single_hints`
+  - `parallel_mode_pdf_compress_available`
+  - `parallel_mode_image_to_pdf_available`
+  - `pdf_compress_parallel_executor`
+  - `image_to_pdf_parallel_executor`
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：106/106 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未动 `批量压缩` 与 `添加水印` 的核心处理逻辑。
+  - 本轮只给安全的独立文件工作流接入并行：`PDF 压缩`、`图片转 PDF（逐张生成）`。
+
+## 2026-05-22 上次设置自动记忆回归
+- 本轮目标：
+  - 按用户要求取消独立“预设中心”，改为各功能自动保存/恢复上一次使用的参数。
+- 关键修复：
+  - 移除用户可见的预设中心入口和窗口函数，不再显示底部或侧栏预设按钮。
+  - `Fengxi_Toolbox.py` 新增 `last_settings` 保存/恢复链路，复用参数捕获与应用能力。
+  - 启动默认页、懒加载页面、开始执行前、快速关闭前都会保存或恢复当前已初始化功能的最后设置。
+  - PDF 页继续通过 `app._fx_select_pdf_mode` 同步恢复 OCR/PDF 压缩右侧具体功能面板。
+  - 上次设置数据保存在用户偏好 JSON 的 `last_settings` / `last_settings_active` 字段。
+  - 水印上次设置只保存/恢复 UI 与偏好参数，没有修改加水印核心业务逻辑。
+- 新增回归：
+  - `last_settings_no_dedicated_preset_center`
+  - `last_settings_watermark_save_restore`
+  - `last_settings_ocr_save_restore`
+  - `last_settings_pdf_compress_save_restore`
+  - `last_settings_rename_save_restore`
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：100/100 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未动 `批量压缩` 与 `添加水印` 的核心处理逻辑。
+
+## 2026-05-21 任务历史报告导出
+- 本轮目标：
+  - 把任务历史从“能看结果、能导 JSON、能导日志”推进到“能导出完整任务报告”。
+- 关键修复：
+  - `Fengxi_Toolbox.py` 新增 `_build_task_history_report_text(...)`，统一输出 Markdown 报告。
+  - 新增 `_build_task_history_report_export_filename(...)`、`_export_task_history_report(...)`、`_prompt_export_task_history_report(...)`。
+  - 任务历史详情窗口新增 `导出报告` 按钮，与 `导出结果 / 打开位置 / 导出日志 / 复制详情` 并列。
+  - 报告内容已统一收口到结构化结果模型、失败分类和关键日志摘要，不再单独发明另一套语义。
+- 新增回归：
+  - `task_history_report_export_filename`
+  - `task_history_report_export_result`
+  - `task_history_report_export_empty`
+  - `task_history_failed_report_sections`
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：87/87 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未动 `批量压缩` 与 `添加水印` 的核心处理逻辑。
+
 ## 2026-05-21 子窗口图标与失败原因筛选
 - 本轮目标：
   - 让子页面窗口也统一使用风兮自己的应用图标。
@@ -637,3 +734,104 @@
 - Status: history detail open output location done
 - Scope: task history detail dialog
 - Result: added 打开位置 beside 导出结果/导出日志/复制详情. The action opens the best available target for the current entry, preferring output_root and falling back to an output file's parent directory. Test suite: py_compile passed, smoke_test 14/14, full_debug_test 77/77.
+## 2026-05-22 10:01:00
+- Status: output strategy tail fix done
+- Scope: remove_wm single-file overwrite path
+- Result:
+  - fixed the last failing `full_debug_test.py` case: `pdf_remove_wm_single_file_overwrite`
+  - single-file remove_wm overwrite now stages output in a temporary result folder and only then safely replaces the original file
+  - single-file remove_wm success/failure branches now explicitly finalize structured `task_result`
+  - remove_wm aggregate counts now use `total_items`, keeping history/export/retry semantics aligned
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed
+  - `python smoke_test.py` passed: `14/14`
+  - `python full_debug_test.py` passed: `88/88`
+
+## 2026-05-22 11:15:00
+- Status: remove_wm graded mode done
+- Scope: remove_wm detection thresholds, UI setting, local preference memory
+- Result:
+  - added `保守（推荐）` / `标准` / `激进` remove-watermark modes
+  - default mode is conservative to reduce accidental removal of normal text/images
+  - standard mode keeps previous threshold behavior for compatibility
+  - aggressive mode expands candidate detection for stubborn watermarks
+  - mode is persisted under `watermark.remove_wm_mode`
+  - fixed an accidental stale result-model block that had been inserted inside `_UnifiedInputPathPicker._refresh_entries`
+  - conservative inline-image threshold was tuned after regression caught a missed header image watermark
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed
+  - `python full_debug_test.py` passed: `92/92`
+  - `python smoke_test.py` passed: `14/14`
+
+## 2026-05-22 11:50:00
+- Status: queue history auto pruning done
+- Scope: task queue/history persistence
+- Result:
+  - added `QUEUE_HISTORY_RETENTION_DAYS = 90`
+  - queue history load/save/append now share one pruning path
+  - stale entries older than the retention window are removed from both memory and the persisted history file
+  - undated legacy entries are retained to avoid accidental data loss
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed
+  - `python smoke_test.py` passed: `14/14`
+  - `python full_debug_test.py` passed: `93/93`
+
+## 2026-05-22 11:58:00
+- Status: true progress status done
+- Scope: runtime progress tracker and bottom progress UI
+- Result:
+  - bottom action row now shows progress status text beside the progress bar
+  - progress status includes current file, current stage, completed/total files, total percentage, and ETA
+  - `_FxRunProgressTracker` now owns stage/file/ETA state while preserving the previous runtime progress correction behavior
+  - OCR, PDF compression, image-to-PDF, image merge, and PDF remove-watermark round-trip now report clearer stage names without changing business logic
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed
+  - `python smoke_test.py` passed: `14/14`
+  - `python full_debug_test.py` passed: `95/95`
+
+## 2026-05-22 19:50:00
+- Status: PDF remove-watermark COM export fallback done
+- Scope: `remove_wm` PDF round-trip DOCX -> PDF export and Word COM regression coverage
+- Result:
+  - reproduced the failure where `pdf_remove` generated only a failed report and no `【处理完成】结果文件夹\wm.pdf`
+  - isolated the cause to `convert_doc_to_pdf(...)` returning `ERROR` while direct Word `ExportAsFixedFormat(..., 17)` succeeded
+  - added `_export_word_docx_to_pdf_safely(...)` as a fallback after the original runtime export path
+  - changed Word dynamic dispatch to create a fresh COM instance via `pythoncom.CoCreateInstance + win32com.client.dynamic.Dispatch`
+  - documented and enforced that Word child-object access must be inside `_DisableWin32ComGenCache()` because damaged `win32com.gen_py` can otherwise raise `CLSIDToClassMap`
+  - updated `full_debug_test.py` so Word COM tests exercise the same safe dynamic COM path instead of plain `DispatchEx`
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py smoke_test.py` passed
+  - `python smoke_test.py` passed: `14/14`
+  - `python full_debug_test.py` passed: `109/109`
+- Boundaries:
+  - no changes to `fengxi_runtime.bin`
+  - no changes to stable batch-compress core logic
+  - no changes to stable add-watermark core logic
+
+## 2026-05-22 19:50:00
+- Status: audio file-level parallel workflow done
+- Scope: `audio` task loader-layer custom workflow
+- Result:
+  - added file-level `ThreadPoolExecutor` execution for audio/video conversion when `enable_multithread` is on and there is more than one input file
+  - kept ffmpeg conversion work inside worker threads while aggregating logs/progress/structured results in the main flow
+  - added `audio_parallel_executor` regression coverage
+- Validation:
+  - included in `python full_debug_test.py`: `109/109`
+
+## 2026-05-22 20:10:00
+- Status: parallel hint removed and queue actions restored
+- Scope: bottom action row UI patch
+- Result:
+  - removed the visible bottom-row `并行状态` hint label that was consuming space beside the multithread switch
+  - kept the `批量并行（部分生效）` switch label and underlying parallel execution capability
+  - `_refresh_parallel_mode_hint(...)` now clears the hint variable and destroys any stale hint label
+  - task queue/history buttons remain installed as `btn_queue_add` and `btn_queue_panel`
+  - added regression case `parallel_hint_removed_queue_actions_kept`
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py smoke_test.py` passed
+  - `python smoke_test.py` passed: `14/14`
+  - `python full_debug_test.py` passed: `110/110`
+- Boundaries:
+  - no changes to `fengxi_runtime.bin`
+  - no changes to stable batch-compress core logic
+  - no changes to stable add-watermark core logic

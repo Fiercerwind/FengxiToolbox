@@ -1,4 +1,5 @@
 import ast
+import concurrent.futures
 import dis
 import inspect
 import io
@@ -108,6 +109,7 @@ SIDEBAR_AUX_STYLES = {
 FAST_SIDEBAR_BUILD_FONT = ("Microsoft YaHei UI", 12)
 APP_ICON_PNG = "fengxi_app_icon.png"
 APP_ICON_ICO = "fengxi_app_icon.ico"
+DONATE_QR_PNG = "donate_qr.png"
 APP_RELEASE_VERSION = "4.0.0"
 APP_DISPLAY_VERSION = "4.0"
 ZIP_MODE_LABEL_TEXTS = {
@@ -223,8 +225,112 @@ INLINE_HELP_SECTIONS = (
         ),
     ),
 )
+DONATE_TAB_TITLE = "赞助作者"
+DONATE_SUPPORT_SENTENCE = "如果风兮工具箱帮你节省了时间，欢迎随缘赞助一杯咖啡，支持我继续把它做得更稳、更好用。"
 RESULT_FOLDER_NAME = "【处理完成】结果文件夹"
+OUTPUT_STRATEGY_DEFAULT = "result_folder"
+OUTPUT_STRATEGY_LABELS = {
+    "result_folder": "原目录新文件 / 【处理完成】结果文件夹",
+    "same_dir": "同目录新文件",
+    "overwrite": "覆盖原文件",
+}
+OUTPUT_STRATEGY_VALUES = tuple(OUTPUT_STRATEGY_LABELS.keys())
+OUTPUT_STRATEGY_VALUE_TO_LABEL = dict(OUTPUT_STRATEGY_LABELS)
+OUTPUT_STRATEGY_LABEL_TO_VALUE = {label: value for value, label in OUTPUT_STRATEGY_LABELS.items()}
+OUTPUT_STRATEGY_SUPPORTED_TASKS = {"remove_wm", "pdf", "image", "zip"}
+OUTPUT_STRATEGY_FORCE_RESULT_FOLDER_TASKS = {"pdf", "image"}
+REMOVE_WM_MODE_DEFAULT = "conservative"
+REMOVE_WM_MODE_LABELS = {
+    "conservative": "保守（推荐）",
+    "standard": "标准",
+    "aggressive": "激进",
+}
+REMOVE_WM_MODE_VALUES = tuple(REMOVE_WM_MODE_LABELS.keys())
+REMOVE_WM_MODE_VALUE_TO_LABEL = dict(REMOVE_WM_MODE_LABELS)
+REMOVE_WM_MODE_LABEL_TO_VALUE = {label: value for value, label in REMOVE_WM_MODE_LABELS.items()}
+REMOVE_WM_MODE_HINTS = {
+    "conservative": "默认更安全：只处理更像水印的大尺寸斜向/半透明对象，尽量避免误删正常文字和图片。",
+    "standard": "平衡模式：沿用之前的识别阈值，适合常规文档水印。",
+    "aggressive": "强力模式：会扩大识别范围，适合顽固水印，但更可能误删正常元素。",
+}
+REMOVE_WM_MODE_PROFILES = {
+    "conservative": {
+        "shape_width_ratio": 0.48,
+        "shape_height_ratio": 0.28,
+        "shape_center_ratio": 0.24,
+        "shape_rotation_distance": 18.0,
+        "shape_transparency": 0.25,
+        "inline_width_ratio": 0.60,
+        "inline_height_ratio": 0.16,
+        "allow_plain_very_large": False,
+        "very_large_width_ratio": 0.72,
+        "very_large_height_ratio": 0.42,
+    },
+    "standard": {
+        "shape_width_ratio": 0.35,
+        "shape_height_ratio": 0.20,
+        "shape_center_ratio": 0.30,
+        "shape_rotation_distance": 12.0,
+        "shape_transparency": 0.15,
+        "inline_width_ratio": 0.45,
+        "inline_height_ratio": 0.16,
+        "allow_plain_very_large": False,
+        "very_large_width_ratio": 0.68,
+        "very_large_height_ratio": 0.36,
+    },
+    "aggressive": {
+        "shape_width_ratio": 0.25,
+        "shape_height_ratio": 0.12,
+        "shape_center_ratio": 0.40,
+        "shape_rotation_distance": 8.0,
+        "shape_transparency": 0.08,
+        "inline_width_ratio": 0.35,
+        "inline_height_ratio": 0.10,
+        "allow_plain_very_large": True,
+        "very_large_width_ratio": 0.55,
+        "very_large_height_ratio": 0.28,
+    },
+}
+_REMOVE_WM_MODE_CONTEXT = threading.local()
 QUEUE_HISTORY_LIMIT = 80
+QUEUE_HISTORY_RETENTION_DAYS = 90
+PROGRESS_STATUS_IDLE_TEXT = "进度：等待任务"
+PARALLEL_MAX_WORKERS = 4
+PARALLEL_SAFE_TASKS = {"watermark", "pdf", "image", "audio", "file", "meta"}
+PARALLEL_FORCED_SINGLE_TASKS = {"remove_wm", "zip", "convert"}
+PARALLEL_FORCED_SINGLE_DETAILS = {
+    ("pdf", "merge"): "PDF 合并需要保持文件顺序，使用单线程更稳。",
+    ("pdf", "ocr"): "OCR 会占用大量 CPU/内存，当前采用单线程稳定处理。",
+    ("image", "merge_pdf"): "多图合并 PDF 需要保持图片顺序，使用单线程更稳。",
+    ("file", "dedup"): "文件去重依赖全目录哈希归并，使用单线程更稳。",
+    ("convert", ""): "Office/PDF 转换依赖 COM 或重型转换器，已强制单线程。",
+    ("remove_wm", ""): "去水印依赖 Word/PDF 重构链路，已强制单线程防止误删和 COM 污染。",
+    ("zip", ""): "批量压缩有专用目录遍历逻辑，已强制单线程以保持稳定输出。",
+}
+PARALLEL_SUPPORTED_HINTS = {
+    "watermark": "批量水印可对多文件并行处理；遇到 Word/PDF 特殊链路时会自动保护。",
+    "pdf": "PDF 拆分/加密/压缩可并行处理；合并、OCR 会自动切到稳定流程。",
+    "image": "图片格式转换/压缩/逐张转 PDF 可并行处理；多图合并 PDF 会自动切到稳定流程。",
+    "audio": "音视频逐文件转换可并行处理，实际速度也受 ffmpeg 与磁盘限制。",
+    "file": "文件重命名可并行处理；去重会自动切到稳定流程。",
+    "meta": "普通文件时间修改可并行处理；Office 元数据会自动切到稳定流程。",
+}
+AUDIO_VALID_AUDIO_EXTS = (".mp3", ".wav", ".flac", ".m4a", ".ogg", ".wma", ".aac")
+AUDIO_VALID_VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv")
+PARALLEL_SWITCH_TEXT = "批量并行（部分生效）"
+PRESET_CATEGORY_LABELS = {
+    "watermark": "批量水印",
+    "ocr": "OCR 搜索版 PDF",
+    "pdf_compress": "PDF 压缩",
+    "rename": "命名规则",
+}
+PRESET_CATEGORY_TO_TASK = {
+    "watermark": "watermark",
+    "ocr": "pdf",
+    "pdf_compress": "pdf",
+    "rename": "file",
+}
+PRESET_LABEL_TO_CATEGORY = {label: key for key, label in PRESET_CATEGORY_LABELS.items()}
 QUEUE_ERROR_MARKERS = (
     "❌",
     "🔥",
@@ -281,6 +387,7 @@ QUEUE_HISTORY_TASK_OPTIONS = ((QUEUE_HISTORY_TASK_DEFAULT, ""),) + tuple(
 )
 QUEUE_HISTORY_STATUS_LABEL_TO_VALUE = {label: value for label, value in QUEUE_HISTORY_STATUS_OPTIONS}
 QUEUE_HISTORY_FAILURE_LABEL_TO_VALUE = {label: value for label, value in QUEUE_HISTORY_FAILURE_OPTIONS}
+QUEUE_HISTORY_FAILURE_VALUE_TO_LABEL = {value: label for label, value in QUEUE_HISTORY_FAILURE_OPTIONS if value}
 QUEUE_HISTORY_TASK_LABEL_TO_VALUE = {label: value for label, value in QUEUE_HISTORY_TASK_OPTIONS}
 INLINE_TITLE_ICON_SPECS = {
     "批量去水印": {"icon": "eraser", "size": 20, "color": CONTENT_ICON_PRIMARY},
@@ -574,6 +681,29 @@ def _get_inline_title_icon_image(app, kind, color, size):
     return image
 
 
+def _get_inline_donate_qr_image(app):
+    image = getattr(app, "_fx_inline_donate_qr_image", None)
+    if image is not None:
+        return image
+
+    qr_path = _resolve_app_asset(DONATE_QR_PNG)
+    if not qr_path.exists():
+        return None
+
+    try:
+        qr_image = PILImage.open(qr_path).convert("RGBA")
+        image = customtkinter.CTkImage(
+            light_image=qr_image,
+            dark_image=qr_image,
+            size=(280, 280),
+        )
+        app._fx_inline_donate_qr_image = image
+        return image
+    except Exception as exc:
+        _debug(f"inline_donate:qr_error:{exc}")
+        return None
+
+
 def _ensure_inline_help_tab(app):
     help_tab = getattr(app, "tab_help", None)
     if help_tab is not None:
@@ -664,6 +794,146 @@ def _build_inline_help_page(app, help_tab):
     help_tab._fx_help_page_built = True
 
 
+def _ensure_inline_donate_tab(app):
+    donate_tab = getattr(app, "tab_donate", None)
+    if donate_tab is not None:
+        return donate_tab
+    try:
+        donate_tab = app.main_panel.add(DONATE_TAB_TITLE)
+    except Exception:
+        donate_tab = app.main_panel.tab(DONATE_TAB_TITLE)
+    app.tab_donate = donate_tab
+    _build_inline_donate_page(app, donate_tab)
+    return donate_tab
+
+
+def _build_inline_donate_page(app, donate_tab):
+    if getattr(donate_tab, "_fx_donate_page_built", False):
+        return
+    try:
+        donate_tab.grid_rowconfigure(0, weight=1)
+        donate_tab.grid_columnconfigure(0, weight=1)
+    except Exception:
+        pass
+
+    card = customtkinter.CTkFrame(
+        donate_tab,
+        fg_color=globals().get("COLOR_CARD", "#2B2B2B"),
+        corner_radius=18,
+        border_width=1,
+        border_color=globals().get("COLOR_BORDER", "#3A3A3A"),
+    )
+    card.grid(row=0, column=0, sticky="nsew", padx=20, pady=18)
+    card.grid_rowconfigure(1, weight=1)
+    card.grid_columnconfigure(0, weight=1)
+
+    header = customtkinter.CTkFrame(card, fg_color="transparent")
+    header.grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 10))
+    header.grid_columnconfigure(1, weight=1)
+
+    icon = _get_inline_title_icon_image(app, "coffee", SIDEBAR_ICON_DONATE, 24)
+    customtkinter.CTkLabel(
+        header,
+        text=DONATE_TAB_TITLE,
+        image=icon,
+        compound="left",
+        anchor="w",
+        font=customtkinter.CTkFont(family="Microsoft YaHei UI", size=22, weight="bold"),
+        text_color=globals().get("COLOR_TEXT", "#E6EEF2"),
+    ).grid(row=0, column=0, sticky="w")
+    customtkinter.CTkLabel(
+        header,
+        text="感谢每一份支持，它都会变成后续维护和新功能的动力。",
+        anchor="e",
+        font=customtkinter.CTkFont(family="Microsoft YaHei UI", size=12),
+        text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+    ).grid(row=0, column=1, sticky="e", padx=(18, 0))
+
+    body = customtkinter.CTkFrame(
+        card,
+        fg_color=globals().get("COLOR_CARD_ALT", "#303030"),
+        corner_radius=14,
+        border_width=1,
+        border_color=globals().get("COLOR_BORDER", "#3A3A3A"),
+    )
+    body.grid(row=1, column=0, sticky="nsew", padx=28, pady=(0, 24))
+    body.grid_columnconfigure(0, weight=1)
+    body.grid_columnconfigure(1, weight=0)
+    body.grid_rowconfigure(0, weight=1)
+
+    text_panel = customtkinter.CTkFrame(body, fg_color="transparent")
+    text_panel.grid(row=0, column=0, sticky="nsew", padx=(28, 24), pady=28)
+    text_panel.grid_columnconfigure(0, weight=1)
+
+    customtkinter.CTkLabel(
+        text_panel,
+        text="让风兮继续长风而行",
+        anchor="w",
+        font=customtkinter.CTkFont(family="Microsoft YaHei UI", size=18, weight="bold"),
+        text_color=globals().get("COLOR_TEXT", "#E6EEF2"),
+    ).grid(row=0, column=0, sticky="ew")
+    customtkinter.CTkLabel(
+        text_panel,
+        text=DONATE_SUPPORT_SENTENCE,
+        anchor="w",
+        justify="left",
+        wraplength=560,
+        font=customtkinter.CTkFont(family="Microsoft YaHei UI", size=15, weight="bold"),
+        text_color="#F6E2B2",
+    ).grid(row=1, column=0, sticky="ew", pady=(14, 12))
+    customtkinter.CTkLabel(
+        text_panel,
+        text="赞助完全自愿，不影响任何功能使用。你的支持会优先用于修 bug、做兼容测试、维护 OCR/PDF/打包环境，以及继续打磨批处理体验。",
+        anchor="w",
+        justify="left",
+        wraplength=560,
+        font=customtkinter.CTkFont(family="Microsoft YaHei UI", size=13),
+        text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+    ).grid(row=2, column=0, sticky="ew", pady=(0, 16))
+    customtkinter.CTkLabel(
+        text_panel,
+        text="谢谢你愿意把风兮工具箱留在电脑里，也谢谢你每一次反馈。",
+        anchor="w",
+        justify="left",
+        wraplength=560,
+        font=customtkinter.CTkFont(family="Microsoft YaHei UI", size=13),
+        text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+    ).grid(row=3, column=0, sticky="ew")
+
+    qr_panel = customtkinter.CTkFrame(
+        body,
+        fg_color="#241A10",
+        corner_radius=18,
+        border_width=1,
+        border_color=SIDEBAR_AUX_STYLES["donate"]["border_color"],
+    )
+    qr_panel.grid(row=0, column=1, sticky="n", padx=(0, 28), pady=28)
+    qr_panel.grid_columnconfigure(0, weight=1)
+
+    qr_image = _get_inline_donate_qr_image(app)
+    if qr_image is not None:
+        customtkinter.CTkLabel(qr_panel, text="", image=qr_image).grid(row=0, column=0, padx=18, pady=(18, 10))
+    else:
+        customtkinter.CTkLabel(
+            qr_panel,
+            text="未找到赞助二维码图片\nassets/donate_qr.png",
+            justify="center",
+            width=280,
+            height=280,
+            font=customtkinter.CTkFont(family="Microsoft YaHei UI", size=13),
+            text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+        ).grid(row=0, column=0, padx=18, pady=(18, 10))
+    customtkinter.CTkLabel(
+        qr_panel,
+        text="扫码赞助作者",
+        anchor="center",
+        font=customtkinter.CTkFont(family="Microsoft YaHei UI", size=14, weight="bold"),
+        text_color=SIDEBAR_AUX_STYLES["donate"]["text_color"],
+    ).grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 18))
+
+    donate_tab._fx_donate_page_built = True
+
+
 def _set_help_button_selected(app, selected):
     btn = getattr(app, "btn_help_proxy", None)
     if btn is None:
@@ -687,7 +957,30 @@ def _set_help_button_selected(app, selected):
         pass
 
 
-def _set_help_action_state(app, visible):
+def _set_donate_button_selected(app, selected):
+    btn = getattr(app, "btn_donate", None)
+    if btn is None:
+        return
+    try:
+        if selected:
+            btn.configure(
+                text_color=SIDEBAR_AUX_STYLES["donate"]["text_color"],
+                fg_color=SIDEBAR_AUX_STYLES["donate"]["hover_color"],
+                border_color=SIDEBAR_AUX_STYLES["donate"]["border_color"],
+            )
+        else:
+            _style_sidebar_aux_button(
+                btn,
+                SIDEBAR_AUX_BUTTON_SPECS["btn_donate"]["label"],
+                _get_sidebar_icon_images(app).get(("donate", SIDEBAR_AUX_BUTTON_SPECS["btn_donate"]["icon"])),
+                _get_sidebar_button_font(app),
+                "donate",
+            )
+    except Exception:
+        pass
+
+
+def _set_help_action_state(app, visible, label="查看说明中"):
     if getattr(app, "is_running", False):
         return
     btn_run = getattr(app, "btn_run", None)
@@ -695,7 +988,7 @@ def _set_help_action_state(app, visible):
     if btn_run is not None:
         try:
             if visible:
-                btn_run.configure(state="disabled", text="查看使用说明中", fg_color="#455A64")
+                btn_run.configure(state="disabled", text=label, fg_color="#455A64")
             else:
                 btn_run.configure(
                     state="normal",
@@ -717,7 +1010,8 @@ def _show_inline_help(app):
         app.main_panel.set(HELP_TAB_TITLE)
         app.current_task = "help"
         _set_help_button_selected(app, True)
-        _set_help_action_state(app, True)
+        _set_donate_button_selected(app, False)
+        _set_help_action_state(app, True, "查看使用说明中")
         for nav_name in (
             "btn_nav_wm",
             "btn_nav_rm_wm",
@@ -739,6 +1033,37 @@ def _show_inline_help(app):
         app.update_idletasks()
     except Exception as exc:
         _debug(f"inline_help:show_error:{exc}")
+
+
+def _show_inline_donate(app):
+    try:
+        _ensure_inline_donate_tab(app)
+        app.main_panel.set(DONATE_TAB_TITLE)
+        app.current_task = "donate"
+        _set_help_button_selected(app, False)
+        _set_donate_button_selected(app, True)
+        _set_help_action_state(app, True, "查看赞助作者中")
+        for nav_name in (
+            "btn_nav_wm",
+            "btn_nav_rm_wm",
+            "btn_nav_cv",
+            "btn_nav_audio",
+            "btn_nav_zip",
+            "btn_nav_pdf",
+            "btn_nav_img",
+            "btn_nav_meta",
+            "btn_nav_file",
+        ):
+            nav = getattr(app, nav_name, None)
+            if nav is not None:
+                nav.configure(
+                    text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+                    fg_color="transparent",
+                    border_color=globals().get("COLOR_SIDEBAR", "#202020"),
+                )
+        app.update_idletasks()
+    except Exception as exc:
+        _debug(f"inline_donate:show_error:{exc}")
 
 
 def _normalize_icon_title_text(text):
@@ -1433,11 +1758,19 @@ def _apply_shell_layout_tightening(app):
     app.top_bar.configure(height=92)
     app.btn_browse.configure(height=40, text="浏览文件/文件夹")
     app.entry_path.configure(height=40)
+    try:
+        app.top_bar.grid_columnconfigure(0, weight=1)
+        app.top_bar.grid_columnconfigure(1, weight=0)
+        app.top_bar.grid_columnconfigure(2, weight=0)
+    except Exception:
+        pass
     for child in app.top_bar.winfo_children():
         if child is app.btn_browse:
-            child.grid_configure(pady=(2, 8), padx=(0, 20))
+            child.grid_configure(pady=(2, 8), padx=(0, 12))
         elif child is app.entry_path:
             child.grid_configure(pady=(2, 8), padx=(24, 16))
+        elif child is getattr(app, "_fx_output_strategy_controls", None):
+            child.grid_configure(pady=(8, 8), padx=(0, 24), sticky="e")
         else:
             child.grid_configure(pady=(6, 0), padx=24)
 
@@ -1549,6 +1882,10 @@ def _apply_shell_layout_tightening(app):
         app.btn_help_proxy.grid(row=10, column=0, padx=12, pady=(7, 3), sticky="ew")
         app.sidebar_frame.grid_rowconfigure(11, minsize=0, weight=0)
     if getattr(app, "btn_donate", None) is not None:
+        try:
+            app.btn_donate.configure(command=lambda target=app: _show_inline_donate(target))
+        except Exception:
+            pass
         _style_sidebar_aux_button(
             app.btn_donate,
             SIDEBAR_AUX_BUTTON_SPECS["btn_donate"]["label"],
@@ -2211,6 +2548,7 @@ def _run_single_file_zip_via_staging(app, input_file, original_run_process):
                 pass
         result = _get_last_task_result(app)
         if result is not None:
+            _set_task_result_output_strategy(result, "zip", _get_task_output_strategy(app, "zip"))
             _set_task_result_output_root(result, source_file.parent)
             _set_task_result_counts(result, processed=1, success=1 if moved_outputs else 0, failed=0 if moved_outputs else 1)
             if moved_outputs:
@@ -2301,8 +2639,8 @@ def _patch_single_input_support():
     def patched_on_start_click(self):
         if getattr(self, "is_running", False):
             return
-        if getattr(self, "current_task", None) == "help":
-            self.log("ℹ️ [使用教程] 当前页面仅用于查看说明，请先切换到具体功能页。")
+        if getattr(self, "current_task", None) in {"help", "donate"}:
+            self.log("ℹ️ [说明页面] 当前页面仅用于查看内容，请先切换到具体功能页。")
             return
         selected_input = _normalize_input_path_value(self.input_path.get())
         if not selected_input:
@@ -2319,6 +2657,7 @@ def _patch_single_input_support():
         self.is_running = True
         self.stop_event = False
         self.progress_bar.set(0)
+        _set_progress_status(self, stage="准备中", fraction=0.0)
         self.btn_run.configure(state="disabled", text="⚡ 执行中...", fg_color="#455A64")
         self.btn_stop.configure(state="normal")
         threading.Thread(target=self.run_process, args=(selected_input, self.current_task), daemon=True).start()
@@ -2355,6 +2694,55 @@ def _shape_rotation_distance(rotation):
     angle = _safe_float(rotation) % 360.0
     candidates = (0.0, 90.0, 180.0, 270.0, 360.0)
     return min(abs(angle - candidate) for candidate in candidates)
+
+
+def _coerce_remove_wm_mode(value):
+    normalized = str(value or "").strip()
+    if normalized in REMOVE_WM_MODE_VALUES:
+        return normalized
+    mapped = REMOVE_WM_MODE_LABEL_TO_VALUE.get(normalized)
+    if mapped in REMOVE_WM_MODE_VALUES:
+        return mapped
+    return REMOVE_WM_MODE_DEFAULT
+
+
+def _get_remove_wm_mode_label(value):
+    return REMOVE_WM_MODE_VALUE_TO_LABEL.get(
+        _coerce_remove_wm_mode(value),
+        REMOVE_WM_MODE_VALUE_TO_LABEL[REMOVE_WM_MODE_DEFAULT],
+    )
+
+
+def _get_remove_wm_mode_hint(value):
+    return REMOVE_WM_MODE_HINTS.get(_coerce_remove_wm_mode(value), REMOVE_WM_MODE_HINTS[REMOVE_WM_MODE_DEFAULT])
+
+
+def _get_effective_remove_wm_mode(mode=None):
+    if mode is not None:
+        return _coerce_remove_wm_mode(mode)
+    runtime_mode = getattr(_REMOVE_WM_MODE_CONTEXT, "mode", None)
+    return _coerce_remove_wm_mode(runtime_mode)
+
+
+def _get_remove_wm_profile(mode=None):
+    normalized = _get_effective_remove_wm_mode(mode)
+    return REMOVE_WM_MODE_PROFILES.get(normalized, REMOVE_WM_MODE_PROFILES[REMOVE_WM_MODE_DEFAULT])
+
+
+def _push_remove_wm_runtime_mode(mode):
+    previous = getattr(_REMOVE_WM_MODE_CONTEXT, "mode", None)
+    _REMOVE_WM_MODE_CONTEXT.mode = _coerce_remove_wm_mode(mode)
+    return previous
+
+
+def _pop_remove_wm_runtime_mode(previous):
+    if previous is None:
+        try:
+            delattr(_REMOVE_WM_MODE_CONTEXT, "mode")
+        except Exception:
+            pass
+    else:
+        _REMOVE_WM_MODE_CONTEXT.mode = previous
 
 
 def _contains_watermark_keyword(text):
@@ -2432,7 +2820,7 @@ def _collect_inline_shape_marker_text(ishape):
     return " ".join(part for part in parts if part).strip()
 
 
-def _shape_looks_like_watermark(shape, page_width, page_height, preserve_mine=False):
+def _shape_looks_like_watermark(shape, page_width, page_height, preserve_mine=False, mode=None):
     marker_text = _collect_shape_marker_text(shape)
     normalized_marker = marker_text.lower()
     if "xmu_done" in normalized_marker:
@@ -2447,21 +2835,39 @@ def _shape_looks_like_watermark(shape, page_width, page_height, preserve_mine=Fa
     transparency = _safe_float(_safe_getattr(_safe_getattr(shape, "Fill", None), "Transparency", 0.0))
     rotation_distance = _shape_rotation_distance(_safe_getattr(shape, "Rotation", 0.0))
 
-    large_enough = width >= page_width * 0.35 or height >= page_height * 0.20
     if page_width <= 0 or page_height <= 0:
         return False
 
+    profile = _get_remove_wm_profile(mode)
+    large_enough = (
+        width >= page_width * profile["shape_width_ratio"]
+        or height >= page_height * profile["shape_height_ratio"]
+    )
     center_x = left + width / 2.0
     center_y = top + height / 2.0
-    near_center = abs(center_x - page_width / 2.0) <= page_width * 0.30 and abs(center_y - page_height / 2.0) <= page_height * 0.30
+    near_center = (
+        abs(center_x - page_width / 2.0) <= page_width * profile["shape_center_ratio"]
+        and abs(center_y - page_height / 2.0) <= page_height * profile["shape_center_ratio"]
+    )
     off_canvas = left < 0 or top < 0
-    diagonal = rotation_distance > 12.0
-    translucent = transparency >= 0.15
+    diagonal = rotation_distance > profile["shape_rotation_distance"]
+    translucent = transparency >= profile["shape_transparency"]
+    near_watermark_zone = near_center or off_canvas
 
-    return large_enough and ((diagonal and (near_center or off_canvas)) or (translucent and (near_center or off_canvas)))
+    if large_enough and near_watermark_zone and (diagonal or translucent):
+        return True
+
+    if profile.get("allow_plain_very_large"):
+        very_large = (
+            width >= page_width * profile["very_large_width_ratio"]
+            or height >= page_height * profile["very_large_height_ratio"]
+        )
+        return very_large and near_watermark_zone
+
+    return False
 
 
-def _inline_shape_looks_like_watermark(ishape, page_width, page_height, preserve_mine=False):
+def _inline_shape_looks_like_watermark(ishape, page_width, page_height, preserve_mine=False, mode=None):
     marker_text = _collect_inline_shape_marker_text(ishape)
     normalized_marker = marker_text.lower()
     if "xmu_done" in normalized_marker:
@@ -2474,66 +2880,87 @@ def _inline_shape_looks_like_watermark(ishape, page_width, page_height, preserve
     if page_width <= 0 or page_height <= 0:
         return False
 
-    return width >= page_width * 0.45 and height >= page_height * 0.16
+    profile = _get_remove_wm_profile(mode)
+    return width >= page_width * profile["inline_width_ratio"] and height >= page_height * profile["inline_height_ratio"]
 
 
-def _remove_watermark_from_word_safely(word_app, src, dst, preserve_mine=False, is_pdf_source=False):
+def _remove_watermark_from_word_safely(word_app, src, dst, preserve_mine=False, is_pdf_source=False, mode=None):
     doc = None
     removed_header_shapes = 0
     removed_doc_shapes = 0
     removed_header_inline = 0
+    effective_mode = _get_effective_remove_wm_mode(mode)
     try:
         src_abs = os.path.abspath(src)
         dst_abs = os.path.abspath(dst)
-        doc = word_app.Documents.Open(src_abs)
-        page_width = _safe_float(_safe_getattr(_safe_getattr(doc, "PageSetup", None), "PageWidth", 0.0))
-        page_height = _safe_float(_safe_getattr(_safe_getattr(doc, "PageSetup", None), "PageHeight", 0.0))
+        with _DisableWin32ComGenCache():
+            doc = word_app.Documents.Open(src_abs)
+            page_width = _safe_float(_safe_getattr(_safe_getattr(doc, "PageSetup", None), "PageWidth", 0.0))
+            page_height = _safe_float(_safe_getattr(_safe_getattr(doc, "PageSetup", None), "PageHeight", 0.0))
 
-        for section in doc.Sections:
-            for header in section.Headers:
+            for section in doc.Sections:
+                for header in section.Headers:
+                    try:
+                        header_shapes = header.Shapes
+                        for index in range(header_shapes.Count, 0, -1):
+                            shape = header.Shapes(index)
+                            if not _shape_looks_like_watermark(
+                                shape,
+                                page_width,
+                                page_height,
+                                preserve_mine=preserve_mine,
+                                mode=effective_mode,
+                            ):
+                                continue
+                            shape.Delete()
+                            removed_header_shapes += 1
+                    except Exception as exc:
+                        _debug(f"patch_remove_wm:header_shape_iter_error:{exc}")
+
+                    try:
+                        inline_shapes = header.Range.InlineShapes
+                        for index in range(inline_shapes.Count, 0, -1):
+                            ishape = inline_shapes(index)
+                            if not _inline_shape_looks_like_watermark(
+                                ishape,
+                                page_width,
+                                page_height,
+                                preserve_mine=preserve_mine,
+                                mode=effective_mode,
+                            ):
+                                continue
+                            ishape.Delete()
+                            removed_header_inline += 1
+                    except Exception as exc:
+                        _debug(f"patch_remove_wm:header_inline_iter_error:{exc}")
+
+            if is_pdf_source and not preserve_mine:
                 try:
-                    header_shapes = header.Shapes
-                    for index in range(header_shapes.Count, 0, -1):
-                        shape = header.Shapes(index)
-                        if not _shape_looks_like_watermark(shape, page_width, page_height, preserve_mine=preserve_mine):
+                    for index in range(doc.Shapes.Count, 0, -1):
+                        shape = doc.Shapes(index)
+                        try:
+                            if not _shape_looks_like_watermark(
+                                shape,
+                                page_width,
+                                page_height,
+                                preserve_mine=False,
+                                mode=effective_mode,
+                            ):
+                                continue
+                        except Exception:
                             continue
                         shape.Delete()
-                        removed_header_shapes += 1
+                        removed_doc_shapes += 1
                 except Exception as exc:
-                    _debug(f"patch_remove_wm:header_shape_iter_error:{exc}")
+                    _debug(f"patch_remove_wm:doc_shape_iter_error:{exc}")
 
-                try:
-                    inline_shapes = header.Range.InlineShapes
-                    for index in range(inline_shapes.Count, 0, -1):
-                        ishape = inline_shapes(index)
-                        if not _inline_shape_looks_like_watermark(ishape, page_width, page_height, preserve_mine=preserve_mine):
-                            continue
-                        ishape.Delete()
-                        removed_header_inline += 1
-                except Exception as exc:
-                    _debug(f"patch_remove_wm:header_inline_iter_error:{exc}")
-
-        if is_pdf_source and not preserve_mine:
-            try:
-                for index in range(doc.Shapes.Count, 0, -1):
-                    shape = doc.Shapes(index)
-                    try:
-                        if not _shape_looks_like_watermark(shape, page_width, page_height, preserve_mine=False):
-                            continue
-                    except Exception:
-                        continue
-                    shape.Delete()
-                    removed_doc_shapes += 1
-            except Exception as exc:
-                _debug(f"patch_remove_wm:doc_shape_iter_error:{exc}")
-
-        doc.SaveAs(dst_abs)
-        doc.Close()
-        doc = None
+            doc.SaveAs(dst_abs)
+            doc.Close()
+            doc = None
         _debug(
             "patch_remove_wm:safe_cleanup:"
             f"header_shapes={removed_header_shapes}:header_inline={removed_header_inline}:"
-            f"doc_shapes={removed_doc_shapes}:pdf_source={is_pdf_source}:dst={dst_abs}"
+            f"doc_shapes={removed_doc_shapes}:mode={effective_mode}:pdf_source={is_pdf_source}:dst={dst_abs}"
         )
         return "SUCCESS"
     except Exception as exc:
@@ -2543,7 +2970,7 @@ def _remove_watermark_from_word_safely(word_app, src, dst, preserve_mine=False, 
                 doc.Close(False)
         except Exception:
             pass
-        return "ERROR"
+        return f"ERROR:{exc}"
 
 
 def _patch_remove_watermark_robustness():
@@ -2556,13 +2983,14 @@ def _patch_remove_watermark_robustness():
     if getattr(original, "__fx_remove_wm_patch__", False):
         return
 
-    def patched(word_app, src, dst, preserve_mine=False, is_pdf_source=False):
+    def patched(word_app, src, dst, preserve_mine=False, is_pdf_source=False, mode=None):
         return _remove_watermark_from_word_safely(
             word_app,
             src,
             dst,
             preserve_mine=preserve_mine,
             is_pdf_source=is_pdf_source,
+            mode=mode,
         )
 
     patched.__fx_remove_wm_patch__ = True
@@ -2610,8 +3038,57 @@ def _read_failed_report_items(report_path):
     return [line.strip() for line in lines[1:] if line.strip()]
 
 
+def _dispatch_com_app_dynamic(progid):
+    try:
+        if str(progid).lower() == "word.application":
+            import pywintypes
+            import win32com.client.dynamic
+
+            word_clsid = pywintypes.IID("{000209FF-0000-0000-C000-000000000046}")
+            dispatch = pythoncom.CoCreateInstance(
+                word_clsid,
+                None,
+                pythoncom.CLSCTX_LOCAL_SERVER,
+                pythoncom.IID_IDispatch,
+            )
+            return win32com.client.dynamic.Dispatch(dispatch)
+        import win32com.client.dynamic
+
+        return win32com.client.dynamic.Dispatch(progid)
+    except Exception as exc:
+        _debug(f"com_dynamic_dispatch:fallback:{progid}:{exc}")
+        return win32com.client.DispatchEx(progid)
+
+
+class _DisableWin32ComGenCache:
+    def __init__(self):
+        self._original_get_class = None
+
+    def __enter__(self):
+        try:
+            import win32com.client.gencache as gencache
+
+            self._original_get_class = gencache.GetClassForCLSID
+            gencache.GetClassForCLSID = lambda *_args, **_kwargs: None
+        except Exception as exc:
+            _debug(f"com_gencache:disable_error:{exc}")
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._original_get_class is None:
+            return False
+        try:
+            import win32com.client.gencache as gencache
+
+            gencache.GetClassForCLSID = self._original_get_class
+        except Exception as restore_exc:
+            _debug(f"com_gencache:restore_error:{restore_exc}")
+        return False
+
+
 def _create_hidden_word_app():
-    word_app = win32com.client.DispatchEx("Word.Application")
+    with _DisableWin32ComGenCache():
+        word_app = _dispatch_com_app_dynamic("Word.Application")
     try:
         word_app.Visible = False
     except Exception:
@@ -2621,6 +3098,38 @@ def _create_hidden_word_app():
     except Exception:
         pass
     return word_app
+
+
+def _export_word_docx_to_pdf_safely(docx_path, pdf_path):
+    doc = None
+    word_app = None
+    docx_abs = os.path.abspath(docx_path)
+    pdf_abs = os.path.abspath(pdf_path)
+    try:
+        os.makedirs(os.path.dirname(pdf_abs), exist_ok=True)
+        word_app = _create_hidden_word_app()
+        with _DisableWin32ComGenCache():
+            doc = word_app.Documents.Open(docx_abs)
+            doc.ExportAsFixedFormat(pdf_abs, 17)
+            doc.Close(False)
+            doc = None
+        if os.path.exists(pdf_abs) and os.path.getsize(pdf_abs) > 0:
+            return "SUCCESS"
+        return "ERROR:no_output"
+    except Exception as exc:
+        _debug(f"remove_wm_pdf_export_direct:error:{exc}")
+        return f"ERROR:{exc}"
+    finally:
+        try:
+            if doc is not None:
+                doc.Close(False)
+        except Exception:
+            pass
+        try:
+            if word_app is not None:
+                word_app.Quit()
+        except Exception:
+            pass
 
 
 def _get_remove_wm_overwrite_original(app):
@@ -2692,6 +3201,24 @@ def _resolve_result_output_folder(input_value):
     return normalized_input, input_root, os.path.join(input_root, RESULT_FOLDER_NAME)
 
 
+def _resolve_output_root_for_task(input_value, task_type, strategy_value=None):
+    normalized_input = _normalize_input_path_value(input_value)
+    if normalized_input and os.path.isfile(normalized_input):
+        input_root = os.path.dirname(normalized_input)
+    else:
+        input_root = normalized_input
+
+    resolved_strategy = _resolve_output_strategy(task_type, strategy_value)
+    if resolved_strategy == "overwrite":
+        output_root = input_root
+    elif resolved_strategy == "same_dir":
+        output_root = input_root
+    else:
+        output_root = os.path.join(input_root, RESULT_FOLDER_NAME)
+
+    return normalized_input, input_root, output_root, resolved_strategy
+
+
 def _task_result_now():
     return time.time()
 
@@ -2702,6 +3229,8 @@ def _new_task_result(input_value="", task_type=""):
     return {
         "task_type": task_type or "",
         "input": normalized_input,
+        "output_strategy": "",
+        "output_strategy_label": "",
         "status": "unknown",
         "success": False,
         "stopped": False,
@@ -2746,6 +3275,12 @@ def _set_task_result_output_root(result, path_value):
         result["output_root"] = normalized
 
 
+def _set_task_result_output_strategy(result, task_type, strategy_value):
+    if not isinstance(result, dict):
+        return
+    _apply_output_strategy_to_result(result, task_type, strategy_value)
+
+
 def _set_task_result_counts(result, *, processed=None, success=None, failed=None, skipped=None):
     if not isinstance(result, dict):
         return
@@ -2782,6 +3317,35 @@ def _set_task_result_finished(result, status, message="", detail="", error="", s
     return result
 
 
+def _task_result_snapshot(result):
+    if not isinstance(result, dict):
+        return {}
+    return {
+        "task_type": result.get("task_type", ""),
+        "input": result.get("input", ""),
+        "output_strategy_requested": result.get("output_strategy_requested", ""),
+        "output_strategy": result.get("output_strategy", ""),
+        "output_strategy_label": result.get("output_strategy_label", ""),
+        "status": result.get("status", ""),
+        "success": bool(result.get("success", False)),
+        "stopped": bool(result.get("stopped", False)),
+        "skipped": bool(result.get("skipped", False)),
+        "message": result.get("message", ""),
+        "detail": result.get("detail", ""),
+        "error": result.get("error", ""),
+        "outputs": list(result.get("outputs") or []),
+        "output_root": result.get("output_root", ""),
+        "failed_items": list(result.get("failed_items") or []),
+        "processed_count": int(result.get("processed_count") or 0),
+        "success_count": int(result.get("success_count") or 0),
+        "failed_count": int(result.get("failed_count") or 0),
+        "skipped_count": int(result.get("skipped_count") or 0),
+        "started_at": result.get("started_at"),
+        "finished_at": result.get("finished_at"),
+        "duration_seconds": float(result.get("duration_seconds") or 0.0),
+    }
+
+
 def _attach_task_result(app, result):
     if app is None or not isinstance(result, dict):
         return result
@@ -2794,6 +3358,7 @@ def _attach_task_result(app, result):
 
 def _start_task_result(app, input_value, task_type):
     result = _new_task_result(input_value=input_value, task_type=task_type)
+    _set_task_result_output_strategy(result, task_type, _get_task_output_strategy(app, task_type))
     return _attach_task_result(app, result)
 
 
@@ -2965,6 +3530,98 @@ def _get_active_progress_tracker(app):
     return getattr(app, "_fx_progress_tracker", None)
 
 
+def _format_progress_eta(seconds):
+    if seconds is None:
+        return "--"
+    try:
+        seconds = float(seconds)
+    except Exception:
+        return "--"
+    if seconds < 0 or seconds == float("inf"):
+        return "--"
+    if seconds < 1:
+        return "<1秒"
+    seconds = int(round(seconds))
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{sec:02d}"
+    return f"{minutes:02d}:{sec:02d}"
+
+
+def _shorten_progress_name(value, max_chars=34):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        name = os.path.basename(text.rstrip("\\/")) or text
+    except Exception:
+        name = text
+    if len(name) <= max_chars:
+        return name
+    return name[: max(1, max_chars - 1)] + "…"
+
+
+def _set_progress_status(
+    app,
+    *,
+    current_file="",
+    stage="",
+    fraction=None,
+    completed=None,
+    total=None,
+    eta_seconds=None,
+):
+    if app is None:
+        return ""
+    parts = []
+    if current_file:
+        parts.append(f"当前：{_shorten_progress_name(current_file)}")
+    if stage:
+        parts.append(f"阶段：{stage}")
+    if total:
+        try:
+            completed_value = int(max(0, completed or 0))
+            total_value = int(max(1, total or 1))
+            parts.append(f"文件：{min(completed_value, total_value)}/{total_value}")
+        except Exception:
+            pass
+    if fraction is not None:
+        percent = int(round(_clamp_progress_value(fraction) * 100))
+        parts.append(f"总进度：{percent}%")
+    if eta_seconds is not None:
+        parts.append(f"预计剩余：{_format_progress_eta(eta_seconds)}")
+    text = " | ".join(parts) if parts else PROGRESS_STATUS_IDLE_TEXT
+    try:
+        app._fx_last_progress_status = text
+    except Exception:
+        pass
+    status_var = getattr(app, "_fx_progress_status_var", None)
+    if status_var is not None:
+        try:
+            status_var.set(text)
+        except Exception:
+            pass
+    return text
+
+
+def _extract_progress_path_from_call(args, kwargs):
+    candidates = []
+    if isinstance(kwargs, dict):
+        candidates.extend(kwargs.values())
+    candidates.extend(args or ())
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        try:
+            if os.path.exists(text) or os.path.splitext(os.path.basename(text))[1]:
+                return text
+        except Exception:
+            continue
+    return ""
+
+
 def _unwrap_runtime_run_process(callable_obj):
     current = callable_obj
     seen = set()
@@ -3121,22 +3778,61 @@ class _FxRunProgressTracker:
         self.pending_direct_offset = None
         self.seen_activity = False
         self.keep_final_on_reset = False
+        self.started_at = time.time()
+        self.current_file = ""
+        self.current_stage = "准备中"
 
     def _apply_progress_locked(self, value):
-        self.original_progress_set(_clamp_progress_value(value))
+        fraction = _clamp_progress_value(value)
+        self.original_progress_set(fraction)
+        self._emit_status_locked(fraction)
+
+    def _estimate_eta_locked(self, fraction):
+        if fraction <= 0.01 or fraction >= 0.999:
+            return None
+        elapsed = max(0.0, time.time() - self.started_at)
+        if elapsed <= 0:
+            return None
+        return elapsed * (1.0 - fraction) / fraction
+
+    def _emit_status_locked(self, fraction):
+        _set_progress_status(
+            self.app,
+            current_file=self.current_file,
+            stage=self.current_stage,
+            fraction=fraction,
+            completed=self.completed_units,
+            total=self.total_units,
+            eta_seconds=self._estimate_eta_locked(fraction),
+        )
 
     def current_fraction(self):
         with self.lock:
             return self.completed_units / self.total_units
 
-    def set_current_item_fraction(self, item_fraction):
+    def set_current_item(self, current_file="", stage="处理中"):
         with self.lock:
+            if current_file:
+                self.current_file = current_file
+            if stage:
+                self.current_stage = stage
+            self.seen_activity = True
+            self._apply_progress_locked(self.completed_units / self.total_units)
+
+    def set_current_item_fraction(self, item_fraction, stage=None, current_file=None):
+        with self.lock:
+            if current_file:
+                self.current_file = current_file
+            if stage:
+                self.current_stage = stage
             self.seen_activity = True
             overall = (self.completed_units + max(0.0, min(1.0, _coerce_progress_value(item_fraction)))) / self.total_units
             self._apply_progress_locked(overall)
 
-    def complete_units(self, count=1):
+    def complete_units(self, count=1, stage="完成"):
         with self.lock:
+            if stage:
+                self.current_stage = stage
             self.seen_activity = True
             self.completed_units = min(self.total_units, self.completed_units + max(0, int(count or 0)))
             self.pending_direct_offset = None
@@ -3148,6 +3844,7 @@ class _FxRunProgressTracker:
                 self.completed_units = min(self.total_units, self.completed_units + 1)
                 self.pending_direct_offset = None
                 self.seen_activity = True
+                self.current_stage = "完成"
                 self._apply_progress_locked(self.completed_units / self.total_units)
 
     def note_process_single_complete(self):
@@ -3158,6 +3855,8 @@ class _FxRunProgressTracker:
         with self.lock:
             if call_offset in self.site_map.get("before_process_single", set()):
                 self.seen_activity = True
+                if not self.current_stage or self.current_stage == "准备中":
+                    self.current_stage = "处理中"
                 self._apply_progress_locked(self.completed_units / self.total_units)
                 return True
 
@@ -3166,11 +3865,13 @@ class _FxRunProgressTracker:
                     self.completed_units = min(self.total_units, self.completed_units + 1)
                 self.pending_direct_offset = call_offset
                 self.seen_activity = True
+                self.current_stage = "处理中"
                 self._apply_progress_locked(self.completed_units / self.total_units)
                 return True
 
             if call_offset in self.site_map.get("pass_through", set()):
                 self.seen_activity = True
+                self.current_stage = "收尾"
                 estimated_completed = int(round(raw_fraction * self.total_units))
                 self.completed_units = min(self.total_units, max(self.completed_units, estimated_completed))
                 self._apply_progress_locked(raw_fraction)
@@ -3183,7 +3884,9 @@ class _FxRunProgressTracker:
         if getattr(self.app, "stop_event", False) or not self.seen_activity:
             return False
         self.keep_final_on_reset = True
+        self.current_stage = "已完成"
         self.original_progress_set(1.0)
+        self._emit_status_locked(1.0)
         return True
 
     def should_ignore_reset_zero(self, frame_code, value):
@@ -3210,6 +3913,7 @@ def _install_run_progress_tracker(app, input_value, task_type, runtime_run_proce
 
     original_process_single = getattr(app, "process_single_file", None)
     original_reset_ui = getattr(app, "reset_ui", None)
+    tracker.set_current_item(stage="准备中")
 
     def patched_progress_set(value, *args, **kwargs):
         frame = inspect.currentframe().f_back
@@ -3224,6 +3928,8 @@ def _install_run_progress_tracker(app, input_value, task_type, runtime_run_proce
             del frame
 
     def patched_process_single_file(*args, **kwargs):
+        current_path = _extract_progress_path_from_call(args, kwargs)
+        tracker.set_current_item(current_path, "处理中")
         try:
             return original_process_single(*args, **kwargs)
         finally:
@@ -3265,9 +3971,10 @@ def _install_run_progress_tracker(app, input_value, task_type, runtime_run_proce
     return tracker
 
 
-def _run_remove_wm_pdf_roundtrip(app, pdf_files, input_folder, output_folder):
+def _run_remove_wm_pdf_roundtrip(app, pdf_files, input_folder, output_folder, mode=None):
     failed_list = []
     preserve_mine = False
+    remove_mode = _coerce_remove_wm_mode(mode or _get_remove_wm_mode(app))
     tracker = _get_active_progress_tracker(app)
     result = _get_last_task_result(app)
     if result is None:
@@ -3278,6 +3985,11 @@ def _run_remove_wm_pdf_roundtrip(app, pdf_files, input_folder, output_folder):
             preserve_mine = bool(app.rm_wm_preserve_mine.get())
         except Exception:
             preserve_mine = False
+
+    try:
+        app.log(f"[去水印强度] 当前模式：{_get_remove_wm_mode_label(remove_mode)}")
+    except Exception:
+        pass
 
     temp_root = Path(tempfile.mkdtemp(prefix="fx_rm_pdf_"))
     pythoncom.CoInitialize()
@@ -3298,6 +4010,8 @@ def _run_remove_wm_pdf_roundtrip(app, pdf_files, input_folder, output_folder):
             stage_dir.mkdir(parents=True, exist_ok=True)
             stage_docx = stage_dir / "from_pdf.docx"
             cleaned_docx = stage_dir / "cleaned.docx"
+            if tracker is not None:
+                tracker.set_current_item(src, "PDF 转 Word")
 
             try:
                 app.log(f"🧼 [PDF去水印] 正在处理：{os.path.basename(src)}")
@@ -3308,6 +4022,8 @@ def _run_remove_wm_pdf_roundtrip(app, pdf_files, input_folder, output_folder):
                 convert_status = convert_pdf_to_word(src, str(stage_docx))
                 if convert_status != "SUCCESS" or not stage_docx.exists():
                     raise RuntimeError(f"convert_pdf_to_word:{convert_status}")
+                if tracker is not None:
+                    tracker.set_current_item_fraction(0.35, stage="去除水印", current_file=src)
 
                 chosen_docx = stage_docx
                 word_for_remove = _create_hidden_word_app()
@@ -3318,6 +4034,7 @@ def _run_remove_wm_pdf_roundtrip(app, pdf_files, input_folder, output_folder):
                         str(cleaned_docx),
                         preserve_mine=preserve_mine,
                         is_pdf_source=True,
+                        mode=remove_mode,
                     )
                 finally:
                     try:
@@ -3330,17 +4047,26 @@ def _run_remove_wm_pdf_roundtrip(app, pdf_files, input_folder, output_folder):
                 if not cleaned_docx.exists():
                     raise RuntimeError("remove_watermark_from_word:no_output")
                 chosen_docx = cleaned_docx
+                if tracker is not None:
+                    tracker.set_current_item_fraction(0.70, stage="导出 PDF", current_file=src)
 
                 word_for_pdf = _create_hidden_word_app()
                 try:
-                    pdf_status = convert_doc_to_pdf(word_for_pdf, str(chosen_docx), dst_pdf)
+                    with _DisableWin32ComGenCache():
+                        pdf_status = convert_doc_to_pdf(word_for_pdf, str(chosen_docx), dst_pdf)
                 finally:
                     try:
                         word_for_pdf.Quit()
                     except Exception:
                         pass
                 if pdf_status != "SUCCESS" or not os.path.exists(dst_pdf):
-                    raise RuntimeError(f"convert_doc_to_pdf:{pdf_status}")
+                    try:
+                        app.log("馃敆 [PDF鍘绘按鍗癩 Word 瀵煎嚭 PDF 鍏煎妯″紡閲嶈瘯涓?..")
+                    except Exception:
+                        pass
+                    pdf_status = _export_word_docx_to_pdf_safely(str(chosen_docx), dst_pdf)
+                if pdf_status != "SUCCESS" or not os.path.exists(dst_pdf):
+                    raise RuntimeError(f"export_docx_to_pdf:{pdf_status}")
             except Exception as exc:
                 failed_list.append(rel)
                 try:
@@ -3434,24 +4160,37 @@ def _run_remove_wm_task(app, input_folder, original_run_process):
 
 
 def _run_remove_wm_task(app, input_folder, original_run_process):
-    normalized_input = _normalize_input_path_value(input_folder)
+    normalized_input, input_root, output_folder, resolved_strategy = _resolve_output_root_for_task(
+        input_folder,
+        "remove_wm",
+        _get_task_output_strategy(app, "remove_wm"),
+    )
+    result = _get_last_task_result(app)
+    if result is None:
+        result = _start_task_result(app, normalized_input, "remove_wm")
     is_single_input = bool(normalized_input and os.path.isfile(normalized_input))
-    input_root = os.path.dirname(normalized_input) if is_single_input else normalized_input
-    overwrite_original = is_single_input and _get_remove_wm_overwrite_original(app)
+    overwrite_requested = _get_remove_wm_overwrite_original(app)
+    overwrite_original = is_single_input and overwrite_requested
+    remove_mode = _get_remove_wm_mode(app)
+    previous_remove_mode = _push_remove_wm_runtime_mode(remove_mode)
     tracker = _get_active_progress_tracker(app)
+    total_items = 0
 
     single_output_root = None
+    actual_strategy = resolved_strategy
     if is_single_input:
+        actual_strategy = "overwrite" if overwrite_original else "same_dir"
         single_output_root = Path(tempfile.mkdtemp(prefix="fx_rm_single_out_"))
         output_folder = str(single_output_root / RESULT_FOLDER_NAME)
-    else:
-        output_folder = os.path.join(input_root, RESULT_FOLDER_NAME)
+    _set_task_result_output_strategy(result, "remove_wm", actual_strategy)
+    _set_task_result_output_root(result, input_root if is_single_input else output_folder)
     os.makedirs(output_folder, exist_ok=True)
 
     try:
         all_files = app.collect_input_files(normalized_input, "remove_wm")
         pdf_files = [path for path in all_files if path.lower().endswith(".pdf")]
         other_files = [path for path in all_files if not path.lower().endswith(".pdf")]
+        total_items = len(pdf_files) + len(other_files)
 
         if not pdf_files and not is_single_input:
             return original_run_process(app, input_folder, "remove_wm")
@@ -3483,7 +4222,7 @@ def _run_remove_wm_task(app, input_folder, original_run_process):
                 shutil.rmtree(staging_root, ignore_errors=True)
 
         if pdf_files:
-            failed_list.extend(_run_remove_wm_pdf_roundtrip(app, pdf_files, input_root, output_folder))
+            failed_list.extend(_run_remove_wm_pdf_roundtrip(app, pdf_files, input_root, output_folder, mode=remove_mode))
 
         if is_single_input:
             rel = os.path.relpath(normalized_input, input_root)
@@ -3497,6 +4236,17 @@ def _run_remove_wm_task(app, input_folder, original_run_process):
                 for item in deduped_failed:
                     app.log(f"• {item}")
                 app.log("去水印未生成有效结果，原文件保持不变。")
+                result["outputs"] = []
+                result["failed_items"] = list(deduped_failed)
+                _set_task_result_output_root(result, input_root)
+                _set_task_result_counts(result, processed=max(1, total_items), success=0, failed=len(deduped_failed), skipped=0)
+                _set_task_result_finished(
+                    result,
+                    "failed",
+                    message="去水印未生成有效结果，原文件保持不变",
+                    detail=f"失败 {len(deduped_failed)} 个文件",
+                    error=f"失败 {len(deduped_failed)} 个文件",
+                )
                 return
 
             final_path = _finalize_single_remove_wm_output(
@@ -3505,6 +4255,30 @@ def _run_remove_wm_task(app, input_folder, original_run_process):
                 staged_output_file,
                 overwrite_original=overwrite_original,
             )
+            if final_path:
+                result["outputs"] = []
+                result["failed_items"] = []
+                _add_task_result_output(result, final_path)
+                _set_task_result_output_root(result, os.path.dirname(final_path))
+                _set_task_result_counts(result, processed=max(1, total_items), success=1, failed=0, skipped=0)
+                _set_task_result_finished(
+                    result,
+                    "success",
+                    message="单文件去水印已处理完成",
+                    detail=f"输出: {final_path}",
+                )
+            else:
+                result["outputs"] = []
+                result["failed_items"] = [rel]
+                _set_task_result_output_root(result, input_root)
+                _set_task_result_counts(result, processed=max(1, total_items), success=0, failed=1, skipped=0)
+                _set_task_result_finished(
+                    result,
+                    "failed",
+                    message="去水印未生成有效结果",
+                    detail="去水印未生成有效结果",
+                    error="去水印未生成有效结果",
+                )
             if final_path and not getattr(app, "stop_event", False):
                 app.log("\n🎉 [完成] 单文件去水印已处理完成！")
             return
@@ -3527,7 +4301,7 @@ def _run_remove_wm_task(app, input_folder, original_run_process):
             app.log("完成 (含错误)")
             app.log(f"去水印任务结束，但有 {len(deduped_failed)} 个文件处理失败。")
             result["failed_items"] = list(deduped_failed)
-            _set_task_result_counts(result, processed=len(pdf_files) + len(other_files), success=max(0, len(pdf_files) - len(deduped_failed)), failed=len(deduped_failed), skipped=0)
+            _set_task_result_counts(result, processed=total_items, success=max(0, total_items - len(deduped_failed)), failed=len(deduped_failed), skipped=0)
             _set_task_result_finished(
                 result,
                 "failed",
@@ -3537,7 +4311,7 @@ def _run_remove_wm_task(app, input_folder, original_run_process):
             )
         elif not getattr(app, "stop_event", False):
             app.log("\n🎉 [完成] 去水印已全部处理完成！")
-            _set_task_result_counts(result, processed=len(pdf_files) + len(other_files), success=len(pdf_files) + len(other_files), failed=0, skipped=0)
+            _set_task_result_counts(result, processed=total_items, success=total_items, failed=0, skipped=0)
             _set_task_result_finished(
                 result,
                 "success",
@@ -3545,9 +4319,10 @@ def _run_remove_wm_task(app, input_folder, original_run_process):
                 detail=f"成功处理 {len(pdf_files) + len(other_files)} 个文件",
             )
         else:
-            _set_task_result_counts(result, processed=len(pdf_files) + len(other_files), success=max(0, len(pdf_files) - len(failed_list)), failed=len(failed_list), skipped=0)
+            _set_task_result_counts(result, processed=total_items, success=max(0, total_items - len(failed_list)), failed=len(failed_list), skipped=0)
             _set_task_result_finished(result, "stopped", message="用户停止去水印任务", detail="用户停止去水印任务", stopped=True)
     finally:
+        _pop_remove_wm_runtime_mode(previous_remove_mode)
         if single_output_root is not None:
             shutil.rmtree(single_output_root, ignore_errors=True)
 
@@ -3562,10 +4337,15 @@ def _run_pdf_ocr_task(app, input_folder):
         write_pdf_ocr_comparison_report,
     )
 
-    normalized_input, input_root, output_folder = _resolve_result_output_folder(input_folder)
+    normalized_input, input_root, output_folder, resolved_strategy = _resolve_output_root_for_task(
+        input_folder,
+        "pdf",
+        _get_task_output_strategy(app, "pdf"),
+    )
     result = _get_last_task_result(app)
     if result is None:
         result = _start_task_result(app, normalized_input, "pdf")
+    _set_task_result_output_strategy(result, "pdf", resolved_strategy)
     _set_task_result_output_root(result, output_folder)
     os.makedirs(output_folder, exist_ok=True)
     all_files = app.collect_input_files(normalized_input, "pdf")
@@ -3643,7 +4423,8 @@ def _run_pdf_ocr_task(app, input_folder):
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             app.log(f"🔎 [OCR] 正在处理：{os.path.basename(src)}")
             if tracker is not None:
-                tracker.set_current_item_fraction(0.02)
+                tracker.set_current_item(src, "OCR 准备")
+                tracker.set_current_item_fraction(0.02, stage="OCR 准备", current_file=src)
             should_count_completion = True
             try:
                 if compare_report:
@@ -3662,14 +4443,18 @@ def _run_pdf_ocr_task(app, input_folder):
                     )
                     app.log(f"🧪 [OCR] 已生成后端对比报告：{report_result['report_path']}")
                     if tracker is not None:
-                        tracker.set_current_item_fraction(0.08)
+                        tracker.set_current_item_fraction(0.08, stage="后端对比报告", current_file=src)
 
                 def _page_progress(page_done, total_pages):
                     if total_pages <= 0:
                         return
                     overall_fraction = page_done / total_pages
                     if tracker is not None:
-                        tracker.set_current_item_fraction(overall_fraction)
+                        tracker.set_current_item_fraction(
+                            overall_fraction,
+                            stage=f"OCR 第 {page_done}/{total_pages} 页",
+                            current_file=src,
+                        )
                     else:
                         app.progress_bar.set((index + overall_fraction) / total)
 
@@ -3737,6 +4522,38 @@ def _run_pdf_ocr_task(app, input_folder):
     else:
         _set_task_result_counts(result, processed=success_count + len(failed_list), success=success_count, failed=len(failed_list), skipped=0)
         _set_task_result_finished(result, "stopped", message="用户停止 OCR 任务", detail="用户停止 OCR 任务", stopped=True)
+
+
+def _is_parallel_enabled(app):
+    var = getattr(app, "enable_multithread", None)
+    if var is None:
+        return False
+    try:
+        return bool(var.get())
+    except Exception:
+        return False
+
+
+def _get_parallel_worker_count(item_count):
+    if item_count <= 1:
+        return 1
+    cpu_count = os.cpu_count() or 4
+    return max(1, min(int(item_count), PARALLEL_MAX_WORKERS, max(2, cpu_count)))
+
+
+def _reserve_unique_output_path(src, output_folder, builder, reserved):
+    target = Path(builder(src, output_folder))
+    target_dir = target.parent
+    stem = target.stem
+    suffix = target.suffix
+    counter = 2
+    normalized = os.path.normcase(str(target))
+    while normalized in reserved:
+        target = target_dir / f"{stem}_{counter}{suffix}"
+        normalized = os.path.normcase(str(target))
+        counter += 1
+    reserved.add(normalized)
+    return str(target)
 
 
 PDF_COMPRESS_LEVELS = {
@@ -3865,10 +4682,15 @@ def compress_pdf_file(src, dst, compress_level="标准", image_level="标准", p
 
 
 def _run_pdf_compress_task(app, input_folder):
-    normalized_input, input_root, output_folder = _resolve_result_output_folder(input_folder)
+    normalized_input, input_root, output_folder, resolved_strategy = _resolve_output_root_for_task(
+        input_folder,
+        "pdf",
+        _get_task_output_strategy(app, "pdf"),
+    )
     result = _get_last_task_result(app)
     if result is None:
         result = _start_task_result(app, normalized_input, "pdf")
+    _set_task_result_output_strategy(result, "pdf", resolved_strategy)
     _set_task_result_output_root(result, output_folder)
     all_files = app.collect_input_files(normalized_input, "pdf")
     pdf_files = [f for f in all_files if f.lower().endswith(".pdf")]
@@ -3892,38 +4714,106 @@ def _run_pdf_compress_task(app, input_folder):
     success_count = 0
     total = len(pdf_files)
     app.log(f"📉 [PDF 压缩] 共 {total} 个 PDF，压缩程度：{compress_level}，图片压缩：{image_level}")
-    for index, src in enumerate(pdf_files):
-        if getattr(app, "stop_event", False):
-            app.log("⏹️ [停止] PDF 压缩任务已被用户中止")
-            break
-        dst = _build_pdf_compress_output_path(src, output_folder)
-        should_count_completion = True
+
+    reserved_outputs = set()
+    jobs = [
+        (src, _reserve_unique_output_path(src, output_folder, _build_pdf_compress_output_path, reserved_outputs))
+        for src in pdf_files
+    ]
+    should_delete_source = False
+    if getattr(app, "pdf_delete_var", None) is not None:
         try:
-            before_size = os.path.getsize(src)
-            app.log(f"📄 [PDF 压缩] 正在处理：{os.path.basename(src)}")
-            status = compress_pdf_file(src, dst, compress_level, image_level, password=password)
-            if not status.startswith("SUCCESS"):
-                failed_list.append(f"{src}: {status}")
-                app.log(f"❌ [失败] {os.path.basename(src)}: {status}")
-                continue
-            after_size = os.path.getsize(dst)
-            ratio = 0 if before_size <= 0 else max(0, round((1 - after_size / before_size) * 100, 1))
-            image_changes = status.split(":", 1)[1] if ":" in status else "0"
-            app.log(f"✅ [PDF 压缩] {os.path.basename(dst)} | 减少 {ratio}% | 图片 {image_changes} 项")
-            success_count += 1
-            _add_task_result_output(result, dst)
-            if getattr(app, "pdf_delete_var", None) is not None:
+            should_delete_source = bool(app.pdf_delete_var.get())
+        except Exception:
+            should_delete_source = False
+
+    def process_one_pdf_compress(job):
+        src, dst = job
+        before_size = os.path.getsize(src)
+        status = compress_pdf_file(src, dst, compress_level, image_level, password=password)
+        if not status.startswith("SUCCESS"):
+            return {"src": src, "dst": dst, "ok": False, "status": status}
+        after_size = os.path.getsize(dst)
+        ratio = 0 if before_size <= 0 else max(0, round((1 - after_size / before_size) * 100, 1))
+        image_changes = status.split(":", 1)[1] if ":" in status else "0"
+        return {
+            "src": src,
+            "dst": dst,
+            "ok": True,
+            "status": status,
+            "ratio": ratio,
+            "image_changes": image_changes,
+        }
+
+    parallel_workers = _get_parallel_worker_count(total) if _is_parallel_enabled(app) else 1
+    if parallel_workers > 1:
+        app.log(f"🚀 [批量并行] PDF 压缩启用 {parallel_workers} 个线程。")
+        futures = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+            for job in jobs:
+                if getattr(app, "stop_event", False):
+                    app.log("⏹️ [停止] PDF 压缩任务已被用户中止")
+                    break
+                src, _dst = job
+                if tracker is not None:
+                    tracker.set_current_item(src, "PDF 压缩")
+                app.log(f"📄 [PDF 压缩] 已加入并行处理：{os.path.basename(src)}")
+                futures[executor.submit(process_one_pdf_compress, job)] = job
+            for future in concurrent.futures.as_completed(futures):
+                src, _dst = futures[future]
                 try:
-                    if bool(app.pdf_delete_var.get()):
+                    item = future.result()
+                except Exception as exc:
+                    item = {"src": src, "dst": _dst, "ok": False, "status": str(exc)}
+                if not item.get("ok"):
+                    failed_list.append(f"{item.get('src', src)}: {item.get('status')}")
+                    app.log(f"❌ [失败] {os.path.basename(str(item.get('src', src)))}: {item.get('status')}")
+                else:
+                    dst = item["dst"]
+                    app.log(
+                        f"✅ [PDF 压缩] {os.path.basename(dst)} | 减少 {item.get('ratio', 0)}% | 图片 {item.get('image_changes', '0')} 项"
+                    )
+                    success_count += 1
+                    _add_task_result_output(result, dst)
+                    if should_delete_source:
+                        try:
+                            os.remove(item["src"])
+                            app.log(f"🗑️ 已删除源文件：{os.path.basename(item['src'])}")
+                        except Exception as exc:
+                            failed_list.append(f"{item['src']}: 删除源文件失败: {exc}")
+                if tracker is not None:
+                    tracker.complete_units(1)
+                else:
+                    app.progress_bar.set(min(1.0, (success_count + len(failed_list)) / total))
+    else:
+        for index, (src, dst) in enumerate(jobs):
+            if getattr(app, "stop_event", False):
+                app.log("⏹️ [停止] PDF 压缩任务已被用户中止")
+                break
+            try:
+                if tracker is not None:
+                    tracker.set_current_item(src, "PDF 压缩")
+                app.log(f"📄 [PDF 压缩] 正在处理：{os.path.basename(src)}")
+                item = process_one_pdf_compress((src, dst))
+                if not item.get("ok"):
+                    failed_list.append(f"{src}: {item.get('status')}")
+                    app.log(f"❌ [失败] {os.path.basename(src)}: {item.get('status')}")
+                    continue
+                app.log(
+                    f"✅ [PDF 压缩] {os.path.basename(dst)} | 减少 {item.get('ratio', 0)}% | 图片 {item.get('image_changes', '0')} 项"
+                )
+                success_count += 1
+                _add_task_result_output(result, dst)
+                if should_delete_source:
+                    try:
                         os.remove(src)
                         app.log(f"🗑️ 已删除源文件：{os.path.basename(src)}")
-                except Exception as exc:
-                    failed_list.append(f"{src}: 删除源文件失败: {exc}")
-        except Exception as exc:
-            failed_list.append(f"{src}: {exc}")
-            app.log(f"❌ [失败] {os.path.basename(src)}: {exc}")
-        finally:
-            if should_count_completion:
+                    except Exception as exc:
+                        failed_list.append(f"{src}: 删除源文件失败: {exc}")
+            except Exception as exc:
+                failed_list.append(f"{src}: {exc}")
+                app.log(f"❌ [失败] {os.path.basename(src)}: {exc}")
+            finally:
                 if tracker is not None:
                     tracker.complete_units(1)
                 else:
@@ -4020,10 +4910,15 @@ def _get_image_pdf_mode(app):
 
 
 def _run_image_to_pdf_task(app, input_folder, merge=False):
-    normalized_input, input_root, output_folder = _resolve_result_output_folder(input_folder)
+    normalized_input, input_root, output_folder, resolved_strategy = _resolve_output_root_for_task(
+        input_folder,
+        "image",
+        _get_task_output_strategy(app, "image"),
+    )
     result = _get_last_task_result(app)
     if result is None:
         result = _start_task_result(app, normalized_input, "image")
+    _set_task_result_output_strategy(result, "image", resolved_strategy)
     _set_task_result_output_root(result, output_folder)
     image_files = _collect_image_to_pdf_files(app, normalized_input)
     if not image_files:
@@ -4047,6 +4942,8 @@ def _run_image_to_pdf_task(app, input_folder, merge=False):
         output_name = f"{Path(input_root or normalized_input).name or 'images'}_图集合并.pdf"
         dst = os.path.join(output_folder, output_name)
         app.log(f"🧩 [多图合并PDF] 共 {len(image_files)} 张图片，正在合并...")
+        if tracker is not None:
+            tracker.set_current_item(dst, "多图合并 PDF")
         status = merge_images_to_pdf(image_files, dst)
         if status != "SUCCESS" or not os.path.exists(dst):
             failed_list.append(f"{normalized_input}: {status}")
@@ -4068,30 +4965,80 @@ def _run_image_to_pdf_task(app, input_folder, merge=False):
     else:
         total = len(image_files)
         app.log(f"📄 [图片转PDF] 共 {total} 张图片，逐张生成 PDF...")
-        for index, src in enumerate(image_files):
-            if getattr(app, "stop_event", False):
-                app.log("⏹️ [停止] 图片转 PDF 任务已被用户中止")
-                break
-            dst = _build_image_pdf_output_path(src, output_folder)
-            try:
-                status = _image_file_to_pdf(src, dst)
-                if status != "SUCCESS":
-                    failed_list.append(f"{src}: {status}")
-                    app.log(f"❌ [失败] {os.path.basename(src)}: {status}")
-                else:
-                    success_count += 1
-                    _add_task_result_output(result, dst)
-                    app.log(f"✅ [图片转PDF] {os.path.basename(src)} -> {os.path.basename(dst)}")
-                    if should_delete:
-                        os.remove(src)
-            except Exception as exc:
-                failed_list.append(f"{src}: {exc}")
-                app.log(f"❌ [失败] {os.path.basename(src)}: {exc}")
-            finally:
+        reserved_outputs = set()
+        jobs = [
+            (src, _reserve_unique_output_path(src, output_folder, _build_image_pdf_output_path, reserved_outputs))
+            for src in image_files
+        ]
+
+        def process_one_image_pdf(job):
+            src, dst = job
+            status = _image_file_to_pdf(src, dst)
+            return {"src": src, "dst": dst, "ok": status == "SUCCESS", "status": status}
+
+        parallel_workers = _get_parallel_worker_count(total) if _is_parallel_enabled(app) else 1
+        if parallel_workers > 1:
+            app.log(f"🚀 [批量并行] 图片转 PDF 启用 {parallel_workers} 个线程。")
+            futures = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+                for job in jobs:
+                    if getattr(app, "stop_event", False):
+                        app.log("⏹️ [停止] 图片转 PDF 任务已被用户中止")
+                        break
+                    src, _dst = job
+                    if tracker is not None:
+                        tracker.set_current_item(src, "图片转 PDF")
+                    app.log(f"🖼️ [图片转PDF] 已加入并行处理：{os.path.basename(src)}")
+                    futures[executor.submit(process_one_image_pdf, job)] = job
+                for future in concurrent.futures.as_completed(futures):
+                    src, _dst = futures[future]
+                    try:
+                        item = future.result()
+                    except Exception as exc:
+                        item = {"src": src, "dst": _dst, "ok": False, "status": str(exc)}
+                    if not item.get("ok"):
+                        failed_list.append(f"{item.get('src', src)}: {item.get('status')}")
+                        app.log(f"❌ [失败] {os.path.basename(str(item.get('src', src)))}: {item.get('status')}")
+                    else:
+                        success_count += 1
+                        dst = item["dst"]
+                        _add_task_result_output(result, dst)
+                        app.log(f"✅ [图片转PDF] {os.path.basename(item['src'])} -> {os.path.basename(dst)}")
+                        if should_delete:
+                            try:
+                                os.remove(item["src"])
+                            except Exception as exc:
+                                failed_list.append(f"{item['src']}: 删除源文件失败: {exc}")
+                    if tracker is not None:
+                        tracker.complete_units(1)
+                    else:
+                        app.progress_bar.set(min(1.0, (success_count + len(failed_list)) / total))
+        else:
+            for index, (src, dst) in enumerate(jobs):
+                if getattr(app, "stop_event", False):
+                    app.log("⏹️ [停止] 图片转 PDF 任务已被用户中止")
+                    break
                 if tracker is not None:
-                    tracker.complete_units(1)
-                else:
-                    app.progress_bar.set((index + 1) / total)
+                    tracker.set_current_item(src, "图片转 PDF")
+                try:
+                    item = process_one_image_pdf((src, dst))
+                    if not item.get("ok"):
+                        failed_list.append(f"{src}: {item.get('status')}")
+                        app.log(f"❌ [失败] {os.path.basename(src)}: {item.get('status')}")
+                    else:
+                        success_count += 1
+                        _add_task_result_output(result, dst)
+                        app.log(f"✅ [图片转PDF] {os.path.basename(src)} -> {os.path.basename(dst)}")
+                        if should_delete:
+                            os.remove(src)
+                except Exception as exc:
+                    failed_list.append(f"{src}: {exc}")
+                    app.log(f"❌ [失败] {os.path.basename(src)}: {exc}")
+                finally:
+                    if tracker is not None:
+                        tracker.complete_units(1)
+                    else:
+                        app.progress_bar.set((index + 1) / total)
 
     if failed_list:
         result["failed_items"] = list(failed_list)
@@ -4551,6 +5498,7 @@ def _patch_pdf_ocr_mode():
             ).pack(anchor="w", fill="x", padx=8, pady=(0, 2))
 
             self.pdf_ocr_backend_status_var.set("后端状态：按需检测，可直接运行 OCR；如需查看详细可用性再点刷新。")
+            self._fx_select_pdf_mode = select_pdf_mode
             try:
                 select_pdf_mode(self.pdf_mode_var.get())
             except Exception:
@@ -4682,6 +5630,272 @@ def _patch_image_pdf_modes():
 _patch_image_pdf_modes()
 
 
+def _collect_audio_files(app, input_value):
+    normalized_input = _normalize_input_path_value(input_value)
+    if not normalized_input:
+        return []
+    if os.path.isfile(normalized_input):
+        return [normalized_input]
+    try:
+        return list(app.collect_input_files(normalized_input, "audio"))
+    except Exception:
+        return []
+
+
+def _get_audio_task_args(app):
+    try:
+        mode = app.audio_mode_var.get()
+    except Exception:
+        mode = "video2mp3"
+    try:
+        target_fmt = app.audio_target_fmt.get()
+    except Exception:
+        target_fmt = "mp3"
+    try:
+        bitrate = app.audio_bitrate.get()
+    except Exception:
+        bitrate = "192k"
+    try:
+        delete_source = bool(app.audio_delete_var.get())
+    except Exception:
+        delete_source = False
+    return str(mode or "video2mp3"), str(target_fmt or "mp3"), str(bitrate or "192k"), delete_source
+
+
+def _build_audio_output_path(src, input_root, output_folder, target_fmt):
+    rel = os.path.relpath(src, input_root)
+    dst = os.path.join(output_folder, rel)
+    dst_dir = os.path.dirname(dst)
+    fname = os.path.basename(src)
+    new_name = os.path.splitext(fname)[0] + f".{target_fmt}"
+    return dst, os.path.join(dst_dir, new_name)
+
+
+def _process_one_audio_file(job):
+    src, input_root, output_folder, mode, target_fmt, bitrate, delete_source = job
+    fname = os.path.basename(src)
+    lower_name = fname.lower()
+    dst, final_dst = _build_audio_output_path(src, input_root, output_folder, target_fmt)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+
+    is_video = lower_name.endswith(AUDIO_VALID_VIDEO_EXTS)
+    is_audio = lower_name.endswith(AUDIO_VALID_AUDIO_EXTS)
+    if not is_video and not is_audio:
+        copy_file_safe(src, dst)
+        return {"src": src, "dst": dst, "output": dst, "status": "copied", "ok": True, "message": "not_audio_video"}
+
+    if mode == "video2mp3" and not is_video:
+        copy_file_safe(src, dst)
+        return {"src": src, "dst": dst, "output": dst, "status": "copied", "ok": True, "message": "not_video"}
+
+    if mode == "convert" and not is_audio:
+        copy_file_safe(src, dst)
+        return {"src": src, "dst": dst, "output": dst, "status": "copied", "ok": True, "message": "not_audio"}
+
+    status = convert_audio_format(src, final_dst, target_fmt, bitrate)
+    if status == "SUCCESS":
+        delete_error = ""
+        if delete_source:
+            try:
+                os.remove(src)
+            except Exception as exc:
+                delete_error = str(exc)
+        return {
+            "src": src,
+            "dst": dst,
+            "output": final_dst,
+            "status": "success",
+            "ok": True,
+            "message": status,
+            "delete_error": delete_error,
+        }
+
+    copy_file_safe(src, dst)
+    missing_lib = str(status or "").startswith("MISSING_LIB")
+    return {
+        "src": src,
+        "dst": dst,
+        "output": dst,
+        "status": "missing_lib" if missing_lib else "failed",
+        "ok": missing_lib,
+        "message": status,
+    }
+
+
+def _run_audio_task(app, input_folder):
+    normalized_input, input_root, output_folder = _resolve_result_output_folder(input_folder)
+    audio_files = _collect_audio_files(app, normalized_input)
+    result = _get_last_task_result(app)
+    if result is None:
+        result = _start_task_result(app, input_folder, "audio")
+    _set_task_result_output_root(result, output_folder)
+
+    if not audio_files:
+        _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=1)
+        _set_task_result_finished(result, "skipped", message="未找到可处理的音视频文件", detail="未找到可处理的音视频文件", skipped=True)
+        try:
+            app.log("⚠️ [跳过] 未找到可处理的音视频文件")
+        except Exception:
+            pass
+        return
+
+    mode, target_fmt, bitrate, delete_source = _get_audio_task_args(app)
+    tracker = _get_active_progress_tracker(app)
+    total = len(audio_files)
+    jobs = [(src, input_root, output_folder, mode, target_fmt, bitrate, delete_source) for src in audio_files]
+    failed_list = []
+    success_count = 0
+    copied_count = 0
+
+    try:
+        app.log(f"🎧 [音频] 共 {total} 个文件，目标格式：{target_fmt}，码率：{bitrate}")
+    except Exception:
+        pass
+
+    def handle_item(item):
+        nonlocal success_count, copied_count
+        src = item.get("src", "")
+        fname = os.path.basename(src)
+        status = item.get("status")
+        if status == "success":
+            success_count += 1
+            _add_task_result_output(result, item.get("output"))
+            try:
+                app.log(f"🎵 [音频] 转换成功: {fname}")
+            except Exception:
+                pass
+            if item.get("delete_error"):
+                failed_list.append(f"{src}: 删除源文件失败 {item.get('delete_error')}")
+                try:
+                    app.log(f"⚠️ [源文件] 删除失败: {fname}: {item.get('delete_error')}")
+                except Exception:
+                    pass
+        elif status == "missing_lib":
+            copied_count += 1
+            _add_task_result_output(result, item.get("output"))
+            try:
+                app.log(f"⚠️ [跳过] 缺少 moviepy/ffmpeg 后端: {fname}")
+            except Exception:
+                pass
+        elif status == "copied":
+            copied_count += 1
+            _add_task_result_output(result, item.get("output"))
+            try:
+                app.log(f"⏭️ [跳过] 已原样复制: {fname}")
+            except Exception:
+                pass
+        else:
+            failed_list.append(f"{src}: {item.get('message')}")
+            try:
+                app.log(f"❌ [失败] 音频转换错误: {fname}")
+            except Exception:
+                pass
+        if tracker is not None:
+            tracker.complete_units(1)
+        else:
+            app.progress_bar.set(min(1.0, (success_count + copied_count + len(failed_list)) / max(1, total)))
+
+    parallel_workers = _get_parallel_worker_count(total) if _is_parallel_enabled(app) else 1
+    if parallel_workers > 1:
+        try:
+            app.log(f"🚀 [批量并行] 音视频转换启用 {parallel_workers} 个线程。")
+        except Exception:
+            pass
+        futures = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+            for job in jobs:
+                if getattr(app, "stop_event", False):
+                    break
+                src = job[0]
+                if tracker is not None:
+                    tracker.set_current_item(src, "音视频转换")
+                futures[executor.submit(_process_one_audio_file, job)] = job
+            for future in concurrent.futures.as_completed(futures):
+                src = futures[future][0]
+                try:
+                    item = future.result()
+                except Exception as exc:
+                    item = {"src": src, "output": "", "status": "failed", "ok": False, "message": str(exc)}
+                handle_item(item)
+    else:
+        for index, job in enumerate(jobs):
+            if getattr(app, "stop_event", False):
+                break
+            src = job[0]
+            if tracker is not None:
+                tracker.set_current_item(src, "音视频转换")
+            try:
+                item = _process_one_audio_file(job)
+            except Exception as exc:
+                item = {"src": src, "output": "", "status": "failed", "ok": False, "message": str(exc)}
+            handle_item(item)
+            if tracker is None:
+                app.progress_bar.set((index + 1) / total)
+
+    processed_count = success_count + copied_count + len(failed_list)
+    if failed_list:
+        result["failed_items"] = list(failed_list)
+        _set_task_result_counts(result, processed=total, success=success_count + copied_count, failed=len(failed_list), skipped=0)
+        report_path = _write_failed_report(output_folder, failed_list)
+        if report_path:
+            _add_task_result_output(result, report_path)
+            try:
+                app.log(f"\n📄 [报告] 已生成报告: {report_path}")
+            except Exception:
+                pass
+        _set_task_result_finished(
+            result,
+            "failed",
+            message=f"音视频转换完成，但有 {len(failed_list)} 个文件失败",
+            detail=f"成功/复制 {success_count + copied_count} 个，失败 {len(failed_list)} 个",
+            error=f"失败 {len(failed_list)} 个文件",
+        )
+    elif getattr(app, "stop_event", False):
+        _set_task_result_counts(result, processed=processed_count, success=success_count + copied_count, failed=0, skipped=0)
+        _set_task_result_finished(result, "stopped", message="用户停止音视频转换任务", detail="用户停止音视频转换任务", stopped=True)
+    else:
+        _set_task_result_counts(result, processed=total, success=success_count + copied_count, failed=0, skipped=0)
+        try:
+            app.log("\n🎉 [完成] 音视频转换已全部完成！")
+        except Exception:
+            pass
+        _set_task_result_finished(
+            result,
+            "success",
+            message="音视频转换已全部完成",
+            detail=f"转换成功 {success_count} 个，原样复制 {copied_count} 个",
+        )
+
+
+def _patch_audio_parallel_task():
+    try:
+        original_run_process = FengxiToolboxApp.run_process
+    except Exception as exc:
+        _debug(f"patch_audio_parallel:missing:{exc}")
+        return
+
+    if getattr(original_run_process, "__fx_audio_parallel_patch__", False):
+        return
+
+    def patched_run_process(self, input_folder, task_type):
+        if task_type == "audio":
+            try:
+                _run_audio_task(self, input_folder)
+            except Exception as exc:
+                self.log(f"🔥 [严重错误] {exc}")
+            finally:
+                self.reset_ui()
+            return
+        return original_run_process(self, input_folder, task_type)
+
+    patched_run_process.__fx_audio_parallel_patch__ = True
+    FengxiToolboxApp.run_process = patched_run_process
+    _debug("patch_audio_parallel:installed")
+
+
+_patch_audio_parallel_task()
+
+
 def _iter_widget_tree(widget):
     if widget is None:
         return
@@ -4804,6 +6018,204 @@ def _save_user_prefs(data):
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
         _debug(f"user_prefs:save_error:{exc}")
+
+
+def _get_saved_output_strategy():
+    prefs = _load_user_prefs()
+    value = prefs.get("output_strategy")
+    if isinstance(value, str) and value in OUTPUT_STRATEGY_VALUES:
+        return value
+    return OUTPUT_STRATEGY_DEFAULT
+
+
+def _save_output_strategy(value):
+    normalized = str(value or "").strip()
+    if normalized not in OUTPUT_STRATEGY_VALUES:
+        normalized = OUTPUT_STRATEGY_DEFAULT
+    prefs = _load_user_prefs()
+    prefs["output_strategy"] = normalized
+    _save_user_prefs(prefs)
+
+
+def _get_saved_remove_wm_mode():
+    prefs = _load_user_prefs()
+    watermark_prefs = prefs.get("watermark")
+    if isinstance(watermark_prefs, dict):
+        return _coerce_remove_wm_mode(watermark_prefs.get("remove_wm_mode"))
+    return REMOVE_WM_MODE_DEFAULT
+
+
+def _save_remove_wm_mode(value):
+    normalized = _coerce_remove_wm_mode(value)
+    prefs = _load_user_prefs()
+    watermark_prefs = prefs.get("watermark")
+    if not isinstance(watermark_prefs, dict):
+        watermark_prefs = {}
+    watermark_prefs["remove_wm_mode"] = normalized
+    prefs["watermark"] = watermark_prefs
+    _save_user_prefs(prefs)
+
+
+def _get_remove_wm_mode(app=None):
+    var = getattr(app, "rm_wm_mode_var", None) if app is not None else None
+    if var is not None:
+        try:
+            return _coerce_remove_wm_mode(var.get())
+        except Exception:
+            pass
+    return _get_saved_remove_wm_mode()
+
+
+def _refresh_remove_wm_mode_hint(app):
+    hint_var = getattr(app, "rm_wm_mode_hint_var", None)
+    if hint_var is None:
+        return
+    try:
+        mode = _get_remove_wm_mode(app)
+        hint_var.set(_get_remove_wm_mode_hint(mode))
+    except Exception as exc:
+        _debug(f"remove_wm_mode:hint_error:{exc}")
+
+
+def _install_remove_wm_mode_memory(app):
+    if getattr(app, "_fx_remove_wm_mode_memory_ready", False):
+        return
+    var = getattr(app, "rm_wm_mode_var", None)
+    if not isinstance(var, tkinter.Variable):
+        return
+
+    saved = _get_saved_remove_wm_mode()
+    try:
+        app._fx_remove_wm_mode_loading = True
+        var.set(_get_remove_wm_mode_label(saved))
+    except Exception as exc:
+        _debug(f"remove_wm_mode:load_error:{exc}")
+    finally:
+        app._fx_remove_wm_mode_loading = False
+
+    def on_change(*_args, target=app):
+        if getattr(target, "_fx_remove_wm_mode_loading", False):
+            return
+        try:
+            _save_remove_wm_mode(_coerce_remove_wm_mode(var.get()))
+        except Exception as exc:
+            _debug(f"remove_wm_mode:save_error:{exc}")
+        _refresh_remove_wm_mode_hint(target)
+
+    try:
+        var.trace_add("write", on_change)
+    except Exception:
+        pass
+
+    app._fx_remove_wm_mode_memory_ready = True
+    _refresh_remove_wm_mode_hint(app)
+
+
+def _get_output_strategy_label(value):
+    return OUTPUT_STRATEGY_VALUE_TO_LABEL.get(str(value or ""), OUTPUT_STRATEGY_VALUE_TO_LABEL[OUTPUT_STRATEGY_DEFAULT])
+
+
+def _coerce_output_strategy_value(value):
+    normalized = str(value or "").strip()
+    if normalized in OUTPUT_STRATEGY_VALUES:
+        return normalized
+    mapped = OUTPUT_STRATEGY_LABEL_TO_VALUE.get(normalized)
+    if mapped in OUTPUT_STRATEGY_VALUES:
+        return mapped
+    return OUTPUT_STRATEGY_DEFAULT
+
+
+def _resolve_output_strategy(task_type, requested_value=None):
+    normalized_task = str(task_type or "")
+    requested = _coerce_output_strategy_value(requested_value or _get_saved_output_strategy() or OUTPUT_STRATEGY_DEFAULT)
+    if normalized_task in OUTPUT_STRATEGY_FORCE_RESULT_FOLDER_TASKS:
+        return "result_folder"
+    if normalized_task not in OUTPUT_STRATEGY_SUPPORTED_TASKS:
+        return "same_dir"
+    if normalized_task == "zip" and requested == "overwrite":
+        return "same_dir"
+    return requested
+
+
+def _apply_output_strategy_to_result(result, task_type, strategy_value):
+    if not isinstance(result, dict):
+        return result
+    requested = _coerce_output_strategy_value(strategy_value or OUTPUT_STRATEGY_DEFAULT)
+    normalized = _resolve_output_strategy(task_type, requested)
+    result["output_strategy_requested"] = requested
+    result["output_strategy"] = normalized
+    result["output_strategy_label"] = _get_output_strategy_label(normalized)
+    return result
+
+
+def _get_task_output_strategy(app, task_type):
+    var = getattr(app, "output_strategy_var", None)
+    requested = ""
+    try:
+        if var is not None:
+            requested = str(var.get() or "").strip()
+    except Exception:
+        requested = ""
+    return _resolve_output_strategy(task_type, _coerce_output_strategy_value(requested or None))
+
+
+def _refresh_output_strategy_hint(app):
+    hint_var = getattr(app, "output_strategy_hint_var", None)
+    if hint_var is None:
+        return
+    task_type = str(getattr(app, "current_task", "") or "")
+    requested = ""
+    try:
+        requested = str(getattr(app, "output_strategy_var").get() or "").strip()
+    except Exception:
+        requested = ""
+    requested_value = _coerce_output_strategy_value(requested or None)
+    resolved = _resolve_output_strategy(task_type, requested_value)
+    label = _get_output_strategy_label(resolved)
+    if task_type in OUTPUT_STRATEGY_FORCE_RESULT_FOLDER_TASKS and resolved != requested_value:
+        text = f"当前功能将自动使用：{label}"
+    elif task_type == "zip" and requested_value == "overwrite":
+        text = "批量压缩不支持覆盖原文件，已自动改为同目录新文件。"
+    else:
+        text = f"当前输出策略：{label}"
+    try:
+        hint_var.set(text)
+    except Exception:
+        pass
+
+
+def _install_output_strategy_memory(app):
+    if getattr(app, "_fx_output_strategy_memory_ready", False):
+        return
+    var = getattr(app, "output_strategy_var", None)
+    if not isinstance(var, tkinter.Variable):
+        return
+
+    saved = _get_saved_output_strategy()
+    try:
+        app._fx_output_strategy_loading = True
+        var.set(_get_output_strategy_label(saved))
+    except Exception as exc:
+        _debug(f"output_strategy:load_error:{exc}")
+    finally:
+        app._fx_output_strategy_loading = False
+
+    def on_change(*_args):
+        if getattr(app, "_fx_output_strategy_loading", False):
+            return
+        try:
+            _save_output_strategy(_coerce_output_strategy_value(var.get()))
+        except Exception as exc:
+            _debug(f"output_strategy:save_error:{exc}")
+        _refresh_output_strategy_hint(app)
+
+    try:
+        var.trace_add("write", on_change)
+    except Exception:
+        pass
+
+    app._fx_output_strategy_memory_ready = True
+    _refresh_output_strategy_hint(app)
 
 
 def _get_saved_watermark_text():
@@ -5295,10 +6707,56 @@ def _patch_remove_wm_output_ui():
             return
         try:
             self.rm_wm_overwrite_original = tkinter.BooleanVar(value=False)
+            self.rm_wm_mode_var = tkinter.StringVar(value=_get_remove_wm_mode_label(REMOVE_WM_MODE_DEFAULT))
+            self.rm_wm_mode_hint_var = tkinter.StringVar(value="")
             card = self.tab_rm_wm.winfo_children()[0]
             body = card.winfo_children()[1]
             widgets = body.winfo_children()
             separator = widgets[4] if len(widgets) > 4 else None
+
+            combo_style = {}
+            try:
+                combo_style = self._get_combo_style()
+            except Exception:
+                combo_style = {}
+            option_menu_style = _get_option_menu_style(combo_style)
+
+            mode_row = customtkinter.CTkFrame(body, fg_color="transparent")
+            mode_row.pack(anchor="w", fill="x", padx=0, pady=(2, 4))
+            if separator is not None:
+                mode_row.pack_configure(before=separator)
+            mode_row.grid_columnconfigure(1, weight=1)
+
+            customtkinter.CTkLabel(
+                mode_row,
+                text="去水印强度",
+                text_color=COLOR_TEXT_SOFT,
+                font=customtkinter.CTkFont(size=12),
+                anchor="w",
+            ).grid(row=0, column=0, sticky="w", padx=(0, 10))
+
+            customtkinter.CTkOptionMenu(
+                mode_row,
+                variable=self.rm_wm_mode_var,
+                values=[REMOVE_WM_MODE_VALUE_TO_LABEL[key] for key in REMOVE_WM_MODE_VALUES],
+                width=150,
+                height=30,
+                command=lambda _value=None, target=self: _refresh_remove_wm_mode_hint(target),
+                **option_menu_style,
+            ).grid(row=0, column=1, sticky="w")
+
+            mode_hint = customtkinter.CTkLabel(
+                body,
+                textvariable=self.rm_wm_mode_hint_var,
+                text_color=COLOR_TEXT_SOFT,
+                font=customtkinter.CTkFont(size=11),
+                justify="left",
+                wraplength=620,
+            )
+            mode_hint.pack(anchor="w", padx=0, pady=(0, 8))
+            if separator is not None:
+                mode_hint.pack_configure(before=separator)
+            _install_remove_wm_mode_memory(self)
 
             switch = customtkinter.CTkSwitch(
                 body,
@@ -5345,18 +6803,23 @@ def _patch_remove_wm_pdf_fallback():
 
     def patched_run_process(self, input_folder, task_type):
         if task_type == "remove_wm":
+            previous_remove_mode = _push_remove_wm_runtime_mode(_get_remove_wm_mode(self))
             try:
-                all_files = self.collect_input_files(input_folder, task_type)
-                if any(path.lower().endswith(".pdf") for path in all_files):
-                    try:
-                        _run_remove_wm_task(self, input_folder, original_run_process)
-                    except Exception as exc:
-                        self.log(f"🔥 [严重错误] {exc}")
-                    finally:
-                        self.reset_ui()
-                    return
-            except Exception as exc:
-                _debug(f"patch_remove_wm_pdf_fallback:run_process_error:{exc}")
+                try:
+                    all_files = self.collect_input_files(input_folder, task_type)
+                    if any(path.lower().endswith(".pdf") for path in all_files):
+                        try:
+                            _run_remove_wm_task(self, input_folder, original_run_process)
+                        except Exception as exc:
+                            self.log(f"🔥 [严重错误] {exc}")
+                        finally:
+                            self.reset_ui()
+                        return
+                except Exception as exc:
+                    _debug(f"patch_remove_wm_pdf_fallback:run_process_error:{exc}")
+                return original_run_process(self, input_folder, task_type)
+            finally:
+                _pop_remove_wm_runtime_mode(previous_remove_mode)
         return original_run_process(self, input_folder, task_type)
 
     patched_run_process.__fx_remove_wm_pdf_patch__ = True
@@ -5405,6 +6868,646 @@ def _safe_widget_set(widget, value):
     except Exception:
         return False
     return False
+
+
+def _safe_var_get(app, name, default=None):
+    try:
+        var = getattr(app, name, None)
+        if isinstance(var, tkinter.Variable):
+            return var.get()
+    except Exception:
+        pass
+    return default
+
+
+def _safe_var_set(app, name, value):
+    try:
+        var = getattr(app, name, None)
+        if isinstance(var, tkinter.Variable):
+            var.set(value)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _safe_named_widget_get(app, name, default=""):
+    try:
+        widget = getattr(app, name, None)
+        value = _safe_widget_get(widget)
+        if value is not None:
+            return value
+    except Exception:
+        pass
+    return default
+
+
+def _safe_named_widget_set(app, name, value):
+    try:
+        return _safe_widget_set(getattr(app, name, None), value)
+    except Exception:
+        return False
+
+
+def _get_parallel_detail_key(app, task_type=None):
+    task_type = str(task_type or getattr(app, "current_task", "") or "")
+    detail = ""
+    try:
+        if task_type == "pdf" and getattr(app, "pdf_mode_var", None) is not None:
+            detail = str(app.pdf_mode_var.get() or "")
+        elif task_type == "image" and getattr(app, "img_mode_var", None) is not None:
+            detail = str(app.img_mode_var.get() or "")
+        elif task_type == "file" and getattr(app, "file_mode_var", None) is not None:
+            detail = str(app.file_mode_var.get() or "")
+        elif task_type == "meta" and getattr(app, "meta_mode_var", None) is not None:
+            detail = str(app.meta_mode_var.get() or "")
+    except Exception:
+        detail = ""
+    return task_type, detail
+
+
+def _get_parallel_mode_message(app, task_type=None):
+    task_type, detail = _get_parallel_detail_key(app, task_type)
+    if not task_type:
+        return "并行状态：请选择具体功能。"
+    if getattr(app, "_fx_single_input_target", None):
+        return "并行状态：单文件输入会自动单线程，避免 UI 日志线程冲突。"
+    if (task_type, detail) in PARALLEL_FORCED_SINGLE_DETAILS:
+        return "并行状态：稳定单线程 · " + PARALLEL_FORCED_SINGLE_DETAILS[(task_type, detail)]
+    if (task_type, "") in PARALLEL_FORCED_SINGLE_DETAILS:
+        return "并行状态：稳定单线程 · " + PARALLEL_FORCED_SINGLE_DETAILS[(task_type, "")]
+    if task_type in PARALLEL_FORCED_SINGLE_TASKS:
+        return "并行状态：稳定单线程 · 当前功能使用专用流程。"
+    if task_type in PARALLEL_SAFE_TASKS:
+        return "并行状态：可提速 · " + PARALLEL_SUPPORTED_HINTS.get(task_type, "多文件批处理可尝试并行。")
+    return "并行状态：按当前功能自动选择。"
+
+
+def _refresh_parallel_mode_hint(app):
+    switch = getattr(app, "chk_multithread", None)
+    if switch is not None:
+        try:
+            switch.configure(text=PARALLEL_SWITCH_TEXT)
+        except Exception:
+            pass
+    label = getattr(app, "_fx_parallel_hint_label", None)
+    if label is not None:
+        try:
+            if label.winfo_exists():
+                label.destroy()
+        except Exception:
+            try:
+                label.destroy()
+            except Exception:
+                pass
+        try:
+            app._fx_parallel_hint_label = None
+        except Exception:
+            pass
+    var = getattr(app, "_fx_parallel_hint_var", None)
+    if var is None:
+        return ""
+    try:
+        var.set("")
+    except Exception:
+        pass
+    return ""
+
+
+def _install_parallel_mode_hint(app):
+    if getattr(app, "_fx_parallel_hint_ready", False):
+        _refresh_parallel_mode_hint(app)
+        return
+    switch = getattr(app, "chk_multithread", None)
+    if switch is None:
+        return
+    try:
+        switch.configure(text=PARALLEL_SWITCH_TEXT)
+    except Exception:
+        pass
+    try:
+        app._fx_parallel_hint_var = tkinter.StringVar(master=app, value="")
+    except Exception:
+        app._fx_parallel_hint_var = None
+
+    def on_parallel_toggle(*_args, target=app):
+        _refresh_parallel_mode_hint(target)
+
+    try:
+        getattr(app, "enable_multithread", None).trace_add("write", on_parallel_toggle)
+    except Exception:
+        pass
+
+    app._fx_parallel_hint_ready = True
+    _refresh_parallel_mode_hint(app)
+
+
+def _normalize_preset_category(value):
+    normalized = str(value or "").strip()
+    if normalized in PRESET_CATEGORY_LABELS:
+        return normalized
+    mapped = PRESET_LABEL_TO_CATEGORY.get(normalized)
+    if mapped:
+        return mapped
+    return "watermark"
+
+
+def _get_current_preset_category(app):
+    task_type = str(getattr(app, "current_task", "") or "")
+    if task_type == "pdf":
+        mode = str(_safe_var_get(app, "pdf_mode_var", "") or "")
+        if mode == "ocr":
+            return "ocr"
+        if mode == "compress":
+            return "pdf_compress"
+    if task_type == "file":
+        return "rename"
+    if task_type == "watermark":
+        return "watermark"
+    return "watermark"
+
+
+def _make_preset_id():
+    return f"preset_{int(time.time() * 1000)}_{os.getpid()}"
+
+
+def _load_presets():
+    prefs = _load_user_prefs()
+    presets = prefs.get("presets")
+    if not isinstance(presets, list):
+        return []
+    normalized = []
+    for entry in presets:
+        if not isinstance(entry, dict):
+            continue
+        category = _normalize_preset_category(entry.get("category"))
+        settings = entry.get("settings")
+        if not isinstance(settings, dict):
+            settings = {}
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            name = PRESET_CATEGORY_LABELS.get(category, "预设")
+        normalized.append(
+            {
+                "id": str(entry.get("id") or _make_preset_id()),
+                "name": name,
+                "category": category,
+                "category_label": PRESET_CATEGORY_LABELS.get(category, category),
+                "settings": settings,
+                "created_at": float(entry.get("created_at") or time.time()),
+                "updated_at": float(entry.get("updated_at") or entry.get("created_at") or time.time()),
+            }
+        )
+    return normalized
+
+
+def _save_presets(presets):
+    prefs = _load_user_prefs()
+    safe_presets = []
+    for entry in list(presets or []):
+        if not isinstance(entry, dict):
+            continue
+        category = _normalize_preset_category(entry.get("category"))
+        safe_presets.append(
+            {
+                "id": str(entry.get("id") or _make_preset_id()),
+                "name": str(entry.get("name") or PRESET_CATEGORY_LABELS.get(category, "预设")).strip(),
+                "category": category,
+                "category_label": PRESET_CATEGORY_LABELS.get(category, category),
+                "settings": dict(entry.get("settings") or {}),
+                "created_at": float(entry.get("created_at") or time.time()),
+                "updated_at": float(entry.get("updated_at") or time.time()),
+            }
+        )
+    prefs["presets"] = safe_presets[-120:]
+    _save_user_prefs(prefs)
+    return prefs["presets"]
+
+
+def _save_preset_entry(name, category, settings):
+    category = _normalize_preset_category(category)
+    name = str(name or "").strip() or f"{PRESET_CATEGORY_LABELS.get(category, '预设')} {_format_queue_time()}"
+    presets = _load_presets()
+    now = time.time()
+    matched = None
+    for entry in presets:
+        if entry.get("category") == category and str(entry.get("name") or "").strip() == name:
+            matched = entry
+            break
+    if matched is None:
+        matched = {
+            "id": _make_preset_id(),
+            "name": name,
+            "category": category,
+            "category_label": PRESET_CATEGORY_LABELS.get(category, category),
+            "created_at": now,
+        }
+        presets.append(matched)
+    matched["settings"] = dict(settings or {})
+    matched["updated_at"] = now
+    _save_presets(presets)
+    return dict(matched)
+
+
+def _delete_preset_entry(preset_id):
+    preset_id = str(preset_id or "")
+    presets = _load_presets()
+    kept = [entry for entry in presets if str(entry.get("id") or "") != preset_id]
+    if len(kept) == len(presets):
+        return False
+    _save_presets(kept)
+    return True
+
+
+def _find_preset_entry(preset_id):
+    preset_id = str(preset_id or "")
+    for entry in _load_presets():
+        if str(entry.get("id") or "") == preset_id:
+            return entry
+    return None
+
+
+def _preset_pick_display_from_key(display_value, key_value, mapping):
+    if isinstance(mapping, dict):
+        if display_value in mapping:
+            return display_value
+        for display, key in mapping.items():
+            if key == key_value:
+                return display
+    return display_value
+
+
+def _capture_preset_settings(app, category=None):
+    category = _normalize_preset_category(category or _get_current_preset_category(app))
+    task_type = PRESET_CATEGORY_TO_TASK.get(category)
+    if task_type:
+        try:
+            _ensure_lazy_tab_initialized(app, task_type)
+        except Exception as exc:
+            _debug(f"preset:capture_lazy_error:{category}:{exc}")
+
+    output_strategy = _safe_var_get(app, "output_strategy_var", "")
+    settings = {"category": category, "output_strategy": output_strategy}
+
+    if category == "watermark":
+        settings.update(
+            {
+                "wm_text": _read_watermark_text_widget(app),
+                "selected_font": _safe_var_get(app, "selected_font", ""),
+                "wm_range_var": _safe_var_get(app, "wm_range_var", "all"),
+                "wm_overwrite_var": _safe_var_get(app, "wm_overwrite_var", "smart"),
+                "allow_simsun": bool(_safe_var_get(app, "allow_simsun", False)),
+                "wm_delete_var": bool(_safe_var_get(app, "wm_delete_var", False)),
+                "wm_convert_pdf": bool(_safe_var_get(app, "wm_convert_pdf", False)),
+                "wm_skip_hyphen_var": bool(_safe_var_get(app, "wm_skip_hyphen_var", False)),
+                "wm_skip_name_position_var": _safe_var_get(app, "wm_skip_name_position_var", "结尾"),
+                "wm_skip_name_text_var": _safe_var_get(app, "wm_skip_name_text_var", "-"),
+                "slider_size": _safe_named_widget_get(app, "slider_size", 60),
+                "slider_opacity": _safe_named_widget_get(app, "slider_opacity", 0.08),
+                "slider_angle": _safe_named_widget_get(app, "slider_angle", 45),
+            }
+        )
+    elif category == "ocr":
+        backend_display = _safe_var_get(app, "pdf_ocr_backend", "")
+        language_display = _safe_var_get(app, "pdf_ocr_language", "")
+        mode_display = _safe_var_get(app, "pdf_ocr_mode", "")
+        settings.update(
+            {
+                "pdf_mode_var": "ocr",
+                "pdf_pwd_entry": _safe_named_widget_get(app, "pdf_pwd_entry", ""),
+                "pdf_delete_var": bool(_safe_var_get(app, "pdf_delete_var", False)),
+                "pdf_ocr_model_root": _safe_var_get(app, "pdf_ocr_model_root", ""),
+                "pdf_ocr_backend": backend_display,
+                "pdf_ocr_backend_key": getattr(app, "_fx_pdf_ocr_backend_map", {}).get(backend_display, ""),
+                "pdf_ocr_language": language_display,
+                "pdf_ocr_language_key": getattr(app, "_fx_pdf_ocr_lang_map", {}).get(language_display, ""),
+                "pdf_ocr_mode": mode_display,
+                "pdf_ocr_mode_key": getattr(app, "_fx_pdf_ocr_mode_map", {}).get(mode_display, ""),
+                "pdf_ocr_cls": bool(_safe_var_get(app, "pdf_ocr_cls", False)),
+                "pdf_ocr_compare_report": bool(_safe_var_get(app, "pdf_ocr_compare_report", False)),
+            }
+        )
+    elif category == "pdf_compress":
+        settings.update(
+            {
+                "pdf_mode_var": "compress",
+                "pdf_pwd_entry": _safe_named_widget_get(app, "pdf_pwd_entry", ""),
+                "pdf_delete_var": bool(_safe_var_get(app, "pdf_delete_var", False)),
+                "pdf_compress_level_var": _safe_var_get(app, "pdf_compress_level_var", "标准"),
+                "pdf_image_compress_level_var": _safe_var_get(app, "pdf_image_compress_level_var", "标准"),
+            }
+        )
+    elif category == "rename":
+        settings.update(
+            {
+                "file_mode_var": "rename",
+                "rename_type_var": _safe_var_get(app, "rename_type_var", "add"),
+                "rename_prefix": _safe_named_widget_get(app, "rename_prefix", ""),
+                "rename_suffix": _safe_named_widget_get(app, "rename_suffix", ""),
+                "rename_find": _safe_named_widget_get(app, "rename_find", ""),
+                "rename_rep": _safe_named_widget_get(app, "rename_rep", ""),
+                "rename_cut_head": _safe_named_widget_get(app, "rename_cut_head", ""),
+                "rename_cut_tail": _safe_named_widget_get(app, "rename_cut_tail", ""),
+            }
+        )
+    return settings
+
+
+def _switch_to_preset_task(app, category):
+    task_type = PRESET_CATEGORY_TO_TASK.get(_normalize_preset_category(category))
+    if not task_type:
+        return
+    try:
+        if callable(getattr(app, "switch_tab", None)):
+            app.switch_tab(task_type)
+        else:
+            _ensure_lazy_tab_initialized(app, task_type)
+            app.current_task = task_type
+    except Exception as exc:
+        _debug(f"preset:switch_task_error:{category}:{exc}")
+        try:
+            _ensure_lazy_tab_initialized(app, task_type)
+            app.current_task = task_type
+        except Exception:
+            pass
+
+
+def _select_pdf_preset_mode(app, mode):
+    _safe_var_set(app, "pdf_mode_var", mode)
+    selector = getattr(app, "_fx_select_pdf_mode", None)
+    if callable(selector):
+        try:
+            selector(mode)
+            return
+        except Exception:
+            pass
+    panels = getattr(app, "_fx_pdf_detail_panels", {})
+    if isinstance(panels, dict):
+        for key, panel in panels.items():
+            try:
+                if key == mode:
+                    panel.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+                    panel.tkraise()
+                else:
+                    panel.grid_remove()
+            except Exception:
+                pass
+
+
+def _apply_preset_settings(app, preset, switch_task=True):
+    if not isinstance(preset, dict):
+        return False, "设置不存在。"
+    category = _normalize_preset_category(preset.get("category"))
+    settings = preset.get("settings") if isinstance(preset.get("settings"), dict) else {}
+    if switch_task:
+        _switch_to_preset_task(app, category)
+    else:
+        try:
+            _ensure_lazy_tab_initialized(app, PRESET_CATEGORY_TO_TASK.get(category, "watermark"))
+        except Exception:
+            pass
+
+    output_strategy = settings.get("output_strategy")
+    if output_strategy:
+        _safe_var_set(app, "output_strategy_var", _get_output_strategy_label(_coerce_output_strategy_value(output_strategy)))
+        _refresh_output_strategy_hint(app)
+
+    if category == "watermark":
+        _safe_named_widget_set(app, "wm_text", settings.get("wm_text", ""))
+        for name in ("selected_font", "wm_range_var", "wm_overwrite_var", "wm_skip_name_position_var", "wm_skip_name_text_var"):
+            if name in settings:
+                _safe_var_set(app, name, settings.get(name))
+        for name in ("allow_simsun", "wm_delete_var", "wm_convert_pdf", "wm_skip_hyphen_var"):
+            if name in settings:
+                _safe_var_set(app, name, bool(settings.get(name)))
+        for name in ("slider_size", "slider_opacity", "slider_angle"):
+            if name in settings:
+                _safe_named_widget_set(app, name, settings.get(name))
+        try:
+            _flush_watermark_text_persistence(app)
+            _flush_watermark_filename_rule_persistence(app)
+        except Exception:
+            pass
+    elif category == "ocr":
+        _select_pdf_preset_mode(app, "ocr")
+        _safe_named_widget_set(app, "pdf_pwd_entry", settings.get("pdf_pwd_entry", ""))
+        _safe_var_set(app, "pdf_delete_var", bool(settings.get("pdf_delete_var", False)))
+        _safe_var_set(app, "pdf_ocr_model_root", settings.get("pdf_ocr_model_root", ""))
+        _safe_var_set(
+            app,
+            "pdf_ocr_backend",
+            _preset_pick_display_from_key(
+                settings.get("pdf_ocr_backend", ""),
+                settings.get("pdf_ocr_backend_key", ""),
+                getattr(app, "_fx_pdf_ocr_backend_map", {}),
+            ),
+        )
+        _safe_var_set(
+            app,
+            "pdf_ocr_language",
+            _preset_pick_display_from_key(
+                settings.get("pdf_ocr_language", ""),
+                settings.get("pdf_ocr_language_key", ""),
+                getattr(app, "_fx_pdf_ocr_lang_map", {}),
+            ),
+        )
+        _safe_var_set(
+            app,
+            "pdf_ocr_mode",
+            _preset_pick_display_from_key(
+                settings.get("pdf_ocr_mode", ""),
+                settings.get("pdf_ocr_mode_key", ""),
+                getattr(app, "_fx_pdf_ocr_mode_map", {}),
+            ),
+        )
+        _safe_var_set(app, "pdf_ocr_cls", bool(settings.get("pdf_ocr_cls", False)))
+        _safe_var_set(app, "pdf_ocr_compare_report", bool(settings.get("pdf_ocr_compare_report", False)))
+    elif category == "pdf_compress":
+        _select_pdf_preset_mode(app, "compress")
+        _safe_named_widget_set(app, "pdf_pwd_entry", settings.get("pdf_pwd_entry", ""))
+        _safe_var_set(app, "pdf_delete_var", bool(settings.get("pdf_delete_var", False)))
+        _safe_var_set(app, "pdf_compress_level_var", settings.get("pdf_compress_level_var", "标准"))
+        _safe_var_set(app, "pdf_image_compress_level_var", settings.get("pdf_image_compress_level_var", "标准"))
+    elif category == "rename":
+        _safe_var_set(app, "file_mode_var", "rename")
+        _safe_var_set(app, "rename_type_var", settings.get("rename_type_var", "add"))
+        for name in ("rename_prefix", "rename_suffix", "rename_find", "rename_rep", "rename_cut_head", "rename_cut_tail"):
+            _safe_named_widget_set(app, name, settings.get(name, ""))
+    else:
+        return False, "暂不支持该设置类型。"
+
+    return True, f"已恢复设置：{preset.get('name', '')}"
+
+
+def _load_last_settings():
+    prefs = _load_user_prefs()
+    data = prefs.get("last_settings")
+    if not isinstance(data, dict):
+        return {}
+    normalized = {}
+    for category, entry in data.items():
+        category = _normalize_preset_category(category)
+        settings = entry.get("settings") if isinstance(entry, dict) else entry
+        if not isinstance(settings, dict):
+            continue
+        normalized[category] = {
+            "category": category,
+            "settings": settings,
+            "updated_at": float((entry or {}).get("updated_at") or time.time()) if isinstance(entry, dict) else time.time(),
+        }
+    return normalized
+
+
+def _save_last_settings_entry(category, settings, update_active=True):
+    category = _normalize_preset_category(category)
+    if category not in PRESET_CATEGORY_TO_TASK:
+        return None
+    prefs = _load_user_prefs()
+    last_settings = prefs.get("last_settings")
+    if not isinstance(last_settings, dict):
+        last_settings = {}
+    now = time.time()
+    entry = {
+        "category": category,
+        "settings": dict(settings or {}),
+        "updated_at": now,
+    }
+    last_settings[category] = entry
+    prefs["last_settings"] = last_settings
+
+    if update_active:
+        active = prefs.get("last_settings_active")
+        if not isinstance(active, dict):
+            active = {}
+        task_type = PRESET_CATEGORY_TO_TASK.get(category)
+        if task_type:
+            active[task_type] = category
+        prefs["last_settings_active"] = active
+    _save_user_prefs(prefs)
+    return entry
+
+
+def _last_settings_category_ready(app, category):
+    category = _normalize_preset_category(category)
+    if category == "watermark":
+        return getattr(app, "wm_text", None) is not None and getattr(app, "selected_font", None) is not None
+    if category in {"ocr", "pdf_compress"}:
+        return getattr(app, "pdf_mode_var", None) is not None
+    if category == "rename":
+        return getattr(app, "rename_type_var", None) is not None and getattr(app, "rename_prefix", None) is not None
+    return False
+
+
+def _get_current_last_settings_category(app):
+    task_type = str(getattr(app, "current_task", "") or "")
+    if task_type == "watermark":
+        return "watermark"
+    if task_type == "pdf":
+        mode = str(_safe_var_get(app, "pdf_mode_var", "") or "")
+        if mode == "ocr":
+            return "ocr"
+        if mode == "compress":
+            return "pdf_compress"
+        return None
+    if task_type == "file":
+        mode = str(_safe_var_get(app, "file_mode_var", "rename") or "")
+        if mode == "rename":
+            return "rename"
+    return None
+
+
+def _save_last_settings_category(app, category=None, update_active=True):
+    raw_category = category if category is not None else _get_current_last_settings_category(app)
+    if not raw_category:
+        return None
+    category = _normalize_preset_category(raw_category)
+    if not _last_settings_category_ready(app, category):
+        return None
+    settings = _capture_preset_settings(app, category)
+    return _save_last_settings_entry(category, settings, update_active=update_active)
+
+
+def _save_current_last_settings(app):
+    category = _get_current_last_settings_category(app)
+    if not category:
+        return None
+    return _save_last_settings_category(app, category)
+
+
+def _save_initialized_last_settings(app):
+    saved = {}
+    current_category = _get_current_last_settings_category(app)
+    for category in ("watermark", "ocr", "pdf_compress", "rename"):
+        try:
+            if _last_settings_category_ready(app, category):
+                entry = _save_last_settings_category(app, category, update_active=(category == current_category))
+                if entry:
+                    saved[category] = entry
+        except Exception as exc:
+            _debug(f"last_settings:save_initialized_error:{category}:{exc}")
+    return saved
+
+
+def _get_active_last_settings_category(task_name):
+    prefs = _load_user_prefs()
+    active = prefs.get("last_settings_active")
+    if not isinstance(active, dict):
+        active = {}
+    category = _normalize_preset_category(active.get(task_name))
+    if task_name == "pdf":
+        if category in {"ocr", "pdf_compress"}:
+            return category
+        last_settings = _load_last_settings()
+        if "ocr" in last_settings:
+            return "ocr"
+        if "pdf_compress" in last_settings:
+            return "pdf_compress"
+        return None
+    if task_name == "file":
+        return "rename" if "rename" in _load_last_settings() else None
+    if task_name == "watermark":
+        return "watermark" if "watermark" in _load_last_settings() else None
+    return None
+
+
+def _restore_last_settings_category(app, category):
+    category = _normalize_preset_category(category)
+    entry = _load_last_settings().get(category)
+    if not isinstance(entry, dict):
+        return False, "没有可恢复的上次设置。"
+    if not isinstance(entry.get("settings"), dict):
+        return False, "上次设置为空。"
+    previous_loading = getattr(app, "_fx_last_settings_loading", False)
+    app._fx_last_settings_loading = True
+    try:
+        ok, message = _apply_preset_settings(
+            app,
+            {
+                "name": "上次设置",
+                "category": category,
+                "settings": entry.get("settings") or {},
+            },
+            switch_task=False,
+        )
+        return ok, message
+    finally:
+        app._fx_last_settings_loading = previous_loading
+
+
+def _restore_last_settings_for_task(app, task_name):
+    restored = getattr(app, "_fx_last_settings_restored_tasks", None)
+    if not isinstance(restored, set):
+        restored = set()
+        app._fx_last_settings_restored_tasks = restored
+    if task_name in restored:
+        return False
+    category = _get_active_last_settings_category(task_name)
+    if not category:
+        restored.add(task_name)
+        return False
+    ok, _message = _restore_last_settings_category(app, category)
+    restored.add(task_name)
+    return ok
 
 
 def _queue_snapshot_app_state(app, task_type):
@@ -5507,7 +7610,10 @@ def _load_queue_history():
         if path.exists():
             data = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(data, list):
-                return data
+                pruned = _prune_queue_history_entries(data)
+                if len(pruned) != len(data):
+                    _save_queue_history(pruned)
+                return pruned
     except Exception as exc:
         _debug(f"queue:history_load_error:{exc}")
     return []
@@ -5517,10 +7623,48 @@ def _save_queue_history(entries):
     path = _get_queue_history_file()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        safe_entries = list(entries or [])[-QUEUE_HISTORY_LIMIT:]
+        safe_entries = _prune_queue_history_entries(entries)
         path.write_text(json.dumps(safe_entries, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
         _debug(f"queue:history_save_error:{exc}")
+
+
+def _queue_history_entry_timestamp(entry):
+    if not isinstance(entry, dict):
+        return None
+    for key in ("finished_at", "created_at", "started_at"):
+        try:
+            value = entry.get(key)
+            if value is not None:
+                return float(value)
+        except Exception:
+            continue
+    task_result = entry.get("task_result")
+    if isinstance(task_result, dict):
+        for key in ("finished_at", "started_at"):
+            try:
+                value = task_result.get(key)
+                if value is not None:
+                    return float(value)
+            except Exception:
+                continue
+    return None
+
+
+def _prune_queue_history_entries(entries, now=None):
+    try:
+        cutoff = float(now if now is not None else time.time()) - QUEUE_HISTORY_RETENTION_DAYS * 86400
+    except Exception:
+        cutoff = time.time() - QUEUE_HISTORY_RETENTION_DAYS * 86400
+    kept = []
+    for entry in list(entries or []):
+        timestamp = _queue_history_entry_timestamp(entry)
+        if timestamp is not None and timestamp < cutoff:
+            continue
+        kept.append(entry)
+    if len(kept) > QUEUE_HISTORY_LIMIT:
+        kept = kept[-QUEUE_HISTORY_LIMIT:]
+    return kept
 
 
 def _normalize_queue_history_entry(task):
@@ -5535,27 +7679,7 @@ def _normalize_queue_history_entry(task):
     entry.pop("retry_failed_items", None)
     task_result = entry.get("task_result")
     if isinstance(task_result, dict):
-        entry["task_result"] = {
-            "task_type": task_result.get("task_type", ""),
-            "input": task_result.get("input", ""),
-            "status": task_result.get("status", ""),
-            "success": bool(task_result.get("success", False)),
-            "stopped": bool(task_result.get("stopped", False)),
-            "skipped": bool(task_result.get("skipped", False)),
-            "message": task_result.get("message", ""),
-            "detail": task_result.get("detail", ""),
-            "error": task_result.get("error", ""),
-            "outputs": list(task_result.get("outputs") or []),
-            "output_root": task_result.get("output_root", ""),
-            "failed_items": list(task_result.get("failed_items") or []),
-            "processed_count": int(task_result.get("processed_count") or 0),
-            "success_count": int(task_result.get("success_count") or 0),
-            "failed_count": int(task_result.get("failed_count") or 0),
-            "skipped_count": int(task_result.get("skipped_count") or 0),
-            "started_at": task_result.get("started_at"),
-            "finished_at": task_result.get("finished_at"),
-            "duration_seconds": float(task_result.get("duration_seconds") or 0.0),
-        }
+        entry["task_result"] = _task_result_snapshot(task_result)
     return entry
 
 
@@ -5565,8 +7689,7 @@ def _append_queue_history(app, task):
         history = _load_queue_history()
         app._fx_task_history = history
     history.append(_normalize_queue_history_entry(task))
-    if len(history) > QUEUE_HISTORY_LIMIT:
-        del history[:-QUEUE_HISTORY_LIMIT]
+    history[:] = _prune_queue_history_entries(history)
     _save_queue_history(history)
 
 
@@ -5753,6 +7876,12 @@ def _build_task_history_detail_text(entry):
     if error:
         lines.append(f"错误：{error}")
     output_root = task_result.get("output_root") or item.get("output_root", "")
+    output_strategy_label = task_result.get("output_strategy_label") or item.get("output_strategy_label", "")
+    output_strategy = task_result.get("output_strategy") or item.get("output_strategy", "")
+    if output_strategy_label:
+        lines.append(f"输出策略：{output_strategy_label}")
+    elif output_strategy:
+        lines.append(f"输出策略：{output_strategy}")
     if output_root:
         lines.append(f"输出目录：{output_root}")
     outputs = list(task_result.get("outputs") or item.get("outputs") or [])
@@ -6006,6 +8135,183 @@ def _prompt_export_task_history_log(app, entry, output_path=None):
     return ok
 
 
+def _build_task_history_report_export_filename(entry):
+    item = dict(entry or {})
+    task_type = QUEUE_TASK_LABELS.get(item.get("task_type"), item.get("task_type") or "task")
+    task_slug = _sanitize_filename_component(task_type, fallback="task")
+    title_slug = _sanitize_filename_component(item.get("title") or item.get("input") or "history", fallback="history")
+    timestamp = _sanitize_filename_component(_format_queue_time(item.get("finished_at") or item.get("created_at")), fallback="time")
+    return f"fengxi_task_report_{task_slug}_{title_slug}_{timestamp}.md"
+
+
+def _build_task_history_report_text(entry):
+    item = dict(entry or {})
+    task_result = item.get("task_result") if isinstance(item.get("task_result"), dict) else {}
+    outputs = list(task_result.get("outputs") or item.get("outputs") or [])
+    failed_items = list(task_result.get("failed_items") or item.get("failed_items") or [])
+    logs = [str(text).strip() for text in (item.get("logs") or task_result.get("logs") or task_result.get("log_lines") or []) if str(text).strip()]
+    has_content = bool(
+        task_result
+        or outputs
+        or failed_items
+        or logs
+        or any(item.get(key) for key in ("title", "task_type", "status", "input", "detail", "error", "output_root"))
+    )
+    if not has_content:
+        return ""
+
+    def _safe_int(value):
+        try:
+            return max(0, int(value or 0))
+        except Exception:
+            return 0
+
+    duration_seconds = task_result.get("duration_seconds", item.get("duration_seconds", 0.0))
+    try:
+        duration_seconds = float(duration_seconds or 0.0)
+    except Exception:
+        duration_seconds = 0.0
+
+    processed_count = _safe_int(task_result.get("processed_count", item.get("processed_count", 0)))
+    success_count = _safe_int(task_result.get("success_count", item.get("success_count", 0)))
+    failed_count = _safe_int(task_result.get("failed_count", item.get("failed_count", 0)))
+    skipped_count = _safe_int(task_result.get("skipped_count", item.get("skipped_count", 0)))
+    output_root = task_result.get("output_root") or item.get("output_root", "")
+    output_strategy_label = task_result.get("output_strategy_label") or item.get("output_strategy_label", "")
+    output_strategy = task_result.get("output_strategy") or item.get("output_strategy", "")
+    error_text = str(task_result.get("error") or item.get("error") or "").strip()
+    detail_text = str(task_result.get("detail") or item.get("detail") or "").strip()
+    message_text = str(task_result.get("message") or item.get("message") or "").strip()
+    failure_kind, failure_reason = _classify_failure_reason(item)
+    failure_label = QUEUE_HISTORY_FAILURE_VALUE_TO_LABEL.get(failure_kind, failure_kind or "未知失败")
+    failed_log_lines = [
+        text for text in logs if any(marker in text.lower() for marker in ("❌", "🔥", "错误", "失败", "error", "failed", "traceback"))
+    ]
+
+    lines = [
+        "# 风兮工具箱任务报告",
+        "",
+        "## 基本信息",
+        f"- 标题：{item.get('title', '')}",
+        f"- 功能：{QUEUE_TASK_LABELS.get(item.get('task_type'), item.get('task_type') or '未知任务')}",
+        f"- 状态：{_queue_status_text(item.get('status'))}",
+        f"- 输入：{item.get('input', '')}",
+        f"- 创建时间：{_format_queue_time(item.get('created_at'))}",
+        f"- 结束时间：{_format_queue_time(item.get('finished_at') or item.get('created_at'))}",
+    ]
+    if duration_seconds > 0:
+        lines.append(f"- 耗时：{duration_seconds:.3f}s")
+
+    lines.extend(
+        [
+            "",
+            "## 结果统计",
+            f"- 处理总数：{processed_count}",
+            f"- 成功数：{success_count}",
+            f"- 失败数：{failed_count}",
+            f"- 跳过数：{skipped_count}",
+        ]
+    )
+    if message_text:
+        lines.append(f"- 结果消息：{message_text}")
+    if detail_text:
+        lines.append(f"- 结果详情：{detail_text}")
+    if error_text:
+        lines.append(f"- 错误信息：{error_text}")
+
+    lines.extend(["", "## 输出位置"])
+    if output_strategy_label:
+        lines.append(f"- 输出策略：{output_strategy_label}")
+    elif output_strategy:
+        lines.append(f"- 输出策略：{output_strategy}")
+    if output_root:
+        lines.append(f"- 输出目录：{output_root}")
+    else:
+        lines.append("- 输出目录：")
+    if outputs:
+        lines.append("- 输出文件：")
+        lines.extend(f"  - {path}" for path in outputs)
+    else:
+        lines.append("- 输出文件：无")
+
+    if item.get("status") == "failed" or error_text or failed_items or failed_log_lines:
+        lines.extend(["", "## 失败分析", f"- 失败分类：{failure_label}"])
+        if failure_reason:
+            lines.append(f"- 失败原因：{failure_reason}")
+        if failed_items:
+            lines.append(f"- 失败项数量：{len(failed_items)}")
+            lines.append("- 失败项：")
+            lines.extend(f"  - {path}" for path in failed_items)
+
+    lines.extend(["", "## 关键日志"])
+    if failed_log_lines:
+        lines.extend(f"- {text}" for text in failed_log_lines[-8:])
+    elif logs:
+        lines.extend(f"- {text}" for text in logs[-12:])
+    else:
+        lines.append("- (empty)")
+
+    lines.extend(["", "## 结构化结果摘要"])
+    if task_result:
+        lines.append("```json")
+        lines.append(json.dumps(task_result, ensure_ascii=False, indent=2))
+        lines.append("```")
+    else:
+        lines.append("- 无结构化结果。")
+    return "\n".join(lines)
+
+
+def _export_task_history_report(entry, output_path):
+    item = dict(entry or {})
+    text = _build_task_history_report_text(item)
+    if not text:
+        return False, "当前历史记录为空，无法导出任务报告。"
+    normalized_output = _normalize_input_path_value(output_path)
+    if not normalized_output:
+        return False, "未选择导出位置。"
+    try:
+        path = Path(normalized_output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return True, str(path.resolve())
+    except Exception as exc:
+        _debug(f"queue:history_report_export_error:{exc}")
+        return False, f"导出失败：{normalized_output}"
+
+
+def _prompt_export_task_history_report(app, entry, output_path=None):
+    item = dict(entry or {})
+    selected_path = output_path
+    if not selected_path:
+        initial_dir = _resolve_task_history_open_target(item) or str(Path.cwd())
+        try:
+            selected_path = tkinter.filedialog.asksaveasfilename(
+                title="导出任务报告",
+                parent=app,
+                defaultextension=".md",
+                initialdir=_normalize_input_path_value(initial_dir) or str(Path.cwd()),
+                initialfile=_build_task_history_report_export_filename(item),
+                filetypes=[("Markdown 文件", "*.md"), ("文本文件", "*.txt"), ("所有文件", "*.*")],
+            )
+        except Exception as exc:
+            _debug(f"queue:history_report_export_dialog_error:{exc}")
+            selected_path = ""
+    ok, payload = _export_task_history_report(item, selected_path)
+    try:
+        if ok:
+            tkinter.messagebox.showinfo("导出报告", f"任务报告已导出到：\n{payload}", parent=app)
+        elif selected_path:
+            tkinter.messagebox.showerror("导出报告", payload, parent=app)
+    except Exception:
+        pass
+    if ok:
+        try:
+            app.log(f"[任务历史] 已导出报告：{payload}")
+        except Exception:
+            pass
+    return ok
+
+
 def _resolve_task_history_open_target(entry):
     item = dict(entry or {})
     task_result = item.get("task_result") if isinstance(item.get("task_result"), dict) else {}
@@ -6114,6 +8420,10 @@ def _show_task_history_detail(app, entry):
                 current_entry = getattr(detail_window, "_fx_entry", None)
                 _prompt_export_task_history_log(app, current_entry)
 
+            def export_detail_report():
+                current_entry = getattr(detail_window, "_fx_entry", None)
+                _prompt_export_task_history_report(app, current_entry)
+
             def open_output_location():
                 current_entry = getattr(detail_window, "_fx_entry", None)
                 _prompt_open_task_history_output(app, current_entry)
@@ -6131,6 +8441,17 @@ def _show_task_history_detail(app, entry):
             ).grid(row=0, column=1, sticky="e", padx=(0, 8))
             customtkinter.CTkButton(
                 actions,
+                text="导出报告",
+                command=export_detail_report,
+                height=34,
+                width=92,
+                corner_radius=10,
+                fg_color="#5A4768",
+                hover_color="#69557B",
+                text_color="#F4EEFF",
+            ).grid(row=0, column=2, sticky="e", padx=(0, 8))
+            customtkinter.CTkButton(
+                actions,
                 text="打开位置",
                 command=open_output_location,
                 height=34,
@@ -6139,7 +8460,7 @@ def _show_task_history_detail(app, entry):
                 fg_color="#3F5B57",
                 hover_color="#4D6C67",
                 text_color="#EAF6F3",
-            ).grid(row=0, column=2, sticky="e", padx=(0, 8))
+            ).grid(row=0, column=3, sticky="e", padx=(0, 8))
             customtkinter.CTkButton(
                 actions,
                 text="导出日志",
@@ -6150,7 +8471,7 @@ def _show_task_history_detail(app, entry):
                 fg_color="#5A4E3D",
                 hover_color="#6A5B49",
                 text_color="#F8F1E6",
-            ).grid(row=0, column=3, sticky="e", padx=(0, 8))
+            ).grid(row=0, column=4, sticky="e", padx=(0, 8))
 
             customtkinter.CTkButton(
                 actions,
@@ -6162,7 +8483,7 @@ def _show_task_history_detail(app, entry):
                 fg_color="#44566C",
                 hover_color="#51657D",
                 text_color="#EEF5FF",
-            ).grid(row=0, column=4, sticky="e")
+            ).grid(row=0, column=5, sticky="e")
         detail_box = getattr(detail_window, "_fx_detail_box", None)
         detail_window._fx_entry = dict(entry or {})
         if detail_box is not None:
@@ -6246,6 +8567,8 @@ def _queue_set_task_status(app, task, status, detail=""):
     if isinstance(task_result, dict):
         task["task_result"] = dict(task_result)
         detail = task_result.get("detail") or detail
+        task["output_strategy"] = task_result.get("output_strategy", "")
+        task["output_strategy_label"] = task_result.get("output_strategy_label", "")
         task["output_root"] = task_result.get("output_root", "")
         task["outputs"] = list(task_result.get("outputs") or [])
         task["error"] = task_result.get("error", "")
@@ -6982,6 +9305,7 @@ def _run_task_queue_worker(app):
                     app.progress_bar.set(0)
                 except Exception:
                     pass
+                _set_progress_status(app, current_file=task.get("input"), stage="队列任务准备", fraction=0.0)
                 app.run_process(task.get("input"), task.get("task_type"))
                 task_result = _infer_task_result_from_context(
                     app,
@@ -7061,6 +9385,42 @@ def _start_task_queue(app):
     threading.Thread(target=_run_task_queue_worker, args=(app,), daemon=True).start()
 
 
+def _install_progress_status_label(app):
+    if getattr(app, "_fx_progress_status_ready", False):
+        return
+    action_row = None
+    try:
+        for child in app.bottom_bar.winfo_children():
+            if isinstance(child, customtkinter.CTkFrame) and child.winfo_children():
+                action_row = child
+                break
+    except Exception:
+        action_row = None
+    try:
+        app._fx_progress_status_var = tkinter.StringVar(master=app, value=PROGRESS_STATUS_IDLE_TEXT)
+    except Exception:
+        app._fx_progress_status_var = None
+    if action_row is None:
+        _set_progress_status(app)
+        app._fx_progress_status_ready = True
+        return
+    try:
+        label = customtkinter.CTkLabel(
+            action_row,
+            textvariable=app._fx_progress_status_var,
+            text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+            font=customtkinter.CTkFont(family="Microsoft YaHei UI", size=12),
+            anchor="e",
+            justify="right",
+        )
+        label.pack(side="right", fill="x", expand=True, padx=(12, 0))
+        app._fx_progress_status_label = label
+    except Exception as exc:
+        _debug(f"progress_status:label_error:{exc}")
+    _set_progress_status(app)
+    app._fx_progress_status_ready = True
+
+
 def _install_queue_bottom_actions(app):
     _ensure_queue_state(app)
     if getattr(app, "_fx_queue_actions_ready", False):
@@ -7112,6 +9472,65 @@ def _install_queue_bottom_actions(app):
     _refresh_queue_status_summary(app)
 
 
+def _install_output_strategy_controls(app):
+    if getattr(app, "_fx_output_strategy_controls_ready", False):
+        return
+    top_bar = getattr(app, "top_bar", None)
+    if top_bar is None:
+        return
+    try:
+        app.output_strategy_var = tkinter.StringVar(master=app, value=_get_saved_output_strategy())
+        app.output_strategy_hint_var = tkinter.StringVar(master=app, value="")
+    except Exception as exc:
+        _debug(f"output_strategy:vars_error:{exc}")
+        return
+
+    try:
+        controls = customtkinter.CTkFrame(top_bar, fg_color="transparent")
+        controls.grid(row=0, column=2, rowspan=2, sticky="e", padx=(0, 24), pady=(10, 12))
+        controls.grid_columnconfigure(0, weight=0)
+        controls.grid_columnconfigure(1, weight=1)
+        app._fx_output_strategy_controls = controls
+
+        title = customtkinter.CTkLabel(
+            controls,
+            text="输出策略",
+            text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+            font=customtkinter.CTkFont(size=11),
+            anchor="w",
+        )
+        title.grid(row=0, column=0, sticky="w", padx=(0, 10), pady=(0, 4))
+
+        combo = customtkinter.CTkComboBox(
+            controls,
+            values=[OUTPUT_STRATEGY_VALUE_TO_LABEL[key] for key in OUTPUT_STRATEGY_VALUES],
+            variable=app.output_strategy_var,
+            width=260,
+            height=34,
+            command=lambda _value=None, target=app: _refresh_output_strategy_hint(target),
+        )
+        combo.grid(row=0, column=1, sticky="ew", pady=(0, 4))
+        app.output_strategy_combo = combo
+
+        hint = customtkinter.CTkLabel(
+            controls,
+            textvariable=app.output_strategy_hint_var,
+            text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+            font=customtkinter.CTkFont(size=11),
+            justify="left",
+            anchor="w",
+            wraplength=340,
+        )
+        hint.grid(row=1, column=0, columnspan=2, sticky="w")
+        app.output_strategy_hint_label = hint
+    except Exception as exc:
+        _debug(f"output_strategy:controls_error:{exc}")
+        return
+
+    _install_output_strategy_memory(app)
+    app._fx_output_strategy_controls_ready = True
+
+
 def _patch_task_queue_history():
     try:
         original_setup_main_area = FengxiToolboxApp.setup_main_area
@@ -7125,14 +9544,34 @@ def _patch_task_queue_history():
     def patched_setup_main_area(self, *args, **kwargs):
         result = original_setup_main_area(self, *args, **kwargs)
         try:
+            _install_output_strategy_controls(self)
+        except Exception as exc:
+            _debug(f"output_strategy:install_after_main_area_error:{exc}")
+        try:
+            _install_progress_status_label(self)
+        except Exception as exc:
+            _debug(f"progress_status:install_after_main_area_error:{exc}")
+        try:
+            _install_parallel_mode_hint(self)
+        except Exception as exc:
+            _debug(f"parallel_hint:install_after_main_area_error:{exc}")
+        try:
             _install_queue_bottom_actions(self)
         except Exception as exc:
             _debug(f"queue:install_after_main_area_error:{exc}")
+        try:
+            _restore_last_settings_for_task(self, DEFAULT_STARTUP_TAB)
+        except Exception as exc:
+            _debug(f"last_settings:restore_startup_error:{exc}")
         return result
 
     def patched_on_start_click(self):
         if getattr(self, "_fx_start_via_queue", False):
             return original_on_start_click(self)
+        try:
+            _save_current_last_settings(self)
+        except Exception as exc:
+            _debug(f"last_settings:on_start_save_error:{exc}")
         return original_on_start_click(self)
 
     patched_setup_main_area.__fx_queue_history_patch__ = True
@@ -7258,6 +9697,10 @@ def _ensure_lazy_tab_initialized(app, task_name):
     except Exception as exc:
         _debug(f"lazy_tab:layout_refresh_error:{task_name}:{exc}")
     try:
+        _restore_last_settings_for_task(app, task_name)
+    except Exception as exc:
+        _debug(f"last_settings:lazy_restore_error:{task_name}:{exc}")
+    try:
         app.update_idletasks()
     except Exception:
         pass
@@ -7283,6 +9726,10 @@ def _request_fast_close(app):
     if getattr(app, "_fx_fast_close_started", False):
         return
     app._fx_fast_close_started = True
+    try:
+        _save_initialized_last_settings(app)
+    except Exception as exc:
+        _debug(f"fast_close:last_settings_save_error:{exc}")
     try:
         _flush_watermark_text_persistence(app)
     except Exception as exc:
@@ -7373,6 +9820,9 @@ def _patch_startup_performance():
     def patched_show_readme(self):
         return _show_inline_help(self)
 
+    def patched_show_donate_window(self):
+        return _show_inline_donate(self)
+
     def patched_ctk_init(self, *args, **kwargs):
         original_ctk_init(self, *args, **kwargs)
         if _get_internal_attr(self, "_fx_start_hidden", False):
@@ -7427,7 +9877,10 @@ def _patch_startup_performance():
         result = original_switch_tab(self, task_name, btn_obj)
         try:
             _set_help_button_selected(self, False)
+            _set_donate_button_selected(self, False)
             _set_help_action_state(self, False)
+            _refresh_output_strategy_hint(self)
+            _refresh_parallel_mode_hint(self)
             self.update_idletasks()
             _refresh_visible_tab_layout(self, task_name)
             self.update_idletasks()
@@ -7454,11 +9907,13 @@ def _patch_startup_performance():
     patched_switch_tab.__fx_lazy_startup_patch__ = True
     patched_getattr.__fx_lazy_startup_patch__ = True
     patched_show_readme.__fx_inline_help_patch__ = True
+    patched_show_donate_window.__fx_inline_donate_patch__ = True
     customtkinter.CTk.__init__ = patched_ctk_init
     FengxiToolboxApp.setup_main_area = patched_setup_main_area
     FengxiToolboxApp.switch_tab = patched_switch_tab
     FengxiToolboxApp.__getattr__ = patched_getattr
     FengxiToolboxApp.show_readme = patched_show_readme
+    FengxiToolboxApp.show_donate_window = patched_show_donate_window
     _debug("patch_startup_performance:installed")
 
 

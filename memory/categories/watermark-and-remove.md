@@ -71,6 +71,22 @@
   - `run_process()` 内部为绕开运行时固定 `-` 结尾判断而临时关闭旧开关时，会设置 `_fx_wm_filename_rule_loading`，避免该内部切换被误保存成用户偏好。
   - 这次没有改 `create_watermark_packet`、`add_watermark_to_pdf`、`add_watermark_to_word` 等核心水印函数。
 
+## 2026-05-22 批量水印上次设置自动记忆
+- 当前不再提供独立预设中心；批量水印页会自动保存并恢复上次使用的常用参数。
+- 当前记忆范围：
+  - 水印文本
+  - 字体
+  - 页范围
+  - 防重/覆盖模式
+  - 是否允许宋体兜底
+  - 是否删除源文件
+  - 是否先转 PDF
+  - 文件名跳过规则开关、开头/结尾、匹配字符
+  - 字号、透明度、旋转角度
+  - 输出策略
+- 该能力只改加载器层 UI/偏好，不改 `create_watermark_packet`、`add_watermark_to_pdf`、`add_watermark_to_word`。
+- 回归：`last_settings_watermark_save_restore`。
+
 ## 去水印
 - 任务类型：`remove_wm`
 - Word 去水印通过扫描页眉中的艺术字 / 图片水印处理
@@ -107,3 +123,32 @@
 - 这一块是用户明确标记的稳定区
 - 非必要不改水印主体逻辑
 - 如必须修改，优先做加载器层外围补丁、兼容性补丁或测试增强
+
+## 2026-05-22 去水印分级模式
+- `remove_wm` 现在新增三档强度：`保守（推荐）` / `标准` / `激进`，默认是 `保守（推荐）`。
+- 三档只改加载器层识别阈值与 UI/偏好，不改 `fengxi_runtime.bin`，也不触碰批量压缩和添加水印核心逻辑。
+- `标准` 保持上一版去水印阈值口径：普通形状约 `width>=35% page` 或 `height>=20% page`，内联图片约 `45% x 16%`。
+- `保守` 提高普通形状尺寸、居中、旋转和透明度要求，降低误删正常图文风险；但内联大图水印保留可删能力，避免漏掉页眉图片型水印。
+- `激进` 降低阈值并允许超大居中对象进入候选，适合顽固水印，但必须提示用户更可能误删正常元素。
+- 用户选择会保存到本地偏好 `watermark.remove_wm_mode`，下次进入去水印页面自动恢复。
+- 执行链路通过线程本地上下文把当前模式传给 runtime 内部的 Word 去水印调用；PDF roundtrip 也显式传入当前模式。
+- 新增回归：
+  - `remove_wm_mode_memory_save_load`
+  - `remove_wm_mode_memory_trace_save`
+  - `remove_wm_mode_shape_thresholds`
+  - `remove_wm_mode_inline_thresholds`
+- 关键回归仍需覆盖：
+  - `pdf_remove_wm_workflow`
+  - `pdf_remove_wm_single_file_output`
+  - `pdf_remove_wm_single_file_overwrite`
+  - `word_remove_wm_header_inline_image`
+  - `word_remove_wm_preserve_header_assets`
+
+## 2026-05-22 PDF 去水印 Word COM 导出兜底
+- `remove_wm` 的 PDF round-trip 仍保持 `PDF -> DOCX -> remove_watermark_from_word(..., is_pdf_source=True) -> PDF`，但 DOCX 回写 PDF 阶段新增加载层兜底 `_export_word_docx_to_pdf_safely(...)`。
+- 根因：本机 pywin32 `win32com.gen_py` Word 缓存可能损坏，症状是 `CLSIDToClassMap` 缺失；运行时 `convert_doc_to_pdf(...)` 会吞掉细节并返回 `ERROR`，导致 `【处理完成】结果文件夹` 不生成目标 PDF。
+- 修复策略：先保留原 `convert_doc_to_pdf(...)` 尝试；若失败或未落盘，则用动态 Word COM 直接 `ExportAsFixedFormat(..., 17)` 导出 PDF。
+- `_dispatch_com_app_dynamic("Word.Application")` 对 Word 改为 `pythoncom.CoCreateInstance + win32com.client.dynamic.Dispatch` 新实例路径，避免 `DispatchEx` 触发损坏的 `gen_py` 包装缓存。
+- 重要约束：凡是访问 Word 子对象（`Documents`、`Sections`、`Headers`、`InlineShapes` 等）时都要包在 `_DisableWin32ComGenCache()` 内，不只是在创建 Word 实例时包一次。
+- 回归覆盖：`pdf_remove_wm_workflow`、`pdf_remove_wm_single_file_output`、`pdf_remove_wm_single_file_overwrite`、`word_to_pdf`、`word_watermark`、`word_remove_wm`、`word_remove_wm_header_inline_image`、`word_remove_wm_preserve_header_assets`、`word_meta_author`。
+- 边界：本次仍只改 `Fengxi_Toolbox.py` 加载层与 `full_debug_test.py`，未修改 `fengxi_runtime.bin`，未触碰稳定区的批量压缩和添加水印核心逻辑。

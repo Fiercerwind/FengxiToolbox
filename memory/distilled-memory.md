@@ -42,3 +42,28 @@
   关联文件：Fengxi_Toolbox.py, memory/architecture.md, memory\architecture.md, agent.md
 - [watermark] 摘要：稳定区批量水印新增可配置文件名跳过规则
   关联文件：Fengxi_Toolbox.py, memory/categories/watermark-and-remove.md
+
+## 自动蒸馏 2026-05-22 14:45:37
+- 覆盖变更：第 61 到第 90 条
+- 当前覆盖结论：用户已取消独立预设中心方向；最终状态以 `last settings automatic memory` 为准，软件不再显示预设中心入口或窗口。
+- [progress] 摘要：true progress status text
+  关联文件：Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md
+- [release] 摘要：发布基线提升到 4.0.0，并补齐 README、LICENSE、NOTICE 与 GitHub Release 口径；公开仓库隐私清理，并准备为 v4.0.0 Release 补传 Windows 打包资产；公开仓库已清理隐私信息，并为 v4.0.0 Release 补传 Windows 打包资产；全量自检输出与 Release 上传链路稳健化
+  关联文件：VERSION, README.md, README.txt, CHANGELOG.md, LICENSE, NOTICE, Fengxi_Toolbox.py, .github/workflows/publish-release.yml, agent.md, memory.md, memory/architecture.md, memory/categories/repo-sync-release.md, memory/load-order.md, memory/constraints.md, dist_release_ascii/fengxi-toolbox-4.0.0-windows.zip, full_debug_test.py, smoke_test.py, memory/debug-status.md, memory/recent-changes.md
+- [remove_wm] 摘要：remove_wm graded modes
+  关联文件：Fengxi_Toolbox.py, full_debug_test.py, memory/categories/watermark-and-remove.md, memory/architecture.md, memory/debug-status.md
+- [runtime] 摘要：新增任务队列、历史记录与失败重试；统一任务结果模型并接入队列历史；任务历史增加筛选与回放入口；失败重试支持失败项子集回放；任务历史增加详情查看入口；history detail export；history detail log export；history detail open output location；history detail failure grouping and highlighting；history failure classification preview；subwindow app icon and history failure filter；task history report export；remove_wm single-file overwrite output strategy fix；queue history auto pruning；preset center；last settings automatic memory
+  关联文件：Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md, memory/categories/watermark-and-remove.md, memory/categories/pdf-file-meta-zip.md
+- [ui] 摘要：使用教程改为应用内滚动帮助页，侧栏按钮与show_readme统一重定向到内置页面；帮助页期间禁用开始按钮，避免误执行。；侧栏品牌头部将 FX 文本占位替换为风兮图标，直接复用现有 app icon 资源；仅改品牌区 UI。；同步发布目录图标资源：将 dist_release_ascii\\fx_toolbox\\assets 下的 fengxi_app_icon.png/ico 更新为用户新放入的品牌图，避免源码资源与已打包目录不一致。；清理品牌图标四角黑底，改为透明圆角，并同步重生 PNG/ICO；make preset center visible in sidebar
+  关联文件：assets/fengxi_app_icon.png, assets/fengxi_app_icon.ico, dist_release_ascii/fx_toolbox/assets/fengxi_app_icon.png, dist_release_ascii/fx_toolbox/assets/fengxi_app_icon.ico, Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md
+- [watermark] 摘要：批量水印文本框新增本地记忆与自动回填；保存时机覆盖输入防抖、失焦、开始执行前和关闭前，未改加水印业务逻辑。；批量水印文件名跳过规则提示与本地记忆修复
+  关联文件：Fengxi_Toolbox.py, full_debug_test.py, memory/categories/watermark-and-remove.md, memory/debug-status.md, memory/recent-changes.md
+- [zip] 摘要：更新批量压缩页智能混合模式说明文案，仅改加载器/UI补丁层，不动ZIP业务逻辑；说明与当前smart_recursive实际行为对齐。
+  关联文件：-
+
+## 自动蒸馏 2026-05-22 19:55:35
+- 覆盖变更：第 91 到第 94 条
+- [runtime] 摘要：truthful batch parallel mode UI；enable parallel processing for safe custom workflows；audio parallel and remove_wm COM export fallback
+  关联文件：Fengxi_Toolbox.py, full_debug_test.py, memory\architecture.md, memory\debug-status.md, memory/architecture.md, memory/categories/watermark-and-remove.md, memory/categories/convert-audio-image.md, memory/debug-status.md
+- [ui] 摘要：inline donate page
+  关联文件：Fengxi_Toolbox.py, full_debug_test.py, memory\architecture.md, memory\debug-status.md

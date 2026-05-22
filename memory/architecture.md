@@ -1,5 +1,43 @@
 # 项目架构
 
+## 2026-05-22 赞助作者内联页
+- `赞助作者` 不再走弹窗/独立窗口，侧栏按钮和旧的 `show_donate_window` 统一重定向到右侧内容页 `赞助作者`。
+- 赞助页复用主内容区的内联页面模式，和“使用教程”保持同一种右侧信息页表达，不打断当前工作流。
+- 页面内容直接内嵌一条赞助文案和 `assets/donate_qr.png` 二维码图片，二维码缺失时会显示可读替代文本。
+- 进入赞助页时会把开始按钮切为“查看赞助作者中”，并把 `current_task` 置为 `donate`，避免误触发任务执行。
+- 本次只改 `Fengxi_Toolbox.py` 加载器/UI 入口层和回归测试，不改 `fengxi_runtime.bin`，也不影响 `批量压缩` / `添加水印` 的稳定业务逻辑。
+- 验证：`python -m py_compile Fengxi_Toolbox.py full_debug_test.py`、`python smoke_test.py`、`python full_debug_test.py` 通过，完整自检 `108/108`。
+
+## 2026-05-22 批量并行提速口径
+- 不删除原有 `enable_multithread` / 运行时 `ThreadPoolExecutor` 能力，因为嵌入式运行时仍会在部分多文件工作流中使用它。
+- UI 文案不再称为“极速模式（多线程）”，统一改为 `批量并行（部分生效）`，避免用户误以为所有功能都会提速。
+- 底部会按当前功能显示并行状态提示：
+  - 可提速：批量水印、多文件 PDF 拆分/加密、PDF 压缩、图片格式转换/压缩、图片逐张转 PDF、音视频逐文件转换、文件重命名、普通文件时间修改。
+  - 稳定单线程：去水印、Office/PDF 转换、批量压缩、PDF 合并、PDF OCR、多图合并 PDF、文件去重。
+  - 单文件输入会临时关闭并行，避免 UI 日志线程冲突。
+- 这层只调整加载器 UI/提示与回归测试，不改 `fengxi_runtime.bin`，也不改变 `批量压缩`、`添加水印` 的核心业务逻辑。
+- 后续如继续做性能优化，优先做任务级调度/分阶段并行，而不是把所有功能强行塞进多线程；Office COM、OCR、PDF 重构、文件覆盖类任务需要继续保守。
+- 2026-05-22 后续增强：加载器层自定义工作流已给 `PDF 压缩` 和 `图片转 PDF（逐张生成）` 接入真正的 `ThreadPoolExecutor` 并行处理；仅在 `enable_multithread` 开启且文件数大于 1 时启用，线程数上限为 `PARALLEL_MAX_WORKERS = 4`。工作线程只做文件处理，日志、进度、任务结果仍在主流程汇总，避免 Tk UI 跨线程写入风险。
+
+## 2026-05-22 上次设置自动记忆
+- 用户明确不要独立 `预设中心`，当前改为“各功能自动记住上次设置”，不再提供单独的预设管理窗口或入口。
+- 保存与恢复发生在页面初始化、开始执行前和关闭前，用户不需要额外点击保存。
+- 实现仍限定在 `Fengxi_Toolbox.py` 加载器/UI/偏好层，不修改 `fengxi_runtime.bin`。
+- 上次设置存储在用户本地偏好 JSON 的 `last_settings` / `last_settings_active` 字段中，不写入项目源码目录。
+- 当前支持四类上次设置：
+  - `watermark`：批量水印文本、字体、页范围、防重/覆盖、跳过规则、字号、透明度、角度、输出策略。
+  - `ocr`：PDF OCR 模式、后端、识别配置、提取模式、模型目录、方向纠正、对比报告、密码/删除源文件兼容项。
+  - `pdf_compress`：PDF 压缩程度、图片压缩程度、密码/删除源文件兼容项。
+  - `rename`：文件重命名模式、前缀、后缀、查找、替换、裁剪头尾字符数。
+- 应用 OCR 或 PDF 压缩上次设置时，会通过 `app._fx_select_pdf_mode` 切换 PDF 右侧详情面板，避免只改变量但 UI 面板不同步。
+- 水印上次设置只保存/恢复 UI 和偏好层参数，不改 `create_watermark_packet`、`add_watermark_to_pdf`、`add_watermark_to_word` 等核心加水印逻辑。
+- 回归覆盖：
+  - `last_settings_no_dedicated_preset_center`
+  - `last_settings_watermark_save_restore`
+  - `last_settings_ocr_save_restore`
+  - `last_settings_pdf_compress_save_restore`
+  - `last_settings_rename_save_restore`
+
 ## 2026-05-21 统一任务结果模型
 - 本轮开始收口任务执行的统一结果语义，目标是为后续的真进度条、历史记录、失败重试、结果导出提供稳定基础。
 - 实现仍限定在 `Fengxi_Toolbox.py` 加载器层，不修改 `fengxi_runtime.bin`。
@@ -45,6 +83,8 @@
 
 ## 2026-05-21 任务历史筛选与回放
 - 在统一任务结果模型之上，任务历史窗口进一步收口为“可检索 + 可回放”的单一入口。
+- 2026-05-22 起，任务历史增加自动过期清理：加载、追加、保存历史时都会统一清理超出 `QUEUE_HISTORY_RETENTION_DAYS = 90` 天的记录，并继续保留 `QUEUE_HISTORY_LIMIT = 80` 的数量上限。
+- 过期判断优先使用历史条目的 `finished_at`，其次 `created_at` / `started_at`，再尝试结构化 `task_result` 时间；缺少时间戳的旧记录暂时保留，避免误删用户仍可能需要的历史。
 - 当前历史层新增三类筛选条件：
   - 状态筛选：全部状态、仅完成、仅失败、仅跳过、仅停止。
   - 功能筛选：按 `QUEUE_TASK_LABELS` 对应的功能类型过滤。
@@ -52,8 +92,13 @@
 - 当前历史条目展示更偏结构化结果：
   - 会显示功能名称、输入路径、完成时间、耗时、输出位置、错误原因。
   - 成功历史也支持“回放”重新加入队列，失败历史保留“重试”语义。
+- 当前详情层已形成三种导出能力：
+  - `导出结果`：导出结构化 `task_result` JSON。
+  - `导出日志`：导出任务日志文本快照。
+  - `导出报告`：导出 Markdown 任务报告，统一汇总基本信息、结果统计、输出位置、失败分类、失败项、关键日志与结构化结果摘要。
+- `导出报告` 复用统一结果模型与 `_classify_failure_reason(...)`，避免历史详情、筛选、导出三套口径分裂。
 - 这层实现仍限定在 `Fengxi_Toolbox.py` 加载器层，历史过滤态通过实例变量保存，不侵入 `fengxi_runtime.bin`。
-- 回归已经补到 `full_debug_test.py`，覆盖筛选、重置、回放和失败重试。
+- 回归已经补到 `full_debug_test.py`，覆盖筛选、重置、回放、失败重试，以及结果/日志/报告导出链路。
 
 ## 2026-05-20 任务队列 / 历史记录 / 失败重试
 - 本轮新增“任务队列 + 历史记录 + 失败重试”，实现仍限定在 `Fengxi_Toolbox.py` 加载器层，不修改 `fengxi_runtime.bin`。
@@ -197,6 +242,11 @@
 
 ## 2026-04-25 统一进度条修复架构
 - 进度条修复继续坚持“优先改加载器层，不改 `fengxi_runtime.bin`”。
+- 2026-05-22 起，进度条升级为“进度条 + 状态文本”的真进度显示：
+  - 底部操作区新增进度状态文本，显示当前文件、当前阶段、已完成文件数/总数、总进度百分比、预计剩余时间。
+  - `_FxRunProgressTracker` 统一维护 `started_at`、`current_file`、`current_stage`、`completed_units` 与 ETA 估算。
+  - 运行时 `process_single_file()` 包装会自动识别当前文件名；自定义工作流会主动上报阶段，例如 OCR 页进度、PDF 压缩、图片转 PDF、多图合并 PDF、PDF 去水印 round-trip。
+  - 仍不修改 `fengxi_runtime.bin`，也不改批量压缩/添加水印核心业务逻辑。
 - `Fengxi_Toolbox.py` 新增 `_patch_runtime_progress_reporting()`：
   - 先沿补丁链剥离出嵌入式原始 `run_process()`
   - 再用 `_build_runtime_progress_site_map(...)` 分析字节码中的进度调用点，区分三类：
@@ -573,3 +623,45 @@
 - summary: history detail open output location
 - files: Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
 - note: added an 打开位置 action to the task history detail dialog. It resolves the best available target in order: output_root, first output file parent, then input parent, and opens it with os.startfile on Windows. Added regression checks for opening output_root, falling back from an output file to its parent directory, and rejecting empty targets. Validation: py_compile passed, smoke_test 14/14, full_debug_test 77/77.
+## 2026-05-22 remove_wm 单文件输出策略补尾
+- 单文件 `remove_wm` 的真实语义继续保持三档：
+  - 文件夹输入：输出到 `【处理完成】结果文件夹`
+  - 单文件输入默认：同目录生成新文件
+  - 单文件输入且勾选覆盖：仅在成功时安全替换原文件
+- 关键实现边界：
+  - 即使是“覆盖原文件”模式，也必须先把去水印结果写入临时 `RESULT_FOLDER_NAME` 目录中的 staged 文件。
+  - 最终落地必须通过 `_finalize_single_remove_wm_output(...)` 完成，不能把原文件路径本身当成 staged 结果。
+- 这样做的原因：
+  - 否则会出现“流程看起来成功、日志也完成，但原文件其实没被真正替换”的假成功。
+- 结构化结果模型也已在该链路补齐：
+  - 单文件 `same_dir` / `overwrite` 都会明确回写 `output_strategy`
+  - 成功/失败都会写回 `outputs`、`output_root`、`processed_count`、`success_count`、`failed_count`
+  - 这样任务历史、任务报告、失败重试和后续真进度展示都能吃同一套口径
+
+## 2026-05-22 remove_wm 分级模式架构
+- `Fengxi_Toolbox.py` 新增 `REMOVE_WM_MODE_*` 常量和 profile 表，集中描述去水印三档阈值。
+- `_shape_looks_like_watermark(...)` 与 `_inline_shape_looks_like_watermark(...)` 增加 `mode` 参数，但保持默认兼容。
+- `_remove_watermark_from_word_safely(...)`、patched `remove_watermark_from_word(...)` 和 PDF roundtrip 都支持传入模式。
+- 因 runtime 内部 Word 去水印调用无法直接拿到 UI app，加载器层新增线程本地 `_REMOVE_WM_MODE_CONTEXT`，在 `remove_wm` 任务运行期间临时注入当前模式。
+- UI 层在 `init_remove_wm_ui` patch 内增加 `rm_wm_mode_var` 和 `rm_wm_mode_hint_var`，偏好持久化复用 `user_prefs.json` 的 `watermark.remove_wm_mode`。
+- 回归测试通过假 shape/inline shape 验证：保守会拒绝“标准阈值才命中”的候选，标准保持旧行为，激进也会命中。
+
+## 2026-05-22 Word COM 动态实例与 PDF 去水印导出兜底
+- 本机可能出现 pywin32 `win32com.gen_py` Word 缓存损坏，典型错误为 `module ... has no attribute 'CLSIDToClassMap'`。
+- 加载器层新增/强化 `_dispatch_com_app_dynamic("Word.Application")`：Word 走 `pythoncom.CoCreateInstance + win32com.client.dynamic.Dispatch`，避免 `DispatchEx` 直接触发损坏缓存。
+- `_DisableWin32ComGenCache()` 不能只包 Word 创建；访问 Word 子对象（`Documents`、`Sections`、`Headers`、`InlineShapes` 等）期间也必须保持启用，否则 pywin32 仍会尝试包装子对象并触发 `gen_py`。
+- PDF 去水印 round-trip 在 `convert_doc_to_pdf(...)` 返回 `ERROR` 或目标 PDF 未落盘时，会改走 `_export_word_docx_to_pdf_safely(...)`，直接调用 Word `ExportAsFixedFormat(..., 17)` 导出。
+- `full_debug_test.py` 的 Word COM 探针也改用项目动态 COM helper 与完整 `gencache` 禁用范围，避免测试被环境缓存噪音误判。
+- 验证：`python -m py_compile Fengxi_Toolbox.py full_debug_test.py smoke_test.py`、`python smoke_test.py` 14/14、`python full_debug_test.py` 109/109。
+
+## 2026-05-22 并行提示移除与队列入口恢复
+- 用户反馈“并行状态”提示把之前的任务队列和历史功能挤没了。
+- 根因在底部操作行 UI 占位：`_install_parallel_mode_hint()` 把一条长文本标签 pack 到 `chk_multithread` 所在操作行，和 `加入队列` / `队列历史` 按钮抢横向空间。
+- 当前修复只在 `Fengxi_Toolbox.py` 加载器 UI 层处理：
+  - 保留 `批量并行（部分生效）` 开关文案和底层多线程能力。
+  - `_install_parallel_mode_hint()` 不再创建底部并行状态标签。
+  - `_refresh_parallel_mode_hint()` 会清空 `_fx_parallel_hint_var`，并销毁历史残留的 `_fx_parallel_hint_label`。
+  - `_get_parallel_mode_message(...)` 仍保留给测试、诊断或未来非底部展示使用。
+- 回归测试新增 `parallel_hint_removed_queue_actions_kept`，要求并行提示标签不存在、提示变量为空、`btn_queue_add` 与 `btn_queue_panel` 均存在。
+- 验证：`python -m py_compile Fengxi_Toolbox.py full_debug_test.py smoke_test.py`、`python smoke_test.py` 14/14、`python full_debug_test.py` 110/110。
+- 边界：未修改 `fengxi_runtime.bin`，未修改稳定区 `批量压缩` / `添加水印` 核心业务逻辑，也未删除任何项目外文件。
