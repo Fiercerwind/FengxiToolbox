@@ -49,4 +49,10 @@
   - 两个新模式由 `Fengxi_Toolbox.py` 加载器层接管 `image` 任务，不修改 `fengxi_runtime.bin`
   - `merge_pdf` 复用现有 `merge_images_to_pdf()` 底座
   - 输出目录继续复用 `RESULT_FOLDER_NAME`
-  - 如果勾选图片页“处理后删除源文件”，新 PDF 模式成功后也会删除已处理源图
+- 如果勾选图片页“处理后删除源文件”，新 PDF 模式成功后也会删除已处理源图
+
+## 2026-05-23 图片转 PDF 任务核心拆分
+- `tools/fx_image_pdf_task.py` 作为图片 PDF 任务核心模块，承担文件收集、输出命名、并行执行和统一任务结果回写。
+- `to_pdf` 继续保持“每张图片生成一份 PDF”的语义；`merge_pdf` 继续保持“按文件名顺序合并成一份 PDF”的语义。
+- 输出命名会在同名冲突时自动递增后缀，测试已专门覆盖这一点，避免误把唯一命名当成回归。
+- `Fengxi_Toolbox.py` 只作为适配层，不改变图片 PDF 的可见行为。

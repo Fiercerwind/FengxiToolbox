@@ -35,6 +35,7 @@
     - OCR 后端
     - OCR 识别配置
     - 提取模式：`mixed` / `fullPage` / `imageOnly`
+    - 图像增强：`auto` / `off` / `light` / `scan`
     - 方向纠正
     - PDF 密码输入框兼容 OCR 解密文档
   - `ocr` UI 当前会显示后端状态面板，并支持手动刷新当前环境探测结果。
@@ -50,12 +51,36 @@
     - 密码输入和删除源文件作为 PDF 页共享控件继续保留
     - 这样避免 OCR 与压缩等参数同时堆在一个页面导致看不全
   - 2026-05-22 起，PDF 页会自动保存并恢复上次使用的两类常用参数，不再提供独立预设中心入口：
-    - `ocr`：OCR 后端、识别配置、提取模式、模型目录、方向纠正、对比报告、密码/删除源文件兼容项。
+    - `ocr`：OCR 后端、识别配置、提取模式、图像增强、模型目录、方向纠正、对比报告、密码/删除源文件兼容项。
     - `pdf_compress`：PDF 压缩程度、图片压缩程度、密码/删除源文件兼容项。
   - 恢复 OCR/PDF 压缩上次设置时会同步切换 PDF 右侧详情面板，避免只恢复变量但页面仍停在其他功能。
+  - 2026-05-23 起，PDF 压缩核心实现已拆入 `tools/fx_pdf_compress_core.py`；主加载器只保留 UI、并行调度、进度、输出策略、失败报告和结构化结果收口。
+  - 2026-05-23 起，PDF OCR 任务编排已拆入 `tools/fx_pdf_ocr_task.py`；主加载器只保留 UI 参数读取、输出策略、进度 adapter、失败报告和结构化结果收口。
+
+## PDF 压缩实现说明
+- PDF 压缩核心模块：`tools/fx_pdf_compress_core.py`
+- 模块接口：
+  - `PDF_COMPRESS_LEVELS`：`轻度` / `标准` / `强力` 的 PyMuPDF 保存参数。
+  - `PDF_IMAGE_COMPRESS_LEVELS`：`保留原图` / `轻度` / `标准` / `强力` 的图片质量和最长边策略。
+  - `build_pdf_compress_output_path(src, output_folder)`：生成 `原文件名_压缩.pdf`，同名时追加序号。
+  - `compress_pdf_file(src, dst, compress_level="标准", image_level="标准", password="")`：执行单文件压缩，返回 `SUCCESS:<图片处理数>` 或 `ERROR:<原因>`。
+- `Fengxi_Toolbox.py` 中保留同名 `compress_pdf_file(...)` 薄包装，旧测试和外部调用继续可用。
+- 任务级 `_run_pdf_compress_task(...)` 仍在加载器层，因为它依赖 app UI、输出策略、并行开关、进度 tracker、删除源文件和 task_result。
+- 回归覆盖：
+  - `pdf_compress_core_module_exports`
+  - `pdf_compress_core_helper`
+  - `pdf_compress_helper`
+  - `single_file_input_pdf_compress`
+  - `single_file_input_pdf_compress_result_model`
+  - `pdf_compress_parallel_executor`
+- 维护注意：
+  - 如果只调整压缩质量、图片降采样阈值或保存参数，优先修改 `tools/fx_pdf_compress_core.py`。
+  - 如果调整输出策略、并行、进度、删除源文件或历史记录，仍修改 `Fengxi_Toolbox.py` 的任务编排层。
+  - 不要把 OCR 逻辑塞进 PDF 压缩 core；OCR 继续归 `tools/fx_pdf_ocr.py`。
 
 ## OCR 实现说明
 - OCR 引擎模块：`tools/fx_pdf_ocr.py`
+- OCR 任务编排模块：`tools/fx_pdf_ocr_task.py`
 - 实现策略：
   - 不侵入 `fengxi_runtime.bin`
   - 在 `Fengxi_Toolbox.py` 加载器层补丁 UI 和任务调度
@@ -68,6 +93,13 @@
   - PDF 层处理统一使用 `PyMuPDF`
   - UI、日志、环境变量与模块命名统一使用风兮自有表述，避免产品层面依赖第三方品牌
   - 当前默认推荐后端仍为 `RapidOCR`，但不是唯一实现路径
+  - 2026-05-22 起，OCR 引擎新增风兮图像增强策略：
+    - `off`：只用原图。
+    - `light`：原图 + 轻度灰度增强。
+    - `auto`：原图优先，识别质量偏弱时尝试增强候选。
+    - `scan`：原图 + 增强 + 黑白化候选，适合灰底、噪点、低对比扫描件。
+  - OCR `auto` 后端不再只按“能导入”决定；处理时会按识别质量评分选择结果，低质量时继续尝试备用后端。
+  - 对比报告会记录本次图像增强模式、每个后端的质量评分和实际采用的增强候选。
 
 ## 维护注意
 - OCR 模式下默认单线程，避免多文档同时拉起 OCR 子进程导致资源争用。
@@ -79,9 +111,24 @@
   - `imageOnly | ...`
 - OCR 后端切换优先修改 `tools/fx_pdf_ocr.py` 的后端注册与适配层，不要复制整套 PDF 叠字逻辑。
 - 可选后端未必默认安装；如果用户指定某后端不可用，应优雅报错或退回 `auto`。
+- OCR 对比报告是辅助诊断能力，生成失败时不应阻断主 OCR PDF 产出；主 OCR 识别/写 PDF 失败才应把任务标为失败。
+- 回归测试里不要让 OCR 工作流继承前置“上次设置记忆”用例的 `pdf_ocr_cls=True`，否则 RapidOCR 可能触发方向分类模型在线下载，造成与业务无关的红灯。
 - 后端状态展示基于 `discover_backend_status()` 与 `build_backend_status_text()`，后续如果新增后端，要同步更新状态汇总逻辑。
 - 对比报告当前基于首页整页渲染采样，目标是让不同后端在同一输入条件下可比较。
 - 对比报告逻辑集中在 `compare_pdf_ocr_backends()` 与 `write_pdf_ocr_comparison_report()`。
+- OCR 图像增强与质量回退逻辑集中在 `tools/fx_pdf_ocr.py`：
+  - `build_ocr_preprocess_candidates()`
+  - `score_ocr_rows()`
+  - `_ocr_backend_image_with_preprocess()`
+  - `FengxiPdfOcrEngine._ocr_one_image()`
+  - OCR 图像增强 UI 与上次设置记忆在 `Fengxi_Toolbox.py` 的 `_patch_pdf_ocr_mode()` 和 last settings 捕获/恢复链路中维护。
+  - OCR 任务循环、输出路径、对比报告触发、逐页进度回调、单文件/文件夹相对路径计算和失败项归集集中在 `tools/fx_pdf_ocr_task.py`：
+    - `PdfOcrTaskOptions`
+    - `PdfOcrTaskCallbacks`
+    - `build_pdf_ocr_output_path(...)`
+    - `build_pdf_ocr_compare_report_path(...)`
+    - `run_pdf_ocr_task_core(...)`
+  - `Fengxi_Toolbox.py` 的 `_run_pdf_ocr_task(...)` 现在是 adapter：读取 UI 变量、解析输出策略、连接 `_FxRunProgressTracker`、写失败报告和结构化 task_result；不要把 OCR 后端逻辑重新塞回主文件。
 - 如果未来要支持“图片 OCR 转 PDF”，优先复用 `tools/fx_pdf_ocr.py`，不要重复造 OCR 调度逻辑。
 
 ## 文件管家
@@ -102,6 +149,14 @@
   - 裁剪头尾字符数
 - `dedup` 依赖全目录 MD5 去重逻辑，必须走 `run_process()` 的专用单线程分支。
 - 已在加载器层补丁中强制 `dedup` 进入单线程。
+- 2026-05-23 起，`rename` 的核心规则已拆入 `tools/fx_file_manager_core.py`：
+  - `normalize_file_rename_spec(...)` 负责把运行时参数转为 `FileRenameSpec`。
+  - `rename_file_name(...)` 负责 `add` / `replace` / `cut` 三种文件名变化。
+  - `plan_renamed_output_path(...)` 负责输出路径规划。
+  - `apply_rename_to_file(...)` 负责单文件复制到新名称，并复用加载器注入的 `copy_file_safe(...)`。
+- `Fengxi_Toolbox.py` 通过 `_patch_file_manager_core()` 只接管 `file + rename` 的 `process_single_file(...)`；`dedup` 不在本轮接管，继续走原运行时单线程专用路径。
+- 回归覆盖：`file_rename_add`、`file_rename_replace`、`file_rename_cut`、`file_manager_core_module_exports`、`file_dedup`。
+- 维护注意：如果只改重命名命名规则，优先改 `tools/fx_file_manager_core.py`；如果改去重删除策略、失败报告或全目录扫描，仍需先研究 `run_process()` 原分支。
 
 ## 属性隐私
 - 任务类型：`meta`
@@ -119,6 +174,20 @@
   - `recursive`
   - `smart_recursive`
 - 这块被用户标记为稳定区，默认不动业务代码。
+- 2026-05-23：
+  - 本轮用户明确授权为了架构拆分触碰稳定区，因此新增 `tools/fx_zip_core.py`，把 ZIP 计划、进度单位估算和实际压缩执行从主加载器抽出。
+  - 核心接口：
+    - `plan_zip_archives(input_path, mode)`：只生成压缩计划，不写文件。
+    - `estimate_zip_progress_units(input_path, mode)`：给真进度条估算任务单位。
+    - `run_zip_task(input_path, mode, progress=..., stop_requested=..., log=..., overwrite=True)`：执行压缩并返回结构化结果字典。
+  - `Fengxi_Toolbox.py` 通过 `_patch_zip_core_task()` 接管 `task_type == "zip"`，继续复用现有进度追踪、日志和任务结果模型。
+  - 行为保持原语义：
+    - `total`：输出 `<folder>\<folder>_Backup.zip`。
+    - `recursive`：输出根目录 zip 和各级子目录 zip。
+    - `smart_recursive`：目录内有文件就打包该目录并停止向下；只有子目录无文件才继续递归。
+    - 单文件输入：输出 `<file>.ext_Backup.zip` 到同目录。
+  - 回归覆盖：`zip_core_module_semantics`、`zip_total`、`zip_recursive`、`zip_smart_recursive`、`single_file_input_zip_total`，并随全量 `full_debug_test.py` 131/131 通过。
+  - 后续仍不要随意改压缩命名和 `smart_recursive` 语义；如需改，先同步说明文案和回归。
 - 2026-05-09：
   - `smart_recursive` 当前真实语义已核对，说明文案必须与运行时保持一致。
   - 当某一层目录同时包含文件和子文件夹时，会直接将该层整体打包为一个 zip，并停止继续为其内部子文件夹单独生成压缩包。

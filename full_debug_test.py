@@ -4,11 +4,69 @@ import shutil
 import subprocess
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 
 from PIL import Image
 from pypdf import PdfReader
 from reportlab.pdfgen import canvas
+from tools.fx_task_history_exports import (
+    TaskHistoryExportContext,
+    build_task_history_export_filename,
+    build_task_history_report_text,
+)
+from tools.fx_queue_history import (
+    QueueHistoryContext,
+    build_queue_history_search_blob,
+    filter_queue_history_entries,
+    load_queue_history as load_queue_history_module,
+    normalize_queue_history_entry as normalize_queue_history_entry_module,
+    prune_queue_history_entries as prune_queue_history_entries_module,
+    queue_history_entry_timestamp as queue_history_entry_timestamp_module,
+    queue_status_text as queue_status_text_module,
+    save_queue_history as save_queue_history_module,
+)
+from tools.fx_watermark_core import (
+    add_watermark_to_pdf as add_watermark_to_pdf_module,
+    add_watermark_to_word as add_watermark_to_word_module,
+    create_watermark_packet as create_watermark_packet_module,
+)
+from tools.fx_zip_core import (
+    estimate_zip_progress_units as estimate_zip_progress_units_module,
+    normalize_zip_mode as normalize_zip_mode_module,
+    plan_zip_archives as plan_zip_archives_module,
+    run_zip_task as run_zip_task_module,
+)
+from tools.fx_pdf_compress_core import (
+    PDF_COMPRESS_LEVELS as PDF_COMPRESS_LEVELS_MODULE,
+    PDF_IMAGE_COMPRESS_LEVELS as PDF_IMAGE_COMPRESS_LEVELS_MODULE,
+    build_pdf_compress_output_path as build_pdf_compress_output_path_module,
+    compress_pdf_file as compress_pdf_file_module,
+)
+from tools.fx_file_manager_core import (
+    apply_rename_to_file as apply_rename_to_file_module,
+    deduplicate_files as deduplicate_files_module,
+    normalize_file_rename_spec as normalize_file_rename_spec_module,
+    plan_renamed_output_path as plan_renamed_output_path_module,
+    rename_file_name as rename_file_name_module,
+    run_file_dedup_task as run_file_dedup_task_module,
+)
+from tools.fx_pdf_ocr_task import (
+    PdfOcrTaskCallbacks,
+    PdfOcrTaskOptions,
+    build_pdf_ocr_compare_report_path,
+    build_pdf_ocr_output_path,
+    run_pdf_ocr_task_core,
+)
+from tools.fx_image_pdf_task import (
+    ImagePdfTaskCallbacks,
+    ImagePdfTaskOptions,
+    build_image_merge_pdf_output_path,
+    build_image_pdf_output_path,
+    collect_image_to_pdf_files,
+    image_file_to_pdf,
+    run_image_pdf_task_core,
+)
 
 
 def load_module():
@@ -18,6 +76,7 @@ def load_module():
     module.messagebox.showinfo = lambda *args, **kwargs: None
     module.messagebox.showwarning = lambda *args, **kwargs: None
     module.messagebox.showerror = lambda *args, **kwargs: None
+    module.messagebox.askokcancel = lambda *args, **kwargs: True
     return module
 
 
@@ -201,12 +260,311 @@ def main():
         and [item.get("id") for item in persisted_history] == ["recent_history", "undated_history"],
         persisted_history,
     )
+    module_history_path = root / "queue_history_module.json"
+    module_context = QueueHistoryContext(
+        history_file=lambda: module_history_path,
+        retention_days=mod.QUEUE_HISTORY_RETENTION_DAYS,
+        history_limit=2,
+        status_labels=mod.QUEUE_STATUS_LABELS,
+        status_label_to_value=mod.QUEUE_HISTORY_STATUS_LABEL_TO_VALUE,
+        task_label_to_value=mod.QUEUE_HISTORY_TASK_LABEL_TO_VALUE,
+        failure_label_to_value=mod.QUEUE_HISTORY_FAILURE_LABEL_TO_VALUE,
+        classify_failure_reason=mod._classify_failure_reason,
+        task_result_snapshot=mod._task_result_snapshot,
+        debug=lambda message: None,
+    )
+    noisy_task = {
+        "id": "queued",
+        "status": "queued",
+        "status_var": object(),
+        "row": object(),
+        "retry_mode": "failed_subset",
+        "task_result": {
+            "task_type": "pdf",
+            "status": "failed",
+            "outputs": [str(root / "out.pdf")],
+            "finished_at": now,
+        },
+    }
+    normalized_module_entry = normalize_queue_history_entry_module(noisy_task, module_context)
+    module_history_entries = [
+        old_entry,
+        {"id": "middle", "status": "success", "task_type": "pdf", "finished_at": now - 10},
+        recent_entry,
+        undated_entry,
+    ]
+    save_queue_history_module(module_history_entries, module_context)
+    loaded_module_history = load_queue_history_module(module_context)
+    module_blob = build_queue_history_search_blob(
+        {
+            "title": "PDF 工具 · 失败样本",
+            "status": "failed",
+            "task_type": "pdf",
+            "error": "路径不存在: probe.pdf",
+            "task_result": {"error": "路径不存在: probe.pdf", "failed_items": ["probe.pdf"]},
+        },
+        module_context,
+    )
+    module_filtered = filter_queue_history_entries(
+        [
+            {"title": "ok", "status": "success", "task_type": "pdf"},
+            {
+                "title": "missing",
+                "status": "failed",
+                "task_type": "pdf",
+                "error": "路径不存在: probe.pdf",
+                "task_result": {"error": "路径不存在: probe.pdf"},
+            },
+        ],
+        module_context,
+        status_filter="仅失败",
+        task_filter="PDF 工具",
+        failure_filter="路径缺失",
+        keyword="路径不存在",
+    )
+    record(
+        "queue_history_module_context",
+        normalized_module_entry.get("status_var") is None
+        and normalized_module_entry.get("retry_mode") is None
+        and isinstance(normalized_module_entry.get("task_result"), dict)
+        and [item.get("id") for item in loaded_module_history] == ["recent_history", "undated_history"]
+        and queue_status_text_module("failed", module_context) == "失败"
+        and queue_history_entry_timestamp_module({"task_result": {"finished_at": now}}) == now
+        and "path_missing" in module_blob
+        and len(module_filtered) == 1
+        and module_filtered[0].get("title") == "missing",
+        {
+            "normalized_keys": sorted(normalized_module_entry.keys()),
+            "loaded": loaded_module_history,
+            "blob": module_blob,
+            "filtered": module_filtered,
+            "pruned": prune_queue_history_entries_module(module_history_entries, module_context, now=now),
+        },
+    )
     mod._save_queue_history([])
+
+    perf_path = mod._get_performance_log_file()
+    record(
+        "performance_log_path_under_user_prefs",
+        perf_path == root / "user_prefs" / "performance.jsonl",
+        perf_path,
+    )
+    mod._FX_PERFORMANCE_RECORDER = None
+    performance_entry = mod._record_performance(
+        "debug_probe",
+        started_at=mod.FxPerformanceRecorder.now() - 0.01,
+        task_name="pdf",
+        details={"status": "success"},
+    )
+    recent_performance_entries = mod._load_recent_performance_entries(limit=5)
+    record(
+        "performance_record_helper_jsonl",
+        perf_path.exists()
+        and performance_entry.get("event") == "debug_probe"
+        and performance_entry.get("task_name") == "pdf"
+        and isinstance(performance_entry.get("elapsed_ms"), float)
+        and recent_performance_entries[-1].get("event") == "debug_probe",
+        {
+            "entry": performance_entry,
+            "recent": recent_performance_entries[-2:],
+        },
+    )
+
+    prune_path = root / "perf_prune.jsonl"
+    recorder = mod.FxPerformanceRecorder(prune_path, app_version="test", max_entries=25)
+    for index in range(35):
+        recorder.record("probe", details={"index": index})
+    pruned_entries = mod.load_performance_entries(prune_path)
+    record(
+        "performance_recorder_prune",
+        len(pruned_entries) == 25
+        and pruned_entries[0].get("details", {}).get("index") == 10
+        and pruned_entries[-1].get("details", {}).get("index") == 34,
+        [item.get("details", {}).get("index") for item in pruned_entries[:3] + pruned_entries[-3:]],
+    )
+
+    class WrapProbe:
+        def ping(self, value):
+            return value + 1
+
+    wrap_logs = []
+    wrap_ok = mod.wrap_callable(WrapProbe, "ping", label="wrap_probe", debug=wrap_logs.append)
+    wrap_result = WrapProbe().ping(4)
+    record(
+        "runtime_patch_wrap_callable_module",
+        wrap_ok
+        and wrap_result == 5
+        and wrap_logs == ["wrap_probe:start", "wrap_probe:done"],
+        {"ok": wrap_ok, "result": wrap_result, "logs": wrap_logs},
+    )
+
+    class FakeCtk:
+        def __init__(self):
+            self.ctk_ready = True
+
+        def withdraw(self):
+            self.withdrawn = True
+
+    class FakeStartupApp:
+        def __init__(self):
+            self.events = []
+            self.pdf_init_count = 0
+
+        def init_watermark_ui(self):
+            self.events.append("init_watermark")
+
+        def init_pdf_ui(self):
+            self.pdf_init_count += 1
+            self.events.append("init_pdf")
+
+        def setup_main_area(self):
+            self.init_pdf_ui()
+            return "main_ready"
+
+        def switch_tab(self, task_name, btn_obj):
+            self.events.append(f"switch:{task_name}")
+            return "switched"
+
+        def update_idletasks(self):
+            self.events.append("idle")
+
+    startup_patch_logs = []
+    startup_patch_perf = []
+    startup_patch_lazy = []
+    startup_patch_refresh = []
+    startup_context = mod.StartupPatchContext(
+        app_class=FakeStartupApp,
+        ctk_class=FakeCtk,
+        lazy_tab_specs={"watermark": {"init": "init_watermark_ui"}, "pdf": {"init": "init_pdf_ui"}},
+        default_startup_tab="watermark",
+        debug=startup_patch_logs.append,
+        get_internal_attr=lambda obj, name, default=None: getattr(obj, name, default),
+        ensure_lazy_tab_initialized=lambda app_obj, task_name: startup_patch_lazy.append(task_name) or True,
+        show_inline_help=lambda app_obj: "help_inline",
+        show_inline_donate=lambda app_obj: "donate_inline",
+        set_help_button_selected=lambda app_obj, selected: startup_patch_refresh.append(("help", selected)),
+        set_donate_button_selected=lambda app_obj, selected: startup_patch_refresh.append(("donate", selected)),
+        set_help_action_state=lambda app_obj, selected: startup_patch_refresh.append(("help_action", selected)),
+        refresh_output_strategy_hint=lambda app_obj: startup_patch_refresh.append(("output", True)),
+        refresh_parallel_mode_hint=lambda app_obj: startup_patch_refresh.append(("parallel", True)),
+        refresh_visible_tab_layout=lambda app_obj, task_name: startup_patch_refresh.append(("layout", task_name)),
+        guess_lazy_tab_for_attr=lambda name: "pdf" if str(name).startswith("pdf_") else None,
+        record_performance=lambda event, **kwargs: startup_patch_perf.append((event, kwargs)),
+    )
+    startup_installed = mod.install_startup_performance_patch(startup_context)
+    startup_installed_again = mod.install_startup_performance_patch(startup_context)
+    fake_window = FakeCtk()
+    fake_startup_app = FakeStartupApp()
+    setup_main_result = fake_startup_app.setup_main_area()
+    switch_result = fake_startup_app.switch_tab("pdf", None)
+    help_result = fake_startup_app.show_readme()
+    donate_result = fake_startup_app.show_donate_window()
+    record(
+        "startup_patch_installer_module",
+        startup_installed
+        and not startup_installed_again
+        and getattr(fake_window, "_fx_start_hidden", False)
+        and setup_main_result == "main_ready"
+        and fake_startup_app.pdf_init_count == 0
+        and fake_startup_app._fx_lazy_tabs_state == {"watermark": True, "pdf": False}
+        and switch_result == "switched"
+        and startup_patch_lazy == ["pdf"]
+        and startup_patch_perf[-1][0] == "switch_tab"
+        and help_result == "help_inline"
+        and donate_result == "donate_inline",
+        {
+            "installed": startup_installed,
+            "installed_again": startup_installed_again,
+            "window_hidden": getattr(fake_window, "_fx_start_hidden", False),
+            "setup": setup_main_result,
+            "pdf_init_count": fake_startup_app.pdf_init_count,
+            "lazy": startup_patch_lazy,
+            "perf": startup_patch_perf[-1:] if startup_patch_perf else [],
+            "refresh": startup_patch_refresh,
+            "logs": startup_patch_logs,
+        },
+    )
 
     app = mod.FengxiToolboxApp()
     app.withdraw()
     app._fx_disable_fast_close_force_exit = True
     record("app_init", True, "current_task=" + str(getattr(app, "current_task", None)))
+
+    expected_feature_tasks = {
+        "watermark",
+        "remove_wm",
+        "convert",
+        "audio",
+        "zip",
+        "pdf",
+        "image",
+        "meta",
+        "file",
+    }
+    record(
+        "feature_registry_core_tasks",
+        expected_feature_tasks.issubset(set(mod.FEATURE_REGISTRY))
+        and not mod._get_feature_registry_errors()
+        and set(mod.QUEUE_TASK_LABELS) == set(mod.FEATURE_REGISTRY),
+        {
+            "tasks": sorted(mod.FEATURE_REGISTRY),
+            "errors": mod._get_feature_registry_errors(),
+            "labels": mod.QUEUE_TASK_LABELS,
+        },
+    )
+    record(
+        "feature_registry_derived_policy_sets",
+        mod.OUTPUT_STRATEGY_SUPPORTED_TASKS
+        == {task for task, spec in mod.FEATURE_REGISTRY.items() if spec.get("output_strategy", {}).get("supported")}
+        and mod.OUTPUT_STRATEGY_FORCE_RESULT_FOLDER_TASKS
+        == {task for task, spec in mod.FEATURE_REGISTRY.items() if spec.get("output_strategy", {}).get("force_result_folder")}
+        and "pdf" in mod.PARALLEL_SAFE_TASKS
+        and "remove_wm" in mod.PARALLEL_FORCED_SINGLE_TASKS,
+        {
+            "output_supported": sorted(mod.OUTPUT_STRATEGY_SUPPORTED_TASKS),
+            "output_forced": sorted(mod.OUTPUT_STRATEGY_FORCE_RESULT_FOLDER_TASKS),
+            "parallel_safe": sorted(mod.PARALLEL_SAFE_TASKS),
+            "parallel_forced": sorted(mod.PARALLEL_FORCED_SINGLE_TASKS),
+        },
+    )
+    record(
+        "feature_registry_preview_labels",
+        mod._get_feature_preview_mode_label("pdf", "ocr") == "OCR 搜索版 PDF"
+        and mod._get_feature_preview_mode_label("image", "merge_pdf") == "多图合并 PDF"
+        and mod._get_feature_label("remove_wm") == "去除水印",
+        {
+            "pdf_ocr": mod._get_feature_preview_mode_label("pdf", "ocr"),
+            "image_merge": mod._get_feature_preview_mode_label("image", "merge_pdf"),
+            "remove_wm": mod._get_feature_label("remove_wm"),
+        },
+    )
+
+    help_blob = "\n".join(
+        "\n".join((title, *lines))
+        for title, lines in mod.INLINE_HELP_SECTIONS
+    )
+    help_required_terms = [
+        "任务预览",
+        "OCR 搜索版 PDF",
+        "图像增强",
+        "质量回退",
+        "任务队列",
+        "历史详情",
+        "输出策略",
+        "覆盖原文件",
+        "保守（推荐）",
+        "批量并行",
+    ]
+    record(
+        "inline_help_workflow_sections",
+        all(term in help_blob for term in help_required_terms)
+        and len(mod.INLINE_HELP_SECTIONS) >= 10,
+        {
+            "sections": [title for title, _lines in mod.INLINE_HELP_SECTIONS],
+            "missing": [term for term in help_required_terms if term not in help_blob],
+        },
+    )
+
     sidebar_preset_button = getattr(app, "btn_preset_center_sidebar", None)
     bottom_preset_button = getattr(app, "btn_preset_center", None)
     record(
@@ -361,6 +719,55 @@ def main():
     app._fx_output_strategy_memory_ready = False
     mod._install_output_strategy_memory(app)
 
+    preview_root = root / "start_preview"
+    preview_root.mkdir()
+    make_pdf(preview_root / "a.pdf", ["preview a"])
+    make_pdf(preview_root / "b.pdf", ["preview b"])
+    (preview_root / "note.txt").write_text("ignore", encoding="utf-8")
+    app.current_task = "pdf"
+    app.pdf_mode_var.set("compress")
+    app.pdf_delete_var.set(True)
+    preview = mod._build_start_preview(app, str(preview_root), "pdf")
+    record(
+        "start_preview_counts_and_risks",
+        preview["effective_count"] == 2
+        and preview["total_count"] == 2
+        and preview["mode_detail"] == "PDF 压缩"
+        and "删除源文件" in " ".join(preview["risks"]),
+        preview,
+    )
+
+    preview_messages = []
+    original_askokcancel = mod.tkinter.messagebox.askokcancel
+    mod.tkinter.messagebox.askokcancel = lambda title, message, **kwargs: preview_messages.append((title, message)) or False
+    try:
+        confirm_result = mod._confirm_start_preview(app, str(preview_root), "pdf")
+    finally:
+        mod.tkinter.messagebox.askokcancel = original_askokcancel
+    record(
+        "start_preview_confirmation_cancel",
+        confirm_result is False
+        and preview_messages
+        and "将处理：2 个文件" in preview_messages[0][1]
+        and "PDF 处理完成后会删除源文件" in preview_messages[0][1],
+        preview_messages[0][1] if preview_messages else "",
+    )
+
+    queue_preview_messages = []
+    mod.tkinter.messagebox.askokcancel = lambda *args, **kwargs: queue_preview_messages.append(args) or False
+    app._fx_start_via_queue = True
+    try:
+        queue_confirm_result = mod._confirm_start_preview(app, str(preview_root), "pdf")
+    finally:
+        app._fx_start_via_queue = False
+        mod.tkinter.messagebox.askokcancel = original_askokcancel
+        app.pdf_delete_var.set(False)
+    record(
+        "start_preview_skips_queue_worker",
+        queue_confirm_result is True and not queue_preview_messages,
+        queue_preview_messages,
+    )
+
     mod._save_remove_wm_mode("aggressive")
     remove_mode_probe = type("RemoveWmModeProbe", (), {})()
     remove_mode_probe.rm_wm_mode_var = mod.tkinter.StringVar(master=app, value="")
@@ -463,17 +870,21 @@ def main():
     backend_values = list(getattr(app, "_fx_pdf_ocr_backend_map", {}).keys())
     lang_values = list(getattr(app, "_fx_pdf_ocr_lang_map", {}).keys())
     mode_values = list(getattr(app, "_fx_pdf_ocr_mode_map", {}).keys())
+    preprocess_values = list(getattr(app, "_fx_pdf_ocr_preprocess_map", {}).keys())
     chosen_backend = backend_values[-1] if backend_values else app.pdf_ocr_backend.get()
     chosen_lang = lang_values[-1] if lang_values else app.pdf_ocr_language.get()
     chosen_mode = mode_values[-1] if mode_values else app.pdf_ocr_mode.get()
+    chosen_preprocess = preprocess_values[-1] if preprocess_values else app.pdf_ocr_preprocess.get()
     app.pdf_ocr_backend.set(chosen_backend)
     app.pdf_ocr_language.set(chosen_lang)
     app.pdf_ocr_mode.set(chosen_mode)
+    app.pdf_ocr_preprocess.set(chosen_preprocess)
     app.pdf_ocr_model_root.set(str(root / "ocr_models_probe"))
     app.pdf_ocr_cls.set(True)
     app.pdf_ocr_compare_report.set(True)
     ocr_last = mod._save_last_settings_category(app, "ocr")
     app.pdf_ocr_backend.set(backend_values[0] if backend_values else chosen_backend)
+    app.pdf_ocr_preprocess.set(preprocess_values[0] if preprocess_values else chosen_preprocess)
     app.pdf_ocr_model_root.set("")
     app.pdf_ocr_cls.set(False)
     app.pdf_ocr_compare_report.set(False)
@@ -486,6 +897,7 @@ def main():
         and app.pdf_ocr_backend.get() == chosen_backend
         and app.pdf_ocr_language.get() == chosen_lang
         and app.pdf_ocr_mode.get() == chosen_mode
+        and app.pdf_ocr_preprocess.get() == chosen_preprocess
         and app.pdf_ocr_model_root.get() == str(root / "ocr_models_probe")
         and bool(app.pdf_ocr_cls.get())
         and bool(app.pdf_ocr_compare_report.get()),
@@ -493,6 +905,7 @@ def main():
             "backend": app.pdf_ocr_backend.get(),
             "language": app.pdf_ocr_language.get(),
             "mode": app.pdf_ocr_mode.get(),
+            "preprocess": app.pdf_ocr_preprocess.get(),
         },
     )
 
@@ -676,6 +1089,38 @@ def main():
         and "功能：" in detail_text,
         detail_text[:240],
     )
+    module_context = TaskHistoryExportContext(
+        normalize_path=lambda value: str(Path(value).resolve()) if value else "",
+        export_task_result=lambda result, output_path: Path(output_path).write_text(
+            json.dumps(result, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        >= 0,
+        sanitize_filename_component=mod._sanitize_filename_component,
+        format_queue_time=mod._format_queue_time,
+        get_feature_label=mod._get_feature_label,
+        queue_status_text=mod._queue_status_text,
+        classify_failure_reason=mod._classify_failure_reason,
+        failure_value_to_label=mod.QUEUE_HISTORY_FAILURE_VALUE_TO_LABEL,
+        project_root=root,
+        user_home=root.parent,
+        probe_environment=lambda: {"app": {}, "system": {}, "dependencies": {}, "performance": {}},
+        load_queue_history=lambda: success_history,
+        debug=lambda message: None,
+    )
+    module_report_text = build_task_history_report_text(success_history[-1] if success_history else {}, module_context)
+    module_export_filename = build_task_history_export_filename(success_history[-1] if success_history else {}, module_context)
+    record(
+        "task_history_exports_module_context",
+        "# 风兮工具箱任务报告" in module_report_text
+        and "queue fake success" in module_report_text
+        and module_export_filename.endswith(".json")
+        and "fengxi_task_result_" in module_export_filename,
+        {
+            "filename": module_export_filename,
+            "report": module_report_text[:240],
+        },
+    )
     export_filename = mod._build_task_history_export_filename(success_history[-1] if success_history else {})
     record(
         "task_history_export_filename",
@@ -758,6 +1203,91 @@ def main():
         (not empty_report_ok) and ("无法导出任务报告" in empty_report_payload),
         empty_report_payload,
     )
+    diagnostic_filename = mod._build_task_history_diagnostic_filename(success_history[-1] if success_history else {})
+    record(
+        "task_history_diagnostic_filename",
+        diagnostic_filename.endswith(".zip")
+        and "fengxi_diagnostic_" in diagnostic_filename
+        and all(char not in diagnostic_filename for char in '<>:"/\\\\|?*'),
+        diagnostic_filename,
+    )
+    original_probe_diagnostic_environment = mod._probe_diagnostic_environment
+    mod._probe_diagnostic_environment = lambda: {
+        "app": {
+            "release_version": mod.APP_RELEASE_VERSION,
+            "display_version": mod.APP_DISPLAY_VERSION,
+            "frozen": False,
+        },
+        "system": {
+            "platform": "test-platform",
+            "python": "test-python",
+            "executable": str(root / "python.exe"),
+            "cwd": str(root),
+        },
+        "dependencies": {
+            "ffmpeg": {"available": True, "path": str(root / "ffmpeg.exe")},
+            "ocr": {"rapidocr": {"available": True, "reason": "ok"}},
+            "office": {
+                "word": {"available": True, "version": "16.0", "error": ""},
+                "powerpoint": {"available": False, "version": "", "error": "not installed"},
+            },
+        },
+        "performance": {
+            "log_path": str(mod._get_performance_log_file()),
+            "recent": mod._load_recent_performance_entries(limit=5),
+        },
+    }
+    try:
+        diagnostic_path = root / "task_history_diagnostic.zip"
+        diagnostic_ok, diagnostic_payload = mod._export_task_history_diagnostic_package(
+            success_history[-1] if success_history else {},
+            str(diagnostic_path),
+        )
+        diagnostic_members = []
+        readme_text = ""
+        diagnostic_task_result = {}
+        diagnostic_environment = {}
+        if diagnostic_ok and diagnostic_path.exists():
+            with zipfile.ZipFile(diagnostic_path, "r") as diagnostic_zip:
+                diagnostic_members = sorted(diagnostic_zip.namelist())
+                readme_text = diagnostic_zip.read("README.md").decode("utf-8")
+                diagnostic_task_result = json.loads(diagnostic_zip.read("task_result.json").decode("utf-8"))
+                diagnostic_environment = json.loads(diagnostic_zip.read("environment.json").decode("utf-8"))
+        record(
+            "task_history_diagnostic_export_package",
+            diagnostic_ok
+            and diagnostic_payload == str(diagnostic_path.resolve())
+            and {
+                "README.md",
+                "task_history_entry.json",
+                "task_result.json",
+                "task_report.md",
+                "task_log.txt",
+                "environment.json",
+                "recent_history.json",
+            }.issubset(set(diagnostic_members))
+            and "# 风兮工具箱诊断包" in readme_text
+            and "<PROJECT_ROOT>" in readme_text
+            and str(root) not in readme_text
+            and diagnostic_task_result.get("task_type") == "pdf"
+            and diagnostic_environment.get("dependencies", {}).get("ffmpeg", {}).get("available") is True
+            and isinstance(diagnostic_environment.get("performance", {}).get("recent"), list),
+            {
+                "payload": diagnostic_payload,
+                "members": diagnostic_members,
+                "readme": readme_text[:300],
+                "task_result": diagnostic_task_result,
+                "environment": diagnostic_environment,
+            },
+        )
+        empty_diag_ok, empty_diag_payload = mod._export_task_history_diagnostic_package({}, str(root / "empty_diag.zip"))
+        record(
+            "task_history_diagnostic_export_empty",
+            (not empty_diag_ok) and ("无法导出诊断包" in empty_diag_payload),
+            empty_diag_payload,
+        )
+    finally:
+        mod._probe_diagnostic_environment = original_probe_diagnostic_environment
     open_dir = root / "history_open_output"
     open_dir.mkdir(exist_ok=True)
     open_calls = []
@@ -978,6 +1508,48 @@ def main():
     status = mod.add_watermark_to_pdf(str(pdf_src), str(pdf_out), pkt, page_range="all", check_text="CONFIDENTIAL")
     watermark_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(pdf_out)).pages)
     record("pdf_watermark", status == "SUCCESS" and "CONFIDENTIAL" in watermark_text, status)
+    record(
+        "watermark_core_module_exports",
+        callable(create_watermark_packet_module)
+        and callable(add_watermark_to_pdf_module)
+        and callable(add_watermark_to_word_module)
+        and getattr(mod._watermark_core_create_watermark_packet, "__module__", "") == "tools.fx_watermark_core",
+        {
+            "packet_module": getattr(create_watermark_packet_module, "__module__", ""),
+            "pdf_module": getattr(add_watermark_to_pdf_module, "__module__", ""),
+            "word_module": getattr(add_watermark_to_word_module, "__module__", ""),
+        },
+    )
+    record(
+        "pdf_compress_core_module_exports",
+        callable(compress_pdf_file_module)
+        and callable(build_pdf_compress_output_path_module)
+        and "标准" in PDF_COMPRESS_LEVELS_MODULE
+        and "标准" in PDF_IMAGE_COMPRESS_LEVELS_MODULE
+        and getattr(mod.compress_pdf_file, "__module__", "") == "fengxi_toolbox",
+        {
+            "module": getattr(compress_pdf_file_module, "__module__", ""),
+            "output_module": getattr(build_pdf_compress_output_path_module, "__module__", ""),
+        },
+    )
+    ocr_task_src = root / "ocr_task_module" / "nested" / "scan.pdf"
+    ocr_task_out_root = root / "ocr_task_out"
+    ocr_task_src.parent.mkdir(parents=True)
+    ocr_task_src.write_text("probe", encoding="utf-8")
+    ocr_task_output = build_pdf_ocr_output_path(ocr_task_src, root / "ocr_task_module", ocr_task_out_root)
+    ocr_task_report = build_pdf_ocr_compare_report_path(ocr_task_src, ocr_task_out_root)
+    record(
+        "pdf_ocr_task_module_exports",
+        PdfOcrTaskOptions(model_root=root, profile_key="general", backend_key="auto").extraction_mode == "mixed"
+        and isinstance(PdfOcrTaskCallbacks(), PdfOcrTaskCallbacks)
+        and callable(run_pdf_ocr_task_core)
+        and Path(ocr_task_output) == ocr_task_out_root / "nested" / "scan.pdf"
+        and Path(ocr_task_report) == ocr_task_out_root / "_ocr_compare_reports" / "scan.ocr_compare.md",
+        {
+            "output": ocr_task_output,
+            "report": ocr_task_report,
+        },
+    )
 
     img1 = root / "1.png"
     img2 = root / "2.png"
@@ -990,6 +1562,37 @@ def main():
     single_img_pdf = root / "single_image.pdf"
     status = mod._image_file_to_pdf(str(img1), str(single_img_pdf))
     record("image_to_pdf_helper", status == "SUCCESS" and single_img_pdf.exists(), status)
+    image_task_probe_dir = root / "image_task_module"
+    image_task_probe_dir.mkdir()
+    Image.new("RGBA", (40, 30), (0, 120, 255, 128)).save(image_task_probe_dir / "probe.png")
+    (image_task_probe_dir / "ignore.txt").write_text("no", encoding="utf-8")
+    image_task_out = root / "image_task_out"
+    image_task_name_out = root / "image_task_name_out"
+    image_task_single_out = image_task_out / "probe.pdf"
+    image_task_status = image_file_to_pdf(str(image_task_probe_dir / "probe.png"), str(image_task_single_out))
+    image_task_result = run_image_pdf_task_core(
+        [str(image_task_probe_dir / "probe.png")],
+        image_task_probe_dir,
+        image_task_probe_dir,
+        image_task_out / "core",
+        ImagePdfTaskOptions(image_to_pdf=image_file_to_pdf),
+        ImagePdfTaskCallbacks(),
+    )
+    record(
+        "image_pdf_task_module_exports",
+        image_task_status == "SUCCESS"
+        and image_task_single_out.exists()
+        and collect_image_to_pdf_files(image_task_probe_dir) == [str(image_task_probe_dir / "probe.png")]
+        and Path(build_image_pdf_output_path(image_task_probe_dir / "probe.png", image_task_name_out)) == image_task_name_out / "probe.pdf"
+        and Path(build_image_merge_pdf_output_path(image_task_probe_dir, image_task_probe_dir, image_task_out)) == image_task_out / "image_task_module_图集合并.pdf"
+        and image_task_result.get("status") == "success"
+        and callable(run_image_pdf_task_core),
+        {
+            "status": image_task_status,
+            "result": image_task_result,
+            "single": str(image_task_single_out),
+        },
+    )
 
     src = root / "stamp.txt"
     dst = root / "stamp_out.txt"
@@ -1035,6 +1638,11 @@ def main():
         "pdf_compress_helper",
         status.startswith("SUCCESS") and compressed.exists() and "compress me" in compressed_text,
         status,
+    )
+    record(
+        "pdf_compress_core_helper",
+        compress_pdf_file_module(str(src), str(root / "pdf_compress_out_core.pdf"), "强力", "保留原图").startswith("SUCCESS"),
+        "core_helper",
     )
 
     single_pdf = root / "single_input_encrypt.pdf"
@@ -1198,6 +1806,39 @@ def main():
         mod.FengxiToolboxApp.process_single_file(dummy, str(src), str(inp), str(out), "file", args, [])
         record(name, (out / expected).exists(), expected)
 
+    file_core_out = root / "file_core_out"
+    file_core_out.mkdir()
+    rename_spec = normalize_file_rename_spec_module(("rename", "add", "pre_", "_suf"))
+    rename_plan = plan_renamed_output_path_module(root / "demo.txt", file_core_out, rename_spec)
+    file_core_target = file_core_out / "demo.txt"
+    file_core_target.write_text("x", encoding="utf-8")
+    file_core_result = apply_rename_to_file_module(
+        str(file_core_target),
+        str(file_core_out),
+        str(file_core_out),
+        ("rename", "replace", "demo", "sample"),
+        copy_file_safe=mod.copy_file_safe,
+        log=lambda *_args, **_kwargs: None,
+    )
+    record(
+        "file_manager_core_module_exports",
+        callable(rename_file_name_module)
+        and callable(plan_renamed_output_path_module)
+        and callable(apply_rename_to_file_module)
+        and callable(deduplicate_files_module)
+        and callable(run_file_dedup_task_module)
+        and rename_spec.rename_type == "add"
+        and Path(rename_plan).name == "pre_demo_suf.txt"
+        and Path(file_core_result.get("output", "")).name == "sample.txt"
+        and (file_core_out / "sample.txt").exists()
+        and getattr(mod.FengxiToolboxApp.process_single_file, "__fx_file_manager_core_patch__", False),
+        {
+            "plan": rename_plan,
+            "result": file_core_result,
+            "outputs": sorted(p.name for p in file_core_out.iterdir()),
+        },
+    )
+
     inp = root / "meta_in"
     out = root / "meta_out"
     inp.mkdir()
@@ -1307,6 +1948,29 @@ def main():
         ok = wait_for(lambda: expected.exists())
         record(f"zip_{mode}", ok, expected)
 
+    zip_core_root = root / "zip_core_semantics"
+    (zip_core_root / "sub").mkdir(parents=True)
+    (zip_core_root / "a.txt").write_text("a", encoding="utf-8")
+    (zip_core_root / "sub" / "b.txt").write_text("b", encoding="utf-8")
+    zip_core_plan_counts = {
+        mode: len(plan_zip_archives_module(zip_core_root, mode))
+        for mode in ("total", "recursive", "smart_recursive")
+    }
+    zip_core_run = run_zip_task_module(zip_core_root, "smart_recursive")
+    zip_core_output = zip_core_root / f"{zip_core_root.name}.zip"
+    record(
+        "zip_core_module_semantics",
+        normalize_zip_mode_module("bad") == "total"
+        and zip_core_plan_counts == {"total": 1, "recursive": 2, "smart_recursive": 1}
+        and estimate_zip_progress_units_module(zip_core_root, "smart_recursive") == 1
+        and zip_core_run.get("status") == "success"
+        and zip_core_output.exists(),
+        {
+            "counts": zip_core_plan_counts,
+            "result": zip_core_run,
+        },
+    )
+
     single_zip_src = root / "single_zip_input.txt"
     single_zip_src.write_text("zip me", encoding="utf-8")
     app.zip_mode_var.set("total")
@@ -1324,6 +1988,33 @@ def main():
     app.run_process(str(fd), "file")
     wait_for(lambda: len(list(fd.glob("*.txt"))) == 1)
     record("file_dedup", len(list(fd.glob("*.txt"))) == 1, [p.name for p in fd.glob("*.txt")])
+
+    dedup_core_root = root / "file_dedup_core"
+    dedup_core_root.mkdir()
+    (dedup_core_root / "x.txt").write_text("same", encoding="utf-8")
+    (dedup_core_root / "y.txt").write_text("same", encoding="utf-8")
+    (dedup_core_root / "z.txt").write_text("other", encoding="utf-8")
+    deleted_by_core = []
+    dedup_core_result = run_file_dedup_task_module(
+        [dedup_core_root / "x.txt", dedup_core_root / "y.txt", dedup_core_root / "z.txt"],
+        delete_file=lambda path: (deleted_by_core.append(Path(path).name), Path(path).unlink()),
+        log=lambda *_args, **_kwargs: None,
+        stop_requested=lambda: False,
+        progress=lambda *_args, **_kwargs: None,
+    )
+    record(
+        "file_dedup_core_module_exports",
+        dedup_core_result.get("status") == "success"
+        and dedup_core_result.get("kept_count") == 2
+        and dedup_core_result.get("removed_count") == 1
+        and sorted(p.name for p in dedup_core_root.glob("*.txt")) == ["x.txt", "z.txt"]
+        and deleted_by_core == ["y.txt"],
+        {
+            "result": dedup_core_result,
+            "deleted": deleted_by_core,
+            "remaining": sorted(p.name for p in dedup_core_root.glob("*.txt")),
+        },
+    )
 
     img_root = root / "imgs2pdf"
     img_root.mkdir()
@@ -1418,6 +2109,8 @@ def main():
     if hasattr(app, "pdf_ocr_compare_report"):
         app.pdf_ocr_compare_report.set(True)
     app.pdf_ocr_mode.set("fullPage | 整页强制 OCR")
+    if hasattr(app, "pdf_ocr_cls"):
+        app.pdf_ocr_cls.set(False)
     if getattr(app, "_fx_pdf_ocr_lang_map", None):
         app.pdf_ocr_language.set(next(iter(app._fx_pdf_ocr_lang_map.keys())))
     app.run_process(str(ocr_root), "pdf")
@@ -1498,6 +2191,75 @@ def main():
         "pdf_ocr_backend_runtime_probe",
         bool(rapidocr_status.get("available")),
         rapidocr_status.get("reason", ""),
+    )
+
+    from tools.fx_pdf_ocr import (
+        FengxiPdfOcrEngine,
+        build_ocr_preprocess_candidates,
+        score_ocr_rows,
+    )
+
+    low_contrast_image = Image.new("RGB", (240, 120), (235, 235, 235))
+    low_contrast_path = root / "ocr_low_contrast_probe.png"
+    low_contrast_image.save(low_contrast_path)
+    low_contrast_bytes = low_contrast_path.read_bytes()
+    light_candidates = build_ocr_preprocess_candidates(low_contrast_bytes, "light")
+    scan_candidates = build_ocr_preprocess_candidates(low_contrast_bytes, "scan")
+    record(
+        "pdf_ocr_preprocess_candidates",
+        [item["key"] for item in light_candidates] == ["original", "enhanced"]
+        and "binary" in [item["key"] for item in scan_candidates],
+        {
+            "light": [item["key"] for item in light_candidates],
+            "scan": [item["key"] for item in scan_candidates],
+        },
+    )
+
+    class LowQualityBackend:
+        backend_key = "low"
+
+        def close(self):
+            return None
+
+        def ocr_image_bytes(self, _image_bytes):
+            return [{"box": [[0, 0], [10, 0], [10, 10], [0, 10]], "text": "?", "score": 0.05}]
+
+    class HighQualityBackend:
+        backend_key = "high"
+
+        def close(self):
+            return None
+
+        def ocr_image_bytes(self, _image_bytes):
+            return [
+                {
+                    "box": [[0, 0], [120, 0], [120, 20], [0, 20]],
+                    "text": "Hello OCR fallback works",
+                    "score": 0.96,
+                }
+            ]
+
+    fallback_engine = object.__new__(FengxiPdfOcrEngine)
+    fallback_engine.requested_backend_key = "auto"
+    fallback_engine.backend_key = "low"
+    fallback_engine.preprocess_mode = "off"
+    fallback_engine.backend_usage = {}
+    fallback_engine.backend_errors = []
+    fallback_engine._backend_cache = {"low": LowQualityBackend(), "high": HighQualityBackend()}
+    fallback_engine._iter_backend_candidates = lambda: ["low", "high"]
+    fallback_engine._get_backend = lambda backend_key: fallback_engine._backend_cache[backend_key]
+    probe_backend_rows, probe_attempt = fallback_engine._ocr_one_image(low_contrast_bytes)
+    record(
+        "pdf_ocr_auto_quality_fallback",
+        probe_attempt.get("backend") == "high"
+        and probe_backend_rows[0]["text"] == "Hello OCR fallback works"
+        and fallback_engine.backend_usage.get("high") == 1
+        and score_ocr_rows(probe_backend_rows) >= 0.48,
+        {
+            "attempt": probe_attempt,
+            "usage": fallback_engine.backend_usage,
+            "score": score_ocr_rows(probe_backend_rows),
+        },
     )
 
     import pythoncom

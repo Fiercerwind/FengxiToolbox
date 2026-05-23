@@ -17,6 +17,12 @@
   - `create_watermark_packet`
   - `add_watermark_to_pdf`
   - `add_watermark_to_word`
+- 2026-05-23：
+  - 在用户明确授权“稳定区核心逻辑也可以拆模块”的前提下，新增 `tools/fx_watermark_core.py` 承接加水印核心实现。
+  - `Fengxi_Toolbox.py` 仍保留 `create_watermark_packet(...)`、`add_watermark_to_pdf(...)`、`add_watermark_to_word(...)` 同名薄包装，负责把加载器层已有的字体解析、Word 兼容字体、COM 缓存禁用 context 注入核心模块。
+  - `_ns` 继续暴露原函数名，避免 `fengxi_runtime.bin` 旧调用点感知模块迁移。
+  - 当前拆分不改变 UI 参数、不改变智能跳过规则、不改变输出路径和任务调度行为。
+  - 回归覆盖：`watermark_core_module_exports`、`pdf_watermark`、`word_watermark`，并随全量 `full_debug_test.py` 131/131 通过。
 - 2026-05-09：
   - 水印文本框 `wm_text` 现已具备“用户填写后自动记忆，下次启动自动回填”的 UI 层持久化能力。
   - 实现仍限定在 `Fengxi_Toolbox.py` 加载器层，不修改 `fengxi_runtime.bin` 内的加水印业务逻辑。

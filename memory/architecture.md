@@ -1,5 +1,223 @@
 # 项目架构
 
+## 2026-05-23 文件管家重命名核心模块化
+- 新增 `tools/fx_file_manager_core.py`，把文件管家的批量重命名规则解析、输出路径规划和单文件复制改名执行从主加载器中拆出。
+- 新模块当前导出：
+  - `FileRenameSpec`
+  - `normalize_file_rename_spec(...)`
+  - `rename_file_name(...)`
+  - `plan_renamed_output_path(...)`
+  - `apply_rename_to_file(...)`
+  - `deduplicate_files(...)`
+- `Fengxi_Toolbox.py` 新增 `_patch_file_manager_core()`，仅在 `task_type == "file"` 且子模式为 `rename` 时把 `process_single_file(...)` 路由到新模块。
+- `dedup` 仍保留在原 `run_process()` 运行时专用单线程分支，不通过新模块接管；原因是它依赖全目录哈希比对、删除副作用和原运行时调度口径，后续如要拆分需单独做一轮。
+- 新模块中的 `deduplicate_files(...)` 当前是轻量独立 helper，供后续拆分和单元测试准备，不代表 UI 工作流已经切到它。
+- 验证：
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_file_manager_core.py full_debug_test.py smoke_test.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：136/136 通过。
+- 边界：未修改 `fengxi_runtime.bin`，未改 `dedup` UI 工作流，未删除项目外文件。
+
+## 2026-05-23 PDF 压缩核心模块化
+- 新增 `tools/fx_pdf_compress_core.py`，把 PDF 压缩档位、图片重压缩/降采样、输出命名和单文件压缩 implementation 从主加载器拆出。
+- 新模块当前导出：
+  - `PDF_COMPRESS_LEVELS`
+  - `PDF_IMAGE_COMPRESS_LEVELS`
+  - `build_pdf_compress_output_path(...)`
+  - `compress_pdf_file(...)`
+- `Fengxi_Toolbox.py` 继续保留 `_build_pdf_compress_output_path(...)` 和 `compress_pdf_file(...)` 作为薄包装，兼容现有 UI、smoke/full debug 测试和外部调用。
+- `PDF 压缩` 的任务编排仍留在加载器层：输入收集、输出策略、并行执行、进度条、失败报告、删除源文件和结构化任务结果都不下沉。
+- 这一步的 seam 目标是让压缩算法与 UI/队列调度分离；后续调整压缩质量、图片阈值或保存参数时优先改 `tools/fx_pdf_compress_core.py`。
+- 验证：
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_pdf_compress_core.py full_debug_test.py smoke_test.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：133/133 通过。
+- 边界：未修改 `fengxi_runtime.bin`，未触碰批量压缩/添加水印用户可见行为，未删除项目外文件。
+
+## 2026-05-23 OCR 任务编排模块化
+- 新增 `tools/fx_pdf_ocr_task.py`，把 OCR 搜索版 PDF 的任务编排从主加载器中抽离出来，形成比纯引擎更深的一层 seam。
+- 新模块承接的职责：
+  - 任务级 `PdfOcrTaskOptions` / `PdfOcrTaskCallbacks`
+  - 输出路径生成与 `_ocr_compare_reports` 路径生成
+  - 逐文件 OCR 循环
+  - 对比报告触发与失败容错
+  - 页级进度回调与停止检查
+  - 文件级成功/失败/完成回调
+- `tools/fx_pdf_ocr.py` 继续只管 OCR 引擎、后端探测、预处理、评分和比较报告内容，不再承担主任务循环。
+- `Fengxi_Toolbox.py` 中 `_run_pdf_ocr_task(...)` 现在只做 adapter：读取 UI 变量、输出策略、progress tracker、失败报告和结构化任务结果收口。
+- 这样做的收益：
+  - OCR 引擎、OCR 任务和 UI 各自的 interface 更窄。
+  - 以后改后端选择、compare report 或输出策略时，locality 更好。
+  - 测试可以分别覆盖引擎层与任务层，而不是只能碰一个很厚的函数。
+
+## 2026-05-23 稳定核心模块化例外
+- 本轮用户明确授权在“模块拆分”目的下触碰稳定区 `批量压缩` 和 `添加水印` 核心逻辑；目标是把业务实现从主加载器抽成独立模块，而不是改变功能行为。
+- 新增 `tools/fx_watermark_core.py`，集中承接：
+  - `create_watermark_packet(...)`
+  - `add_watermark_to_pdf(...)`
+  - `add_watermark_to_word(...)`
+- `Fengxi_Toolbox.py` 继续保留同名薄包装，负责注入项目已有的字体解析、Word 字体兼容、`_DisableWin32ComGenCache()` 等 adapter；运行时 `_ns` 里也继续暴露原函数名，兼容旧调用点。
+- 新增 `tools/fx_zip_core.py`，集中承接 ZIP 计划与执行：
+  - `plan_zip_archives(...)`
+  - `estimate_zip_progress_units(...)`
+  - `run_zip_task(...)`
+- `zip` 任务现在由 `_patch_zip_core_task()` 接管到 `fx_zip_core.run_zip_task(...)`，同时继续接入现有进度追踪、日志、结构化任务结果和历史记录口径。
+- ZIP 语义保持现有用户可见行为：
+  - `total`：根目录生成 `<folder>_Backup.zip`。
+  - `recursive`：根目录和各级子目录分别生成 zip。
+  - `smart_recursive`：含文件的目录直接打包并停止向下；只有子目录且无文件时继续递归。
+  - 单文件输入：同目录生成 `<原文件名>_Backup.zip`。
+- 这次拆分形成两个更深的 Module seam：水印核心和 ZIP 核心以后可以独立测试、独立定位，但 UI/偏好/队列/历史仍留在加载器层协调。
+- 验证：
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_watermark_core.py tools\fx_zip_core.py full_debug_test.py smoke_test.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：131/131 通过。
+- 边界：
+  - 未修改 `fengxi_runtime.bin`。
+  - 没有删除项目外文件。
+  - 本轮虽然触碰稳定区，但仅为模块化搬迁和包装兼容；后续仍默认不随意改 `批量压缩` / `添加水印` 行为。
+
+## 2026-05-23 启动性能 profiling 与补丁模块拆分一期
+- 新增 `tools/fx_performance.py`，把启动/切页/首次加载的轻量性能样本收口成 JSONL 记录，日志写入用户偏好目录下的 `performance.jsonl`，不落源码目录。
+- 当前记录的关键事件：
+  - `runtime_load`：加载 `fengxi_runtime.bin` 的耗时。
+  - `lazy_tab_init`：某个懒加载页面首次初始化的耗时。
+  - `switch_tab`：切换功能页的耗时。
+  - `startup_show_ready`：主窗口显示 ready 的耗时。
+  - `startup_total`：从启动进入到窗口 ready 的总耗时。
+- 性能记录器带自动裁剪，保持最近一小段样本，避免性能文件无限增长。
+- 新增 `tools/fx_runtime_patches.py`，把通用补丁包装器从 `Fengxi_Toolbox.py` 中拆出，作为后续继续拆补丁层的安全 seam。
+- 主加载器现在通过导入模块方式复用 `wrap_callable(...)`，但业务补丁仍然留在 `Fengxi_Toolbox.py`，没有碰 `fengxi_runtime.bin`。
+- 诊断包额外携带最近性能样本，便于以后排查“变慢了”到底慢在哪一段。
+- 维护原则：
+  - 批量压缩和添加水印核心业务逻辑继续不动。
+  - 性能记录失败必须静默，不影响启动。
+  - 后续继续拆补丁层时，优先迁移工具性函数，不先碰业务流程。
+- 2026-05-23 后续推进：
+  - 新增 `tools/fx_startup_patches.py`，把 `_patch_startup_performance()` 的核心 implementation 移出主加载器。
+  - 新模块通过 `StartupPatchContext` 接收 app class、CTk class、懒加载规格、debug/performance callbacks 和 UI 刷新 callbacks，不直接 import `Fengxi_Toolbox.py`。
+  - `Fengxi_Toolbox.py` 中的 `_patch_startup_performance()` 现在只负责装配 context 并调用 `install_startup_performance_patch(...)`。
+  - 这一步让启动隐藏窗口、懒加载页签、切页刷新、help/donate 内联重定向、切页性能记录集中在独立 Module 中，后续继续拆补丁层时可以沿用这种 context seam。
+- 2026-05-23 任务历史导出继续模块化：
+  - 新增 `tools/fx_task_history_exports.py`，把任务历史导出文件名、结构化结果 JSON 导出、日志 TXT 导出、Markdown 报告、诊断包 ZIP、诊断脱敏和最近历史快照集中到独立模块。
+  - 新模块通过 `TaskHistoryExportContext` 接收主加载器能力，包括路径归一化、任务结果写出、功能名/状态文案、失败分类、历史加载、环境探测、项目根目录与用户目录脱敏范围。
+  - `Fengxi_Toolbox.py` 保留原 `_build_task_history_*` / `_export_task_history_*` / `_diagnostic_*` 名称作为薄包装，任务历史详情窗口和现有测试入口不用改调用方式。
+  - 诊断包的环境探测仍留在主加载器，因为它依赖本机 ffmpeg、OCR 后端、Office COM 和性能日志；诊断包组装与脱敏已下沉到模块，形成更清晰的 seam。
+  - 新增 `task_history_exports_module_context` 回归，直接用模块 context 构造报告与文件名，确认模块可独立测试。
+  - 验证：`python -m py_compile Fengxi_Toolbox.py full_debug_test.py smoke_test.py tools\fx_task_history_exports.py tools\fx_performance.py tools\fx_runtime_patches.py tools\fx_startup_patches.py`、真实导入探针、`python smoke_test.py` 14/14、`python full_debug_test.py` 128/128。
+  - 边界：未修改 `fengxi_runtime.bin`，未改稳定区 `批量压缩` / `添加水印` 核心业务。
+- 2026-05-23 队列历史纯逻辑模块化：
+  - 新增 `tools/fx_queue_history.py`，把队列历史读写、90 天自动清理、最大条数裁剪、运行态字段清理、状态文案、搜索 blob 和筛选逻辑集中到独立模块。
+  - 新模块通过 `QueueHistoryContext` 接收历史文件路径、保留天数、最大条数、状态/任务/失败筛选映射、失败分类函数和任务结果快照函数。
+  - `Fengxi_Toolbox.py` 保留 `_load_queue_history`、`_save_queue_history`、`_filter_queue_history_entries` 等原函数名作为薄包装；队列 UI、历史窗口、失败重试与诊断包仍按原入口调用。
+  - 新增 `queue_history_module_context` 回归，直接验证模块级读写裁剪、运行态字段清理、状态文案、搜索 blob、失败分类筛选和时间戳读取。
+  - 验证：`python -m py_compile Fengxi_Toolbox.py full_debug_test.py tools\fx_queue_history.py`、真实导入探针、`python smoke_test.py` 14/14、`python full_debug_test.py` 129/129。
+  - 边界：未修改 `fengxi_runtime.bin`，未改稳定区 `批量压缩` / `添加水印` 核心业务。
+
+## 2026-05-23 功能注册表一期
+- 新增 `FEATURE_REGISTRY`，把各功能的元数据集中到 `Fengxi_Toolbox.py` 加载器层，作为后续进度、历史、失败重试、输出策略、功能入口和调试报告的统一描述来源。
+- 当前注册的任务类型：
+  - `watermark`：批量水印，稳定核心。
+  - `remove_wm`：去除水印。
+  - `convert`：格式转换。
+  - `audio`：音频工具。
+  - `zip`：批量压缩，稳定核心。
+  - `pdf`：PDF 工具。
+  - `image`：图片工厂。
+  - `meta`：属性隐私。
+  - `file`：文件管家。
+- 注册表字段当前覆盖：
+  - `label`：统一功能名。
+  - `icon`：功能图标语义名。
+  - `page`：页面/功能入口名。
+  - `input`：是否支持文件、文件夹、拖拽。
+  - `output_strategy`：是否支持输出策略、是否强制结果文件夹。
+  - `parallel`：安全并行、强制单线程、子模式例外说明。
+  - `preview_modes`：开始前任务预览的模式名。
+  - `risk_flags`：覆盖、删除、去重等风险标记。
+  - `stable_core`：稳定区标记，当前用于明确批量水印和批量压缩核心不轻易动。
+- 派生策略现在统一从注册表生成，不再保留第二套硬编码来源：
+  - `QUEUE_TASK_LABELS`
+  - `OUTPUT_STRATEGY_SUPPORTED_TASKS`
+  - `OUTPUT_STRATEGY_FORCE_RESULT_FOLDER_TASKS`
+  - `PARALLEL_SAFE_TASKS`
+  - `PARALLEL_FORCED_SINGLE_TASKS`
+  - `PARALLEL_FORCED_SINGLE_DETAILS`
+  - `PARALLEL_SUPPORTED_HINTS`
+- 新增辅助函数：
+  - `_get_feature_spec(...)`
+  - `_get_feature_label(...)`
+  - `_get_feature_preview_mode_label(...)`
+  - `_feature_supports_output_strategy(...)`
+  - `_feature_forces_result_folder(...)`
+  - `_build_parallel_sets_from_registry(...)`
+  - `_get_feature_registry_errors(...)`
+- 已替换的调用点：
+  - 开始前任务预览的功能名和模式名。
+  - 输出策略支持范围和强制结果文件夹判断。
+  - 并行状态说明和强制单线程提示。
+  - 历史记录详情、筛选和展示里的功能名。
+- 维护原则：
+  - 后续新增功能或子模式，优先补 `FEATURE_REGISTRY`，再让 UI/队列/历史/进度从注册表读取。
+  - 不要重新散落新增 `QUEUE_TASK_LABELS.get(...)`、手写并行集合或手写输出策略集合。
+  - 注册表仍在加载器层，不改 `fengxi_runtime.bin`。
+  - 本轮未改 `批量压缩` 与 `添加水印` 的核心业务逻辑。
+
+## 2026-05-23 一键诊断包
+- 任务历史详情窗口新增 `诊断包` 按钮，和 `导出结果`、`导出报告`、`打开位置`、`导出日志`、`复制详情` 并列。
+- 实现仍在 `Fengxi_Toolbox.py` 加载器层，不修改 `fengxi_runtime.bin`。
+- 核心函数：
+  - `_build_task_history_diagnostic_filename(entry)` 生成安全 zip 文件名。
+  - `_export_task_history_diagnostic_package(entry, output_path)` 生成诊断 zip。
+  - `_prompt_export_task_history_diagnostic_package(app, entry, output_path=None)` 负责保存对话框、消息框和日志提示。
+  - `_probe_diagnostic_environment()` 探测软件版本、Python/系统、ffmpeg、OCR 后端、Word/PowerPoint COM 可用性。
+  - `_redact_diagnostic_payload(...)` / `_redact_diagnostic_text(...)` 对路径做基础脱敏。
+- 诊断包内容固定为文本/JSON/Markdown，不复制原始 PDF、Word、图片、音视频等输入文件：
+  - `README.md`：诊断包说明、当前任务摘要、环境摘要。
+  - `task_history_entry.json`：当前历史条目快照。
+  - `task_result.json`：结构化任务结果。
+  - `task_report.md`：复用现有任务报告口径。
+  - `task_log.txt`：复用现有任务日志导出口径。
+  - `environment.json`：版本、系统、Python、ffmpeg、OCR、Office COM 探测。
+  - `recent_history.json`：最近历史摘要，便于判断是否连续失败。
+- 路径脱敏规则：
+  - 当前项目根目录替换为 `<PROJECT_ROOT>`。
+  - 用户主目录替换为 `<USER_HOME>`。
+  - 该脱敏只用于诊断包内容，不改真实历史记录与任务结果。
+- 回归覆盖：
+  - `task_history_diagnostic_filename`
+  - `task_history_diagnostic_export_package`
+  - `task_history_diagnostic_export_empty`
+- 本次未改稳定区 `批量压缩` / `添加水印` 核心业务逻辑。
+
+## 2026-05-22 使用教程内嵌示例流程
+- `使用教程` 继续保持应用内右侧滚动页，不再打开外部 README 或弹窗。
+- `INLINE_HELP_SECTIONS` 已重写为按用户任务场景组织的内嵌说明，重点覆盖：
+  - 三步上手：拖入/选择文件或文件夹、选择功能、开始前任务预览、真进度文字、上次设置自动记忆。
+  - 输出与安全确认：原目录新文件、覆盖原文件、【处理完成】结果文件夹、删除源文件/去重等高风险提醒。
+  - 任务队列与历史记录：加入队列、历史筛选、失败重试、成功回放、打开输出位置、导出结果/日志/报告、过期历史自动清理。
+  - PDF OCR：auto 后端、图像增强、质量回退、透明文字层、对比报告和常见失败原因。
+  - PDF 压缩/合并/拆分/加密、批量水印、去除水印、图片工厂、格式转换/音频、属性隐私/文件管家、批量压缩、性能进度排障。
+- 帮助页构建函数仍是 `_build_inline_help_page(app, help_tab)`，只是替换内容结构，不改变业务执行路径。
+- 新增回归 `inline_help_workflow_sections`，要求帮助页必须覆盖 OCR 图像增强/质量回退、任务队列历史、开始前预览、输出策略、覆盖原文件、保守去水印和批量并行等关键词。
+- 本次未改 `fengxi_runtime.bin`，未改稳定区 `批量压缩` / `添加水印` 核心业务逻辑。
+
+## 2026-05-22 开始前任务预览确认
+- 人工点击“开始处理”前会先生成任务预览，展示功能、子模式、输入类型、预计处理文件数、预计跳过数、输出策略和覆盖/删除源文件风险。
+- 实现位置仍在 `Fengxi_Toolbox.py` 加载器层：
+  - `_build_start_preview(...)` 负责统计预览对象。
+  - `_format_start_preview_message(...)` 负责生成确认文案。
+  - `_confirm_start_preview(...)` 负责日志提示与确认弹窗。
+  - `_patch_start_preview_confirmation()` 只包装人工 `on_start_click`。
+- 队列后台执行通过 `_fx_start_via_queue` 跳过确认弹窗，避免队列执行被人工确认框卡住。
+- 预览统计尽量复用当前功能的收集逻辑：
+  - PDF 仅统计 `.pdf`。
+  - 图片转 PDF / 多图合并 PDF 复用 `_collect_image_to_pdf_files(...)`。
+  - 音频复用 `_collect_audio_files(...)`。
+  - 水印会额外估算“按文件名规则跳过”的数量，但不提前改动水印运行时规则。
+- 风险提示覆盖输出策略覆盖原文件、去水印覆盖原文件、PDF/图片/音频/水印删除源文件、文件去重等高风险选项。
+- 本次仍未改 `fengxi_runtime.bin`，未改稳定区 `批量压缩` / `添加水印` 核心业务逻辑。
+
 ## 2026-05-22 赞助作者内联页
 - `赞助作者` 不再走弹窗/独立窗口，侧栏按钮和旧的 `show_donate_window` 统一重定向到右侧内容页 `赞助作者`。
 - 赞助页复用主内容区的内联页面模式，和“使用教程”保持同一种右侧信息页表达，不打断当前工作流。
@@ -665,3 +883,10 @@
 - 回归测试新增 `parallel_hint_removed_queue_actions_kept`，要求并行提示标签不存在、提示变量为空、`btn_queue_add` 与 `btn_queue_panel` 均存在。
 - 验证：`python -m py_compile Fengxi_Toolbox.py full_debug_test.py smoke_test.py`、`python smoke_test.py` 14/14、`python full_debug_test.py` 110/110。
 - 边界：未修改 `fengxi_runtime.bin`，未修改稳定区 `批量压缩` / `添加水印` 核心业务逻辑，也未删除任何项目外文件。
+
+## 2026-05-23 图片 PDF 任务编排模块化
+- `image` 任务的图片转 PDF 与多图合并 PDF 编排已从 `Fengxi_Toolbox.py` 拆到 `tools/fx_image_pdf_task.py`。
+- 新模块负责文件收集、单图输出命名、合并输出命名、单图逐张 PDF 生成、并行调度和统一任务结果汇总。
+- `Fengxi_Toolbox.py` 现在只保留 UI 参数解析、输出策略适配、进度回调、失败报告和历史结果写回，旧辅助函数继续保留为兼容薄封装。
+- 图片转 PDF 的唯一命名规则保持不变：同名时自动后缀递增，避免覆盖已存在输出。
+- 验证：`python -m py_compile Fengxi_Toolbox.py tools/fx_image_pdf_task.py full_debug_test.py smoke_test.py`、`python smoke_test.py` 14/14、`python full_debug_test.py` 135/135。

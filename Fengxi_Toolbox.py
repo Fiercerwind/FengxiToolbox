@@ -16,6 +16,7 @@ import tempfile
 import threading
 import types
 import time
+import platform
 import customtkinter
 import pypdf
 import pywinstyles
@@ -34,8 +35,76 @@ from pathlib import Path
 from reportlab.lib import pagesizes
 from reportlab.pdfbase import ttfonts
 from reportlab.pdfgen import canvas
+from tools.fx_image_pdf_task import (
+    IMAGE_TO_PDF_EXTS,
+    ImagePdfTaskCallbacks,
+    ImagePdfTaskOptions,
+    build_image_pdf_output_path as _image_pdf_task_build_output_path,
+    collect_image_to_pdf_files as _image_pdf_task_collect_files,
+    image_file_to_pdf as _image_pdf_task_image_file_to_pdf,
+    run_image_pdf_task_core,
+)
+from tools.fx_performance import FxPerformanceRecorder, load_performance_entries
+from tools.fx_pdf_compress_core import (
+    PDF_COMPRESS_LEVELS,
+    PDF_IMAGE_COMPRESS_LEVELS,
+    build_pdf_compress_output_path as _pdf_compress_core_build_output_path,
+    compress_pdf_file as _pdf_compress_core_compress_pdf_file,
+)
+from tools.fx_queue_history import (
+    QueueHistoryContext,
+    build_queue_history_search_blob,
+    filter_queue_history_entries,
+    load_queue_history,
+    normalize_queue_history_entry,
+    prune_queue_history_entries,
+    queue_history_entry_timestamp,
+    queue_status_text,
+    save_queue_history,
+)
+from tools.fx_runtime_patches import wrap_callable
+from tools.fx_startup_patches import StartupPatchContext, install_startup_performance_patch
+from tools.fx_file_manager_core import (
+    apply_rename_to_file as _file_core_apply_rename_to_file,
+    deduplicate_files as _file_core_deduplicate_files,
+    normalize_file_rename_spec as _file_core_normalize_rename_spec,
+    plan_renamed_output_path as _file_core_plan_renamed_output_path,
+    rename_file_name as _file_core_rename_file_name,
+    run_file_dedup_task as _file_core_run_file_dedup_task,
+)
+from tools.fx_task_history_exports import (
+    TaskHistoryExportContext,
+    build_diagnostic_summary,
+    build_recent_history_diagnostic_snapshot,
+    build_task_history_diagnostic_filename,
+    build_task_history_export_filename,
+    build_task_history_log_export_filename,
+    build_task_history_log_export_text,
+    build_task_history_report_export_filename,
+    build_task_history_report_text,
+    diagnostic_path_replacements,
+    diagnostic_write_json,
+    diagnostic_write_text,
+    export_task_history_diagnostic_package,
+    export_task_history_entry,
+    export_task_history_log,
+    export_task_history_report,
+    redact_diagnostic_payload,
+    redact_diagnostic_text,
+)
+from tools.fx_watermark_core import (
+    add_watermark_to_pdf as _watermark_core_add_watermark_to_pdf,
+    add_watermark_to_word as _watermark_core_add_watermark_to_word,
+    create_watermark_packet as _watermark_core_create_watermark_packet,
+)
+from tools.fx_zip_core import (
+    estimate_zip_progress_units,
+    normalize_zip_mode,
+    run_zip_task as _zip_core_run_zip_task,
+)
 
 
+BOOTSTRAP_STARTED_AT = time.perf_counter()
 RUNTIME_BIN = Path(__file__).with_name("fengxi_runtime.bin")
 DEBUG_LOG = Path(tempfile.gettempdir()) / "fx_toolbox_loader.log"
 DEFAULT_STARTUP_TAB = "watermark"
@@ -131,13 +200,54 @@ ZIP_MODE_DESCRIPTION_TEXT = (
 HELP_TAB_TITLE = "使用教程"
 INLINE_HELP_SECTIONS = (
     (
-        "使用流程",
+        "三步上手",
         (
-            "1. 先在顶部输入框拖入或选择文件/文件夹。当前入口支持单个文件和文件夹，拖拽时也会保留真实路径。",
-            "2. 在左侧选择功能模块，再在当前页面配置参数。",
-            "3. 点击底部开始执行，进度条与运行信息框会显示当前处理状态。",
-            "4. 默认输出到原文件同目录或【处理完成】结果文件夹；少数功能会按页面说明生成同名派生文件。",
-            "5. 处理前请确认是否开启“删除源文件”或“覆盖原文件”类开关，这类选项会改变原始资料。",
+            "1. 在顶部输入框拖入文件/文件夹，或点击选择入口。拖拽单个文件时会保留真实文件路径，不会降级成父文件夹。",
+            "2. 在左侧选择功能，再在右侧页面配置参数。PDF 和图片模块会先显示功能入口，点进具体功能后再显示细项。",
+            "3. 点击底部开始执行。正式执行前会弹出任务预览，确认本次将处理的文件数、跳过数量、输出策略和高风险选项。",
+            "4. 运行中看进度条旁的文字：当前文件、当前阶段、总进度和预计剩余时间会尽量同步显示。",
+            "5. 常用设置会自动记住上一次的选择，不需要单独打开预设中心。",
+        ),
+    ),
+    (
+        "输出与安全确认",
+        (
+            "默认策略：文件夹任务通常在原目录生成【处理完成】结果文件夹；单文件任务通常在同目录生成新文件。",
+            "覆盖原文件：只有在页面明确开启覆盖时才会尝试替换原文件，适合确认无误后的重复处理。",
+            "原目录新文件：更适合试跑和排查问题，可以保留原始资料。",
+            "删除源文件、覆盖原文件、文件去重都属于高风险操作，开始前预览会再次提醒。",
+            "如果不确定效果，先用少量副本试跑，再把同样设置加入队列批量执行。",
+        ),
+    ),
+    (
+        "任务队列与历史记录",
+        (
+            "配置好当前页面后，可点击加入队列，把输入路径、功能类型和参数快照保存为待执行任务。",
+            "队列历史支持按功能、状态、失败原因和关键词筛选，方便回看大批量处理结果。",
+            "失败任务可以按原参数重试；成功任务也可以回放加入队列。",
+            "历史详情里可以打开输出位置、导出结构化结果、导出日志或导出 Markdown 报告。",
+            "过久的历史记录会自动清理，避免队列文件越来越大。",
+        ),
+    ),
+    (
+        "PDF：OCR 搜索版 PDF",
+        (
+            "适用场景：扫描件、图片型 PDF、无法搜索文字的资料。",
+            "推荐设置：后端选择 auto，图像增强选择 auto；低质量扫描件可尝试 scan，清晰原件可改为 off。",
+            "处理方式：保留原页面画面，并叠加透明文字层，生成可搜索的新 PDF。",
+            "质量回退：auto 会优先尝试最快路径，识别质量偏低时会继续尝试备用后端。",
+            "对比报告：开启后会记录后端、图像增强候选和质量评分，便于判断哪条 OCR 路线效果更好。",
+            "常见失败原因：OCR 依赖不可用、PDF 加密、页面图片损坏、路径权限不足或文档过大。",
+        ),
+    ),
+    (
+        "PDF：压缩、合并、拆分、加密",
+        (
+            "PDF 压缩：可分别选择 PDF 压缩程度和图片压缩程度，适合分享、归档和上传限制场景。",
+            "PDF 合并：按页面当前规则收集 PDF 后合成为一个文件，建议先检查文件名排序。",
+            "PDF 拆分：适合把多页资料拆成独立文件。",
+            "PDF 加密：请牢记密码，生成后如果忘记密码，工具箱不会替你找回。",
+            "多文件压缩在开启批量并行时可提速；合并和 OCR 为了稳定性默认按单线程执行。",
         ),
     ),
     (
@@ -145,32 +255,46 @@ INLINE_HELP_SECTIONS = (
         (
             "支持 PDF、Word、PPT 等文档批量添加文字或图片水印。",
             "智能加水印支持文件名跳过规则：可设置按开头或结尾匹配指定字符，默认兼容跳过文件名去扩展名后以“-”结尾的文件。",
+            "水印内容、字号、透明度、角度、跳过规则和输出策略都会自动记住上一次设置。",
             "这是稳定区功能，除非明确要求，不应改动核心加水印处理逻辑。",
         ),
     ),
     (
         "去除水印",
         (
-            "支持 Word、PDF、PPT 等资料的批量去水印尝试。",
-            "可选择单个文件或文件夹；单文件默认在同目录生成去水印结果，文件夹默认生成【处理完成】结果文件夹。",
-            "如开启覆盖原文件，会在处理成功后替换原文件；不建议在没有备份的唯一资料上直接开启。",
-            "去水印属于识别和清理任务，不同文件结构差异很大，遇到异常文件建议先用副本测试。",
+            "适用场景：尝试清理 Word、PDF、PPT 中的明显水印对象。",
+            "模式选择：默认保守（推荐），尽量避免误删正常文字和图片；标准适合常规水印；激进适合顽固水印但误删风险更高。",
+            "单文件默认在同目录生成新文件；文件夹默认生成【处理完成】结果文件夹。",
+            "如开启覆盖原文件，会先生成临时结果，成功后再替换原文件。",
+            "去水印不是万能删除器，不同文件结构差异很大，重要文件建议先用副本试跑。",
         ),
     ),
     (
-        "格式转换",
+        "图片工厂",
         (
-            "支持常用文档格式互转，包括 Word/PPT/PDF 等转换入口。",
-            "选择单个文件时只处理该文件；选择文件夹时会按当前功能收集可处理文件。",
-            "转换失败通常与 Office/WPS 环境、文件损坏、加密文档或路径权限有关。",
+            "支持图片批量处理、图片转 PDF、以及多图合并成一个 PDF。",
+            "图片转 PDF 会为每张图片生成独立 PDF；多图合并 PDF 会按文件名排序合成为一份 PDF。",
+            "支持 jpg、jpeg、png、bmp、webp、tif、tiff 等常见图片格式。",
+            "多张图片逐张转 PDF 可在批量并行开启时提速；多图合并为单个 PDF 会保持稳定单线程。",
+            "如果图片方向、尺寸差异较大，建议先整理文件名和顺序，再合并成 PDF。",
         ),
     ),
     (
-        "音频工具",
+        "格式转换与音频工具",
         (
-            "支持从视频中提取音频，以及常见音频格式转换。",
-            "底层优先使用随 Python 环境可用的 ffmpeg 路线，打包版会随包带入必要依赖。",
-            "大体积视频处理耗时较长，处理期间不要频繁切换或强制关闭。",
+            "格式转换支持常用文档格式互转，包括 Word、PPT、PDF 等转换入口。",
+            "Office/PDF 转换通常依赖本机 Office 或 WPS 环境；失败时优先检查软件安装、加密文档和文件占用。",
+            "音频工具支持从视频中提取音频，以及常见音频格式转换。",
+            "音视频转换依赖 ffmpeg 路线，大体积文件耗时较长，处理期间尽量不要频繁强制关闭。",
+        ),
+    ),
+    (
+        "属性隐私与文件管家",
+        (
+            "属性隐私支持修改 PDF/Office 作者信息，以及批量修改文件时间属性。",
+            "Office 元数据依赖本机 Office COM 环境；PDF 作者信息通过 PDF 元数据写入。",
+            "文件管家支持批量重命名和重复文件清理，重命名规则会自动记住上一次设置。",
+            "去重基于文件内容哈希判断，删除类操作建议先用测试文件夹确认规则。",
         ),
     ),
     (
@@ -180,39 +304,16 @@ INLINE_HELP_SECTIONS = (
             "全层级递归：扫描每一层文件夹，并在各自父级目录生成对应压缩包。",
             "智能混合模式：某一层同时包含文件和子文件夹时，会整体打包该层并停止继续为内部子文件夹单独打包；若只有子文件夹则继续向下递归。",
             "生成前会自动删除同名旧压缩包，避免结果混乱。",
+            "这是稳定区功能，除非明确要求，不应改动核心批量压缩处理逻辑。",
         ),
     ),
     (
-        "PDF 工具",
+        "性能、进度与排障",
         (
-            "页面采用左侧功能入口、右侧参数面板，当前包括合并、拆分、加密、压缩、OCR 搜索版 PDF。",
-            "PDF 压缩可选择 PDF 压缩程度和图片压缩程度，输出为原文件名_压缩.pdf。",
-            "OCR 搜索版 PDF 会保留原页面画面并叠加透明文字层，支持 auto、rapidocr、paddleocr、easyocr、tesseract_cli 等后端路线。",
-            "OCR 可选生成后端对比报告，便于比较不同识别路径效果。",
-        ),
-    ),
-    (
-        "图片工厂",
-        (
-            "支持图片批量处理、图片转 PDF、以及多图合并成一个 PDF。",
-            "图片转 PDF 会为每张图片生成独立 PDF；多图合并 PDF 会按文件名排序合成为一份 PDF。",
-            "支持 jpg、jpeg、png、bmp、webp、tif、tiff 等常见图片格式。",
-        ),
-    ),
-    (
-        "属性隐私",
-        (
-            "支持修改 PDF/Office 作者信息，以及批量修改文件时间属性。",
-            "Office 元数据依赖本机 Office COM 环境；PDF 作者信息通过 PDF 元数据写入。",
-            "处理前建议确认是否需要保留原始创建时间、修改时间或作者信息。",
-        ),
-    ),
-    (
-        "文件管家",
-        (
-            "支持批量重命名和重复文件清理。",
-            "重命名包含添加、替换、截取等子模式；去重基于文件内容哈希判断。",
-            "删除或去重类操作建议先用测试文件夹确认规则，避免误删。",
+            "批量并行只对部分多文件工作流生效，例如部分 PDF 压缩、图片逐张转 PDF、音视频逐文件转换等。",
+            "稳定单线程适合 OCR、去水印、Office/PDF 转换、PDF 合并、文件去重等容易受外部依赖影响的任务。",
+            "运行信息框会保留关键日志；任务历史详情可以导出日志和报告，用于复盘失败原因。",
+            "如果遇到卡住或失败，先查看当前阶段、失败文件名、历史详情里的错误原因，再决定是否重试。",
         ),
     ),
     (
@@ -237,8 +338,6 @@ OUTPUT_STRATEGY_LABELS = {
 OUTPUT_STRATEGY_VALUES = tuple(OUTPUT_STRATEGY_LABELS.keys())
 OUTPUT_STRATEGY_VALUE_TO_LABEL = dict(OUTPUT_STRATEGY_LABELS)
 OUTPUT_STRATEGY_LABEL_TO_VALUE = {label: value for value, label in OUTPUT_STRATEGY_LABELS.items()}
-OUTPUT_STRATEGY_SUPPORTED_TASKS = {"remove_wm", "pdf", "image", "zip"}
-OUTPUT_STRATEGY_FORCE_RESULT_FOLDER_TASKS = {"pdf", "image"}
 REMOVE_WM_MODE_DEFAULT = "conservative"
 REMOVE_WM_MODE_LABELS = {
     "conservative": "保守（推荐）",
@@ -296,25 +395,6 @@ QUEUE_HISTORY_LIMIT = 80
 QUEUE_HISTORY_RETENTION_DAYS = 90
 PROGRESS_STATUS_IDLE_TEXT = "进度：等待任务"
 PARALLEL_MAX_WORKERS = 4
-PARALLEL_SAFE_TASKS = {"watermark", "pdf", "image", "audio", "file", "meta"}
-PARALLEL_FORCED_SINGLE_TASKS = {"remove_wm", "zip", "convert"}
-PARALLEL_FORCED_SINGLE_DETAILS = {
-    ("pdf", "merge"): "PDF 合并需要保持文件顺序，使用单线程更稳。",
-    ("pdf", "ocr"): "OCR 会占用大量 CPU/内存，当前采用单线程稳定处理。",
-    ("image", "merge_pdf"): "多图合并 PDF 需要保持图片顺序，使用单线程更稳。",
-    ("file", "dedup"): "文件去重依赖全目录哈希归并，使用单线程更稳。",
-    ("convert", ""): "Office/PDF 转换依赖 COM 或重型转换器，已强制单线程。",
-    ("remove_wm", ""): "去水印依赖 Word/PDF 重构链路，已强制单线程防止误删和 COM 污染。",
-    ("zip", ""): "批量压缩有专用目录遍历逻辑，已强制单线程以保持稳定输出。",
-}
-PARALLEL_SUPPORTED_HINTS = {
-    "watermark": "批量水印可对多文件并行处理；遇到 Word/PDF 特殊链路时会自动保护。",
-    "pdf": "PDF 拆分/加密/压缩可并行处理；合并、OCR 会自动切到稳定流程。",
-    "image": "图片格式转换/压缩/逐张转 PDF 可并行处理；多图合并 PDF 会自动切到稳定流程。",
-    "audio": "音视频逐文件转换可并行处理，实际速度也受 ffmpeg 与磁盘限制。",
-    "file": "文件重命名可并行处理；去重会自动切到稳定流程。",
-    "meta": "普通文件时间修改可并行处理；Office 元数据会自动切到稳定流程。",
-}
 AUDIO_VALID_AUDIO_EXTS = (".mp3", ".wav", ".flac", ".m4a", ".ogg", ".wma", ".aac")
 AUDIO_VALID_VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv")
 PARALLEL_SWITCH_TEXT = "批量并行（部分生效）"
@@ -342,17 +422,227 @@ QUEUE_ERROR_MARKERS = (
     "failed",
     "traceback",
 )
-QUEUE_TASK_LABELS = {
-    "watermark": "批量水印",
-    "remove_wm": "去除水印",
-    "convert": "格式转换",
-    "audio": "音频工具",
-    "zip": "批量压缩",
-    "pdf": "PDF 工具",
-    "image": "图片工厂",
-    "meta": "属性隐私",
-    "file": "文件管家",
+FEATURE_REGISTRY = {
+    "watermark": {
+        "label": "批量水印",
+        "icon": "shield",
+        "page": "watermark",
+        "input": {"file": True, "folder": True, "drag_drop": True},
+        "output_strategy": {"supported": False, "force_result_folder": False},
+        "parallel": {"mode": "safe", "hint": "批量水印可对多文件并行处理；遇到 Word/PDF 特殊链路时会自动保护。"},
+        "preview_modes": {"default": "添加水印"},
+        "risk_flags": ("delete_source",),
+        "stable_core": True,
+    },
+    "remove_wm": {
+        "label": "去除水印",
+        "icon": "eraser",
+        "page": "remove_wm",
+        "input": {"file": True, "folder": True, "drag_drop": True},
+        "output_strategy": {"supported": True, "force_result_folder": False},
+        "parallel": {"mode": "forced_single", "detail": {"": "去水印会调用 Office/PDF 清理链路，保持单线程更安全。"}},
+        "preview_modes": {
+            "conservative": "保守（推荐）",
+            "standard": "标准",
+            "aggressive": "激进",
+        },
+        "risk_flags": ("overwrite_original",),
+    },
+    "convert": {
+        "label": "格式转换",
+        "icon": "swap",
+        "page": "convert",
+        "input": {"file": True, "folder": True, "drag_drop": True},
+        "output_strategy": {"supported": False, "force_result_folder": False},
+        "parallel": {"mode": "forced_single", "detail": {"": "Office/PDF 转换依赖 COM 或重型转换器，已强制单线程。"}},
+        "preview_modes": {},
+    },
+    "audio": {
+        "label": "音频工具",
+        "icon": "music",
+        "page": "audio",
+        "input": {"file": True, "folder": True, "drag_drop": True},
+        "output_strategy": {"supported": False, "force_result_folder": False},
+        "parallel": {"mode": "safe", "hint": "音视频逐文件转换可并行处理，实际速度也受 ffmpeg 与磁盘限制。"},
+        "preview_modes": {},
+        "risk_flags": ("delete_source",),
+    },
+    "zip": {
+        "label": "批量压缩",
+        "icon": "box",
+        "page": "zip",
+        "input": {"file": True, "folder": True, "drag_drop": True},
+        "output_strategy": {"supported": True, "force_result_folder": False},
+        "parallel": {"mode": "forced_single", "detail": {"": "批量压缩保持原有稳定流程，不做额外并行。"}},
+        "preview_modes": {
+            "total": "总体压缩",
+            "recursive": "递归压缩",
+            "smart_recursive": "智能混合压缩",
+        },
+        "stable_core": True,
+    },
+    "pdf": {
+        "label": "PDF 工具",
+        "icon": "document",
+        "page": "pdf",
+        "input": {"file": True, "folder": True, "drag_drop": True},
+        "output_strategy": {"supported": True, "force_result_folder": True},
+        "parallel": {
+            "mode": "safe",
+            "hint": "PDF 拆分/加密/压缩可并行处理；合并、OCR 会自动切到稳定流程。",
+            "detail": {
+                "merge": ("forced_single", "PDF 合并需要保持文件顺序与输出一致，已强制单线程。"),
+                "ocr": ("forced_single", "OCR 会占用大量 CPU/内存，当前采用单线程稳定处理。"),
+            },
+        },
+        "preview_modes": {
+            "merge": "合并",
+            "split": "拆分",
+            "encrypt": "加密",
+            "compress": "PDF 压缩",
+            "ocr": "OCR 搜索版 PDF",
+        },
+        "risk_flags": ("delete_source",),
+    },
+    "image": {
+        "label": "图片工厂",
+        "icon": "image",
+        "page": "image",
+        "input": {"file": True, "folder": True, "drag_drop": True},
+        "output_strategy": {"supported": True, "force_result_folder": True},
+        "parallel": {
+            "mode": "safe",
+            "hint": "图片格式转换/压缩/逐张转 PDF 可并行处理；多图合并 PDF 会自动切到稳定流程。",
+            "detail": {
+                "merge_pdf": ("forced_single", "多图合并 PDF 需要保持图片顺序，已强制单线程。"),
+            },
+        },
+        "preview_modes": {
+            "to_pdf": "图片转 PDF",
+            "merge_pdf": "多图合并 PDF",
+        },
+        "risk_flags": ("delete_source",),
+    },
+    "meta": {
+        "label": "属性隐私",
+        "icon": "lock",
+        "page": "meta",
+        "input": {"file": True, "folder": True, "drag_drop": True},
+        "output_strategy": {"supported": False, "force_result_folder": False},
+        "parallel": {
+            "mode": "safe",
+            "hint": "普通文件时间修改可并行处理；Office 元数据会自动切到稳定流程。",
+            "detail": {
+                "office": ("forced_single", "Office 元数据修改依赖 COM，已强制单线程。"),
+                "pdf": ("forced_single", "PDF 元数据写入保持单线程，避免同名输出冲突。"),
+            },
+        },
+        "preview_modes": {},
+    },
+    "file": {
+        "label": "文件管家",
+        "icon": "folder",
+        "page": "file",
+        "input": {"file": True, "folder": True, "drag_drop": True},
+        "output_strategy": {"supported": False, "force_result_folder": False},
+        "parallel": {
+            "mode": "safe",
+            "hint": "文件重命名可并行处理；文件去重会自动切到稳定流程。",
+            "detail": {
+                "dedup": ("forced_single", "文件去重需要全局哈希比对，已强制单线程。"),
+            },
+        },
+        "preview_modes": {
+            "rename": "批量重命名",
+            "dedup": "重复文件清理",
+        },
+        "risk_flags": ("dedup_delete",),
+    },
 }
+QUEUE_TASK_LABELS = {task_type: spec.get("label", task_type) for task_type, spec in FEATURE_REGISTRY.items()}
+
+
+def _get_feature_spec(task_type):
+    return FEATURE_REGISTRY.get(str(task_type or ""), {})
+
+
+def _get_feature_label(task_type, fallback="未知功能"):
+    task_key = str(task_type or "")
+    spec = _get_feature_spec(task_key)
+    return spec.get("label") or task_key or fallback
+
+
+def _get_feature_preview_mode_label(task_type, mode_value="", fallback=""):
+    spec = _get_feature_spec(task_type)
+    modes = spec.get("preview_modes") if isinstance(spec.get("preview_modes"), dict) else {}
+    mode_key = str(mode_value or "")
+    return modes.get(mode_key) or modes.get("default") or fallback or mode_key
+
+
+def _feature_supports_output_strategy(task_type):
+    output = _get_feature_spec(task_type).get("output_strategy") or {}
+    return bool(output.get("supported"))
+
+
+def _feature_forces_result_folder(task_type):
+    output = _get_feature_spec(task_type).get("output_strategy") or {}
+    return bool(output.get("force_result_folder"))
+
+
+def _build_parallel_sets_from_registry():
+    safe_tasks = set()
+    forced_tasks = set()
+    forced_details = {}
+    supported_hints = {}
+    for task_type, spec in FEATURE_REGISTRY.items():
+        parallel = spec.get("parallel") if isinstance(spec.get("parallel"), dict) else {}
+        mode = parallel.get("mode", "")
+        if mode == "safe":
+            safe_tasks.add(task_type)
+            if parallel.get("hint"):
+                supported_hints[task_type] = parallel.get("hint")
+        elif mode == "forced_single":
+            forced_tasks.add(task_type)
+
+        details = parallel.get("detail") if isinstance(parallel.get("detail"), dict) else {}
+        for detail_key, detail_value in details.items():
+            detail_mode = mode
+            detail_message = detail_value
+            if isinstance(detail_value, (tuple, list)) and len(detail_value) >= 2:
+                detail_mode, detail_message = detail_value[0], detail_value[1]
+            if detail_mode == "forced_single":
+                forced_details[(task_type, str(detail_key or ""))] = str(detail_message or "当前功能使用专用流程。")
+    return safe_tasks, forced_tasks, forced_details, supported_hints
+
+
+def _get_feature_registry_errors():
+    errors = []
+    for task_type, spec in FEATURE_REGISTRY.items():
+        if not spec.get("label"):
+            errors.append(f"{task_type}:missing_label")
+        if not isinstance(spec.get("input"), dict):
+            errors.append(f"{task_type}:missing_input")
+        if not isinstance(spec.get("output_strategy"), dict):
+            errors.append(f"{task_type}:missing_output_strategy")
+        if not isinstance(spec.get("parallel"), dict):
+            errors.append(f"{task_type}:missing_parallel")
+        if not isinstance(spec.get("preview_modes"), dict):
+            errors.append(f"{task_type}:missing_preview_modes")
+    return errors
+
+
+OUTPUT_STRATEGY_SUPPORTED_TASKS = {
+    task_type for task_type in FEATURE_REGISTRY if _feature_supports_output_strategy(task_type)
+}
+OUTPUT_STRATEGY_FORCE_RESULT_FOLDER_TASKS = {
+    task_type for task_type in FEATURE_REGISTRY if _feature_forces_result_folder(task_type)
+}
+(
+    PARALLEL_SAFE_TASKS,
+    PARALLEL_FORCED_SINGLE_TASKS,
+    PARALLEL_FORCED_SINGLE_DETAILS,
+    PARALLEL_SUPPORTED_HINTS,
+) = _build_parallel_sets_from_registry()
 QUEUE_STATUS_LABELS = {
     "queued": "等待",
     "running": "执行中",
@@ -437,29 +727,63 @@ def _debug(message):
         pass
 
 
-def _wrap_callable(owner, name, label=None):
+_FX_PERFORMANCE_RECORDER = None
+
+
+def _get_user_pref_root():
+    local_app_data = (os.environ.get("LOCALAPPDATA") or "").strip()
+    if local_app_data:
+        return Path(local_app_data) / "FengxiToolbox"
     try:
-        original = getattr(owner, name)
+        return Path.home() / ".fengxi_toolbox"
     except Exception:
-        return
-    if not callable(original):
-        return
-    if getattr(original, "__fx_wrapped__", False):
-        return
+        return Path(__file__).resolve().parent
 
-    def wrapped(*args, **kwargs):
-        tag = label or name
-        _debug(f"{tag}:start")
-        try:
-            result = original(*args, **kwargs)
-            _debug(f"{tag}:done")
-            return result
-        except Exception as exc:
-            _debug(f"{tag}:error:{exc}")
-            raise
 
-    wrapped.__fx_wrapped__ = True
-    setattr(owner, name, wrapped)
+def _get_performance_log_file():
+    return _get_user_pref_root() / "performance.jsonl"
+
+
+def _get_performance_recorder():
+    global _FX_PERFORMANCE_RECORDER
+    if _FX_PERFORMANCE_RECORDER is None:
+        _FX_PERFORMANCE_RECORDER = FxPerformanceRecorder(
+            _get_performance_log_file(),
+            app_version=APP_RELEASE_VERSION,
+        )
+    return _FX_PERFORMANCE_RECORDER
+
+
+def _record_performance(event, started_at=None, task_name="", details=None):
+    try:
+        return _get_performance_recorder().record(
+            event,
+            started_at=started_at,
+            task_name=task_name,
+            details=details,
+        )
+    except Exception as exc:
+        _debug(f"performance:record_error:{event}:{exc}")
+        return {}
+
+
+def _load_recent_performance_entries(limit=60):
+    try:
+        entries = load_performance_entries(_get_performance_log_file())
+    except Exception as exc:
+        _debug(f"performance:load_error:{exc}")
+        return []
+    try:
+        limit = int(limit)
+    except Exception:
+        limit = 60
+    if limit <= 0:
+        return entries
+    return entries[-limit:]
+
+
+def _wrap_callable(owner, name, label=None):
+    return wrap_callable(owner, name, label=label, debug=_debug)
 
 
 def _draw_sidebar_icon(draw, kind, color, size=22, stroke=2):
@@ -2292,23 +2616,34 @@ def _tighten_layout(app, task_name=None):
 
 
 def _load_runtime_namespace():
+    started_at = time.perf_counter()
     _debug("load_runtime:start")
     if not RUNTIME_BIN.exists():
         _debug(f"load_runtime:missing:{RUNTIME_BIN}")
         raise FileNotFoundError(f"Missing runtime payload: {RUNTIME_BIN}")
-    code = marshal.loads(RUNTIME_BIN.read_bytes())
-    namespace = {
-        "__name__": "fengxi_embedded_runtime",
-        "__file__": __file__,
-        "__package__": None,
-    }
-    lazy_import_state = _install_runtime_lazy_imports()
     try:
-        exec(code, namespace)
-    finally:
-        _restore_runtime_lazy_imports(lazy_import_state)
-    _debug("load_runtime:done")
-    return namespace
+        code = marshal.loads(RUNTIME_BIN.read_bytes())
+        namespace = {
+            "__name__": "fengxi_embedded_runtime",
+            "__file__": __file__,
+            "__package__": None,
+        }
+        lazy_import_state = _install_runtime_lazy_imports()
+        try:
+            exec(code, namespace)
+        finally:
+            _restore_runtime_lazy_imports(lazy_import_state)
+    except Exception:
+        _record_performance("runtime_load", started_at=started_at, details={"status": "error"})
+        raise
+    else:
+        _record_performance(
+            "runtime_load",
+            started_at=started_at,
+            details={"status": "success", "namespace_size": len(namespace)},
+        )
+        _debug("load_runtime:done")
+        return namespace
 
 
 def _locate_ffmpeg():
@@ -2371,6 +2706,65 @@ for _key, _value in _ns.items():
         continue
     globals()[_key] = _value
 _debug("bootstrap:globals_loaded")
+
+
+def create_watermark_packet(content, font_name, font_size, opacity, angle):
+    return _watermark_core_create_watermark_packet(
+        content,
+        font_name,
+        font_size,
+        opacity,
+        angle,
+        font_path_resolver=get_font_path_by_name,
+    )
+
+
+def add_watermark_to_pdf(src, dst, watermark_packet, page_range="all", check_text=None, force_mode=False):
+    return _watermark_core_add_watermark_to_pdf(
+        src,
+        dst,
+        watermark_packet,
+        page_range=page_range,
+        check_text=check_text,
+        force_mode=force_mode,
+    )
+
+
+def add_watermark_to_word(
+    word_app,
+    src,
+    dst,
+    text,
+    raw_font_name,
+    font_size,
+    opacity,
+    angle,
+    page_range="all",
+    force_mode=False,
+):
+    return _watermark_core_add_watermark_to_word(
+        word_app,
+        src,
+        dst,
+        text,
+        raw_font_name,
+        font_size,
+        opacity,
+        angle,
+        page_range=page_range,
+        force_mode=force_mode,
+        word_font_resolver=get_word_compatible_font_name,
+        com_context_factory=_DisableWin32ComGenCache,
+    )
+
+
+globals()["create_watermark_packet"] = create_watermark_packet
+globals()["add_watermark_to_pdf"] = add_watermark_to_pdf
+globals()["add_watermark_to_word"] = add_watermark_to_word
+_ns["create_watermark_packet"] = create_watermark_packet
+_ns["add_watermark_to_pdf"] = add_watermark_to_pdf
+_ns["add_watermark_to_word"] = add_watermark_to_word
+_debug("bootstrap:watermark_core_wrapped")
 
 
 def _patch_task_routing():
@@ -2517,50 +2911,7 @@ _patch_drag_drop_input_support()
 
 
 def _run_single_file_zip_via_staging(app, input_file, original_run_process):
-    source_file = Path(input_file)
-    staging_root = Path(tempfile.mkdtemp(prefix="fx_single_zip_"))
-    staging_dir = staging_root / source_file.name
-    staging_dir.mkdir(parents=True, exist_ok=True)
-    staged_file = staging_dir / source_file.name
-    shutil.copy2(source_file, staged_file)
-    moved_outputs = []
-    try:
-        try:
-            app.log(f"📦 [单文件模式] 正在准备压缩: {source_file.name}")
-        except Exception:
-            pass
-        original_run_process(app, str(staging_dir), "zip")
-        for produced_zip in staging_dir.glob("*.zip"):
-            target_zip = source_file.parent / produced_zip.name
-            if target_zip.exists():
-                try:
-                    target_zip.unlink()
-                except Exception:
-                    pass
-            shutil.move(str(produced_zip), str(target_zip))
-            moved_outputs.append(target_zip)
-            result = _get_last_task_result(app)
-            _add_task_result_output(result, target_zip)
-        for target_zip in moved_outputs:
-            try:
-                app.log(f"✅ [单文件压缩] 已输出: {target_zip.name}")
-            except Exception:
-                pass
-        result = _get_last_task_result(app)
-        if result is not None:
-            _set_task_result_output_strategy(result, "zip", _get_task_output_strategy(app, "zip"))
-            _set_task_result_output_root(result, source_file.parent)
-            _set_task_result_counts(result, processed=1, success=1 if moved_outputs else 0, failed=0 if moved_outputs else 1)
-            if moved_outputs:
-                _set_task_result_finished(
-                    result,
-                    "success",
-                    message="单文件压缩完成",
-                    detail=f"已生成 {len(moved_outputs)} 个压缩包",
-                )
-    finally:
-        shutil.rmtree(staging_root, ignore_errors=True)
-    return moved_outputs
+    return _run_zip_task_with_core(app, input_file)
 
 
 def _patch_single_input_support():
@@ -2674,6 +3025,168 @@ def _patch_single_input_support():
 
 
 _patch_single_input_support()
+
+
+def _patch_file_manager_core():
+    try:
+        original_process_single = FengxiToolboxApp.process_single_file
+    except Exception as exc:
+        _debug(f"patch_file_manager_core:missing:{exc}")
+        return
+
+    if getattr(original_process_single, "__fx_file_manager_core_patch__", False):
+        return
+
+    def patched_process_single_file(self, src, input_folder, output_folder, task_type, args, failed_list):
+        if task_type == "file":
+            values = list(args or [])
+            mode = str(values[0] if values else "").strip().lower()
+            if mode == "rename":
+                try:
+                    _file_core_apply_rename_to_file(
+                        src,
+                        input_folder,
+                        output_folder,
+                        args,
+                        copy_file_safe=copy_file_safe,
+                        log=getattr(self, "log", None),
+                    )
+                    return None
+                except Exception as exc:
+                    try:
+                        failed_list.append(f"{src}: {exc}")
+                    except Exception:
+                        pass
+                    return None
+        return original_process_single(self, src, input_folder, output_folder, task_type, args, failed_list)
+
+    patched_process_single_file.__fx_file_manager_core_patch__ = True
+    FengxiToolboxApp.process_single_file = patched_process_single_file
+    _debug("patch_file_manager_core:installed")
+
+
+_patch_file_manager_core()
+
+
+def _run_file_dedup_task(app, input_folder):
+    normalized_input = _normalize_input_path_value(input_folder)
+    result = _get_last_task_result(app)
+    if result is None:
+        result = _start_task_result(app, normalized_input, "file")
+    _set_task_result_output_strategy(result, "file", _get_task_output_strategy(app, "file"))
+    _set_task_result_output_root(result, normalized_input)
+
+    all_files = []
+    try:
+        all_files = list(app.collect_input_files(normalized_input, "file"))
+    except Exception:
+        if normalized_input and os.path.isfile(normalized_input):
+            all_files = [normalized_input]
+
+    if not all_files:
+        app.log("⚠️ 未找到可去重的文件。")
+        _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=1)
+        _set_task_result_finished(result, "skipped", message="未找到可去重的文件", detail="未找到可去重的文件", skipped=True)
+        return
+
+    tracker = _get_active_progress_tracker(app)
+    progress_bar = getattr(app, "progress_bar", None)
+    progress_status = {"completed": 0, "total": len(all_files)}
+
+    def report_progress(*, completed=0, total=1, current_path="", stage="hashing", fraction=0.0):
+        progress_status["completed"] = int(completed or 0)
+        progress_status["total"] = max(1, int(total or 1))
+        current_name = os.path.basename(str(current_path or "").rstrip("\\/")) or str(current_path or "")
+        stage_label = "正在比对" if stage == "hashing" else ("已完成" if stage == "done" else str(stage or "处理中"))
+        if tracker is not None:
+            try:
+                tracker.total_units = max(1, int(total or tracker.total_units or 1))
+            except Exception:
+                pass
+            tracker.set_current_item(current_name, f"文件去重 · {stage_label}")
+            if stage == "done":
+                tracker.complete_units(1, f"文件去重 · {stage_label}")
+            return
+        try:
+            if progress_bar is not None:
+                progress_bar.set(_clamp_progress_value(fraction))
+        except Exception:
+            pass
+        try:
+            _set_progress_status(
+                app,
+                current_file=current_name,
+                stage=f"文件去重 · {stage_label}",
+                fraction=_clamp_progress_value(fraction),
+                completed=int(completed or 0),
+                total=max(1, int(total or 1)),
+            )
+        except Exception:
+            pass
+
+    def log_message(message):
+        try:
+            app.log(str(message))
+        except Exception:
+            pass
+
+    try:
+        dedup_result = _file_core_run_file_dedup_task(
+            all_files,
+            delete_file=os.remove,
+            log=log_message,
+            stop_requested=lambda: bool(getattr(app, "stop_event", False)),
+            progress=report_progress,
+        )
+    except Exception as exc:
+        failed_items = list(all_files)
+        result["failed_items"] = failed_items
+        _set_task_result_counts(result, processed=len(all_files), success=0, failed=len(failed_items), skipped=0)
+        _set_task_result_finished(result, "failed", message=str(exc), detail=str(exc), error=str(exc))
+        raise
+
+    kept = list(dedup_result.get("kept") or [])
+    removed = list(dedup_result.get("removed") or [])
+    failed_items = list(dedup_result.get("failed_items") or [])
+    result["failed_items"] = failed_items
+    for path in kept:
+        _add_task_result_output(result, path)
+    _set_task_result_output_root(result, os.path.dirname(kept[0]) if kept else normalized_input)
+    _set_task_result_counts(
+        result,
+        processed=int(dedup_result.get("processed_count") or len(all_files)),
+        success=int(dedup_result.get("kept_count") or len(kept)),
+        failed=int(dedup_result.get("failed_count") or len(failed_items)),
+        skipped=0,
+    )
+
+    status = str(dedup_result.get("status") or "unknown")
+    if status == "success":
+        log_message(f"✅ [文件去重] 完成，保留 {len(kept)} 个文件，删除 {len(removed)} 个重复文件。")
+        _set_task_result_finished(
+            result,
+            "success",
+            message=f"文件去重已完成，删除 {len(removed)} 个重复文件",
+            detail=f"保留 {len(kept)} 个文件，删除 {len(removed)} 个重复文件",
+        )
+    elif status == "stopped":
+        log_message("⏹️ [文件去重] 已停止。")
+        _set_task_result_finished(
+            result,
+            "stopped",
+            message="用户停止文件去重任务",
+            detail="用户停止文件去重任务",
+            stopped=True,
+        )
+    else:
+        log_message(f"❌ [文件去重] 完成但存在失败：{len(failed_items)} 项。")
+        _set_task_result_finished(
+            result,
+            "failed",
+            message=f"文件去重任务结束，但有 {len(failed_items)} 个文件处理失败。",
+            detail=f"失败 {len(failed_items)} 个文件",
+            error=f"失败 {len(failed_items)} 个文件",
+        )
 
 
 def _safe_float(value, default=0.0):
@@ -3715,20 +4228,10 @@ def _count_zip_progress_units(input_value, mode):
     normalized = _normalize_input_path_value(input_value)
     if not normalized:
         return 0
-    if os.path.isfile(normalized):
-        return 1
-
-    if mode != "smart_recursive":
-        total_files = 0
-        for _, _, files in os.walk(normalized):
-            total_files += len(files)
-        return total_files
-
-    total_items = 0
-    for _, dirs, files in os.walk(normalized):
-        total_items += len(files)
-        total_items += len(dirs)
-    return total_items
+    try:
+        return estimate_zip_progress_units(normalized, normalize_zip_mode(mode))
+    except Exception:
+        return 1 if os.path.exists(normalized) else 0
 
 
 def _estimate_progress_total_units(app, input_value, task_type):
@@ -3969,6 +4472,131 @@ def _install_run_progress_tracker(app, input_value, task_type, runtime_run_proce
 
     tracker.restore = restore
     return tracker
+
+
+def _get_zip_mode(app):
+    mode = ""
+    mode_var = getattr(app, "zip_mode_var", None)
+    if mode_var is not None:
+        try:
+            mode = mode_var.get()
+        except Exception:
+            mode = ""
+    return normalize_zip_mode(mode)
+
+
+def _run_zip_task_with_core(app, input_folder):
+    normalized_input = _normalize_input_path_value(input_folder)
+    mode = _get_zip_mode(app)
+    result = _get_last_task_result(app)
+    if result is None:
+        result = _start_task_result(app, normalized_input, "zip")
+    _set_task_result_output_strategy(result, "zip", _get_task_output_strategy(app, "zip"))
+
+    input_path = Path(normalized_input) if normalized_input else Path(".")
+    output_root = input_path.parent if input_path.is_file() else input_path
+    _set_task_result_output_root(result, output_root)
+
+    tracker = _get_active_progress_tracker(app)
+    progress_bar = getattr(app, "progress_bar", None)
+    last_completed = {"value": 0}
+    stage_labels = {
+        "preparing": "准备压缩",
+        "compressing": "正在压缩",
+        "done": "压缩完成",
+    }
+
+    def report_progress(completed=0, total=1, current_path="", stage="compressing", fraction=0.0):
+        stage_label = stage_labels.get(str(stage or ""), str(stage or "正在压缩"))
+        current_name = os.path.basename(str(current_path or "").rstrip("\\/")) or str(current_path or "")
+        if tracker is not None:
+            try:
+                tracker.total_units = max(1, int(total or tracker.total_units or 1))
+            except Exception:
+                pass
+            if stage == "done":
+                delta = max(0, int(completed or 0) - int(last_completed.get("value") or 0))
+                if current_name:
+                    tracker.set_current_item(current_name, stage_label)
+                if delta > 0:
+                    tracker.complete_units(delta, stage_label)
+                    last_completed["value"] = int(completed or 0)
+            else:
+                tracker.set_current_item(current_name, stage_label)
+            return
+
+        try:
+            if progress_bar is not None:
+                progress_bar.set(_clamp_progress_value(fraction))
+        except Exception:
+            pass
+        try:
+            _set_progress_status(
+                app,
+                current_file=current_name,
+                stage=stage_label,
+                fraction=_clamp_progress_value(fraction),
+                completed=int(completed or 0),
+                total=max(1, int(total or 1)),
+            )
+        except Exception:
+            pass
+
+    def log_message(message):
+        try:
+            app.log(str(message))
+        except Exception:
+            pass
+
+    try:
+        log_message(f"[ZIP] mode={mode} input={normalized_input}")
+        core_result = _zip_core_run_zip_task(
+            normalized_input,
+            mode,
+            progress=report_progress,
+            stop_requested=lambda: bool(getattr(app, "stop_event", False)),
+            log=log_message,
+        )
+    except Exception as exc:
+        _set_task_result_counts(result, processed=0, success=0, failed=1, skipped=0)
+        result["failed_items"] = [normalized_input]
+        _set_task_result_finished(result, "failed", message=str(exc), detail=str(exc), error=str(exc))
+        raise
+
+    outputs = list(core_result.get("outputs") or [])
+    for output in outputs:
+        _add_task_result_output(result, output)
+    failed_items = list(core_result.get("failed_items") or [])
+    result["failed_items"] = failed_items
+    _set_task_result_counts(
+        result,
+        processed=core_result.get("processed_count", len(outputs) + len(failed_items)),
+        success=core_result.get("success_count", len(outputs)),
+        failed=core_result.get("failed_count", len(failed_items)),
+        skipped=core_result.get("skipped_count", 0),
+    )
+
+    status = str(core_result.get("status") or "unknown")
+    message = str(core_result.get("message") or "")
+    if status == "success":
+        log_message(f"[ZIP] completed: {len(outputs)} archive(s)")
+        _set_task_result_finished(result, "success", message=message or "ZIP completed", detail=message or "ZIP completed")
+    elif status == "stopped":
+        log_message("[ZIP] stopped")
+        _set_task_result_finished(result, "stopped", message=message or "ZIP stopped", detail=message or "ZIP stopped", stopped=True)
+    elif status == "skipped":
+        log_message("[ZIP] skipped")
+        _set_task_result_finished(result, "skipped", message=message or "ZIP skipped", detail=message or "ZIP skipped", skipped=True)
+    else:
+        log_message(f"[ZIP] failed: {message}")
+        _set_task_result_finished(
+            result,
+            "failed",
+            message=message or "ZIP failed",
+            detail=message or "ZIP failed",
+            error=message or "ZIP failed",
+        )
+    return outputs
 
 
 def _run_remove_wm_pdf_roundtrip(app, pdf_files, input_folder, output_folder, mode=None):
@@ -4329,12 +4957,16 @@ def _run_remove_wm_task(app, input_folder, original_run_process):
 
 def _run_pdf_ocr_task(app, input_folder):
     from tools.fx_pdf_ocr import (
-        FengxiPdfOcrEngine,
         default_model_root,
         get_default_backend_key,
         get_default_profile_key,
+        get_default_preprocess_key,
         resolve_model_root,
-        write_pdf_ocr_comparison_report,
+    )
+    from tools.fx_pdf_ocr_task import (
+        PdfOcrTaskCallbacks,
+        PdfOcrTaskOptions,
+        run_pdf_ocr_task_core,
     )
 
     normalized_input, input_root, output_folder, resolved_strategy = _resolve_output_root_for_task(
@@ -4390,106 +5022,112 @@ def _run_pdf_ocr_task(app, input_folder):
     if getattr(app, "pdf_ocr_compare_report", None) is not None:
         compare_report = bool(app.pdf_ocr_compare_report.get())
 
+    preprocess_display = ""
+    if getattr(app, "pdf_ocr_preprocess", None) is not None:
+        preprocess_display = app.pdf_ocr_preprocess.get().strip()
+    preprocess_map = getattr(app, "_fx_pdf_ocr_preprocess_map", {})
+    preprocess_mode = preprocess_map.get(preprocess_display, get_default_preprocess_key())
+
     password = ""
     if getattr(app, "pdf_pwd_entry", None) is not None:
         password = app.pdf_pwd_entry.get().strip()
 
-    failed_list = []
-    engine = FengxiPdfOcrEngine(
+    cpu_threads = max(1, min(os.cpu_count() or 4, 8))
+    options = PdfOcrTaskOptions(
         model_root=resolved_model_root,
         profile_key=language_config,
         backend_key=backend_key,
+        extraction_mode=extraction_mode,
         cls=use_cls,
+        compare_report=compare_report,
+        password=password,
         limit_side_len=2880,
-        cpu_threads=max(1, min(os.cpu_count() or 4, 8)),
-    )
-    app.log(f"🛡️ [安全模式] OCR 搜索版 PDF 使用单线程稳定处理，共 {len(pdf_files)} 个文件...")
-    app.log(f"🤖 [OCR] 风兮模型目录：{resolved_model_root}")
-    app.log(f"🧩 [OCR] 后端：{engine.backend_key}{' (自动选择)' if backend_key == 'auto' else ''}")
-    app.log(
-        f"🧠 [OCR] 模型：{language_config} | 模式：{extraction_mode} | 方向纠正：{'开' if use_cls else '关'}"
-        f" | 对比报告：{'开' if compare_report else '关'}"
+        cpu_threads=cpu_threads,
+        preprocess_mode=preprocess_mode,
+        layered=True,
     )
     tracker = _get_active_progress_tracker(app)
-    success_count = 0
-    try:
-        total = len(pdf_files)
-        for index, src in enumerate(pdf_files):
-            if app.stop_event:
-                app.log("⏹️ [停止] OCR 任务已被用户中止")
-                break
-            rel = os.path.relpath(src, input_root)
-            dst = os.path.join(output_folder, rel)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            app.log(f"🔎 [OCR] 正在处理：{os.path.basename(src)}")
-            if tracker is not None:
-                tracker.set_current_item(src, "OCR 准备")
-                tracker.set_current_item_fraction(0.02, stage="OCR 准备", current_file=src)
-            should_count_completion = True
-            try:
-                if compare_report:
-                    report_dir = os.path.join(output_folder, "_ocr_compare_reports")
-                    report_name = f"{Path(src).stem}.ocr_compare.md"
-                    report_result = write_pdf_ocr_comparison_report(
-                        src=src,
-                        report_path=os.path.join(report_dir, report_name),
-                        profile_key=language_config,
-                        model_root=resolved_model_root,
-                        cls=use_cls,
-                        password=password,
-                        page_index=0,
-                        cpu_threads=max(1, min(os.cpu_count() or 4, 8)),
-                        limit_side_len=2880,
-                    )
-                    app.log(f"🧪 [OCR] 已生成后端对比报告：{report_result['report_path']}")
-                    if tracker is not None:
-                        tracker.set_current_item_fraction(0.08, stage="后端对比报告", current_file=src)
+    total = len(pdf_files)
 
-                def _page_progress(page_done, total_pages):
-                    if total_pages <= 0:
-                        return
-                    overall_fraction = page_done / total_pages
-                    if tracker is not None:
-                        tracker.set_current_item_fraction(
-                            overall_fraction,
-                            stage=f"OCR 第 {page_done}/{total_pages} 页",
-                            current_file=src,
-                        )
-                    else:
-                        app.progress_bar.set((index + overall_fraction) / total)
+    def _on_engine_ready(engine_backend_key):
+        app.log(f"🛡️ [安全模式] OCR 搜索版 PDF 使用单线程稳定处理，共 {total} 个文件...")
+        app.log(f"🤖 [OCR] 风兮模型目录：{resolved_model_root}")
+        app.log(f"🧩 [OCR] 后端：{engine_backend_key}{' (自动选择)' if backend_key == 'auto' else ''}")
+        app.log(
+            f"🧠 [OCR] 模型：{language_config} | 模式：{extraction_mode} | 图像增强：{preprocess_mode} | 方向纠正：{'开' if use_cls else '关'}"
+            f" | 对比报告：{'开' if compare_report else '关'}"
+        )
 
-                engine.ocr_pdf_to_searchable_pdf(
-                    src,
-                    dst,
-                    extraction_mode=extraction_mode,
-                    password=password,
-                    layered=True,
-                    progress_callback=_page_progress,
-                    stop_checker=lambda: app.stop_event,
-                )
-            except KeyboardInterrupt:
-                should_count_completion = False
-                app.log("⏹️ [停止] OCR 任务已被用户中止")
-                break
-            except Exception as exc:
-                failed_list.append(rel)
-                try:
-                    shutil.copy2(src, dst)
-                except Exception:
-                    pass
-                app.log(f"❌ [失败] OCR 错误: {os.path.basename(src)}: {exc}")
-            else:
-                success_count += 1
-                _add_task_result_output(result, dst)
-                app.log(f"✅ [OCR] 已生成可搜索 PDF：{os.path.basename(src)}")
-            finally:
-                if should_count_completion:
-                    if tracker is not None:
-                        tracker.complete_units(1)
-                    else:
-                        app.progress_bar.set((index + 1) / total)
-    finally:
-        engine.close()
+    def _on_file_started(src, _dst, _index, _total):
+        app.log(f"🔎 [OCR] 正在处理：{os.path.basename(src)}")
+        if tracker is not None:
+            tracker.set_current_item(src, "OCR 准备")
+            tracker.set_current_item_fraction(0.02, stage="OCR 准备", current_file=src)
+
+    def _mark_compare_stage(src):
+        if tracker is not None:
+            tracker.set_current_item_fraction(0.08, stage="后端对比报告", current_file=src)
+
+    def _on_compare_report(src, _report_path, report_result):
+        app.log(f"🧪 [OCR] 已生成后端对比报告：{report_result['report_path']}")
+        _mark_compare_stage(src)
+
+    def _on_compare_report_failed(src, report_exc):
+        app.log(f"⚠️ [OCR] 后端对比报告生成失败，已跳过：{report_exc}")
+        _mark_compare_stage(src)
+
+    def _on_page_progress(src, index, total_count, page_done, total_pages):
+        if total_pages <= 0:
+            return
+        overall_fraction = page_done / total_pages
+        if tracker is not None:
+            tracker.set_current_item_fraction(
+                overall_fraction,
+                stage=f"OCR 第 {page_done}/{total_pages} 页",
+                current_file=src,
+            )
+        else:
+            app.progress_bar.set((index + overall_fraction) / total_count)
+
+    def _on_file_finished(src, dst, ocr_result):
+        _add_task_result_output(result, dst)
+        usage_text = ", ".join(f"{key}:{value}" for key, value in sorted((ocr_result.get("backend_usage") or {}).items()))
+        if usage_text:
+            app.log(f"🧭 [OCR] 实际后端使用：{usage_text}")
+        app.log(f"✅ [OCR] 已生成可搜索 PDF：{os.path.basename(src)}")
+
+    def _on_file_failed(src, _dst, _rel, exc):
+        app.log(f"❌ [失败] OCR 错误: {os.path.basename(src)}: {exc}")
+
+    def _on_file_completed(_src, _dst, index, total_count):
+        if tracker is not None:
+            tracker.complete_units(1)
+        else:
+            app.progress_bar.set((index + 1) / total_count)
+
+    core_result = run_pdf_ocr_task_core(
+        pdf_files,
+        input_root,
+        output_folder,
+        options,
+        PdfOcrTaskCallbacks(
+            log=app.log,
+            stop_requested=lambda: app.stop_event,
+            on_engine_ready=_on_engine_ready,
+            on_file_started=_on_file_started,
+            on_page_progress=_on_page_progress,
+            on_file_finished=_on_file_finished,
+            on_file_failed=_on_file_failed,
+            on_file_completed=_on_file_completed,
+            on_compare_report=_on_compare_report,
+            on_compare_report_failed=_on_compare_report_failed,
+        ),
+    )
+    if core_result.get("stopped"):
+        app.log("⏹️ [停止] OCR 任务已被用户中止")
+    failed_list = list(core_result.get("failed_items") or [])
+    success_count = int(core_result.get("success_count") or 0)
+    processed_count = int(core_result.get("processed_count") or 0)
 
     if failed_list:
         result["failed_items"] = list(failed_list)
@@ -4520,7 +5158,7 @@ def _run_pdf_ocr_task(app, input_folder):
             detail=f"成功处理 {success_count} 个文件",
         )
     else:
-        _set_task_result_counts(result, processed=success_count + len(failed_list), success=success_count, failed=len(failed_list), skipped=0)
+        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=len(failed_list), skipped=0)
         _set_task_result_finished(result, "stopped", message="用户停止 OCR 任务", detail="用户停止 OCR 任务", stopped=True)
 
 
@@ -4556,20 +5194,6 @@ def _reserve_unique_output_path(src, output_folder, builder, reserved):
     return str(target)
 
 
-PDF_COMPRESS_LEVELS = {
-    "轻度": {"garbage": 2, "clean": False, "deflate": True, "use_objstms": False, "compression_effort": 1},
-    "标准": {"garbage": 3, "clean": True, "deflate": True, "use_objstms": True, "compression_effort": 6},
-    "强力": {"garbage": 4, "clean": True, "deflate": True, "use_objstms": True, "compression_effort": 9},
-}
-
-PDF_IMAGE_COMPRESS_LEVELS = {
-    "保留原图": {"enabled": False, "quality": 95, "max_side": None},
-    "轻度": {"enabled": True, "quality": 85, "max_side": 2400},
-    "标准": {"enabled": True, "quality": 70, "max_side": 1800},
-    "强力": {"enabled": True, "quality": 55, "max_side": 1200},
-}
-
-
 def _get_pdf_compress_profile(app):
     level_var = getattr(app, "pdf_compress_level_var", None)
     image_var = getattr(app, "pdf_image_compress_level_var", None)
@@ -4588,97 +5212,11 @@ def _get_pdf_compress_profile(app):
 
 
 def _build_pdf_compress_output_path(src, output_folder):
-    source = Path(src)
-    target_dir = Path(output_folder)
-    target = target_dir / f"{source.stem}_压缩{source.suffix}"
-    counter = 2
-    while target.exists():
-        target = target_dir / f"{source.stem}_压缩_{counter}{source.suffix}"
-        counter += 1
-    return str(target)
-
-
-def _jpeg_bytes_from_pixmap(pixmap, quality, max_side):
-    from PIL import Image
-
-    if pixmap.alpha:
-        pixmap = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
-    else:
-        mode = "RGB" if pixmap.n < 4 else "CMYK"
-        pixmap = Image.frombytes(mode, (pixmap.width, pixmap.height), pixmap.samples)
-        if pixmap.mode != "RGB":
-            pixmap = pixmap.convert("RGB")
-
-    if max_side and max(pixmap.size) > max_side:
-        pixmap.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
-
-    buffer = io.BytesIO()
-    pixmap.save(buffer, format="JPEG", quality=int(quality), optimize=True)
-    return buffer.getvalue()
-
-
-def _compress_pdf_images(doc, image_profile):
-    import fitz
-
-    if not image_profile.get("enabled"):
-        return 0
-
-    seen_xrefs = set()
-    changed = 0
-    quality = image_profile.get("quality", 70)
-    max_side = image_profile.get("max_side")
-    for page in doc:
-        for image_info in page.get_images(full=True):
-            xref = image_info[0]
-            if xref in seen_xrefs:
-                continue
-            seen_xrefs.add(xref)
-            try:
-                original = doc.extract_image(xref)
-                original_bytes = original.get("image", b"")
-                if not original_bytes:
-                    continue
-                pixmap = fitz.Pixmap(doc, xref)
-                if pixmap.width < 96 or pixmap.height < 96:
-                    continue
-                jpeg_bytes = _jpeg_bytes_from_pixmap(pixmap, quality, max_side)
-                if len(jpeg_bytes) >= len(original_bytes) * 0.98:
-                    continue
-                page.replace_image(xref, stream=jpeg_bytes)
-                changed += 1
-            except Exception as exc:
-                _debug(f"pdf_compress:image_skip:{xref}:{exc}")
-    return changed
+    return _pdf_compress_core_build_output_path(src, output_folder)
 
 
 def compress_pdf_file(src, dst, compress_level="标准", image_level="标准", password=""):
-    import fitz
-
-    pdf_profile = PDF_COMPRESS_LEVELS.get(compress_level, PDF_COMPRESS_LEVELS["标准"])
-    image_profile = PDF_IMAGE_COMPRESS_LEVELS.get(image_level, PDF_IMAGE_COMPRESS_LEVELS["标准"])
-    doc = fitz.open(src)
-    try:
-        if doc.is_encrypted:
-            if not password or not doc.authenticate(password):
-                return "ERROR:PDF 已加密，密码不正确或未提供密码。"
-
-        image_changes = _compress_pdf_images(doc, image_profile)
-        save_kwargs = {
-            "garbage": pdf_profile["garbage"],
-            "clean": pdf_profile["clean"],
-            "deflate": pdf_profile["deflate"],
-            "deflate_images": True,
-            "deflate_fonts": True,
-            "use_objstms": pdf_profile["use_objstms"],
-            "compression_effort": pdf_profile["compression_effort"],
-        }
-        doc.save(dst, **save_kwargs)
-    finally:
-        doc.close()
-
-    if not os.path.exists(dst) or os.path.getsize(dst) <= 0:
-        return "ERROR:压缩输出文件未生成。"
-    return f"SUCCESS:{image_changes}"
+    return _pdf_compress_core_compress_pdf_file(src, dst, compress_level, image_level, password=password)
 
 
 def _run_pdf_compress_task(app, input_folder):
@@ -4851,54 +5389,21 @@ def _run_pdf_compress_task(app, input_folder):
         _set_task_result_finished(result, "stopped", message="用户停止 PDF 压缩任务", detail="用户停止 PDF 压缩任务", stopped=True)
 
 
-IMAGE_TO_PDF_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
-
-
 def _collect_image_to_pdf_files(app, input_value):
     normalized_input = _normalize_input_path_value(input_value)
-    if not normalized_input:
-        return []
-    if os.path.isfile(normalized_input):
-        suffix = Path(normalized_input).suffix.lower()
-        return [normalized_input] if suffix in IMAGE_TO_PDF_EXTS else []
-
-    try:
-        files = app.collect_input_files(normalized_input, "image")
-    except Exception:
-        files = []
-    image_files = [path for path in files if Path(str(path)).suffix.lower() in IMAGE_TO_PDF_EXTS]
-    return sorted(image_files, key=lambda item: os.path.basename(str(item)).lower())
+    return _image_pdf_task_collect_files(
+        normalized_input,
+        collect_input_files=getattr(app, "collect_input_files", None),
+        valid_exts=IMAGE_TO_PDF_EXTS,
+    )
 
 
 def _build_image_pdf_output_path(src, output_folder):
-    source = Path(src)
-    candidate = Path(output_folder) / f"{source.stem}.pdf"
-    counter = 2
-    while candidate.exists():
-        candidate = Path(output_folder) / f"{source.stem}_{counter}.pdf"
-        counter += 1
-    return str(candidate)
+    return _image_pdf_task_build_output_path(src, output_folder)
 
 
 def _image_file_to_pdf(src, dst):
-    image = PILImage.open(src)
-    try:
-        if image.mode in {"RGBA", "LA"}:
-            background = PILImage.new("RGB", image.size, (255, 255, 255))
-            alpha = image.getchannel("A") if "A" in image.getbands() else None
-            background.paste(image.convert("RGBA"), mask=alpha)
-            image = background
-        elif image.mode != "RGB":
-            image = image.convert("RGB")
-        image.save(dst, "PDF", resolution=100.0)
-    finally:
-        try:
-            image.close()
-        except Exception:
-            pass
-    if not os.path.exists(dst) or os.path.getsize(dst) <= 0:
-        return "ERROR:PDF 输出文件未生成"
-    return "SUCCESS"
+    return _image_pdf_task_image_file_to_pdf(src, dst)
 
 
 def _get_image_pdf_mode(app):
@@ -4926,11 +5431,8 @@ def _run_image_to_pdf_task(app, input_folder, merge=False):
         _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=1)
         _set_task_result_finished(result, "skipped", message="未找到可转 PDF 的图片文件", detail="未找到可转 PDF 的图片文件", skipped=True)
         return
-    os.makedirs(output_folder, exist_ok=True)
 
     tracker = _get_active_progress_tracker(app)
-    failed_list = []
-    success_count = 0
     should_delete = False
     if getattr(app, "img_delete_var", None) is not None:
         try:
@@ -4938,107 +5440,71 @@ def _run_image_to_pdf_task(app, input_folder, merge=False):
         except Exception:
             should_delete = False
 
+    total = len(image_files)
     if merge:
-        output_name = f"{Path(input_root or normalized_input).name or 'images'}_图集合并.pdf"
-        dst = os.path.join(output_folder, output_name)
-        app.log(f"🧩 [多图合并PDF] 共 {len(image_files)} 张图片，正在合并...")
+        app.log(f"🧩 [多图合并PDF] 共 {total} 张图片，正在合并...")
+    else:
+        app.log(f"📄 [图片转PDF] 共 {total} 张图片，逐张生成 PDF...")
+
+    def _on_merge_started(dst, _total):
         if tracker is not None:
             tracker.set_current_item(dst, "多图合并 PDF")
-        status = merge_images_to_pdf(image_files, dst)
-        if status != "SUCCESS" or not os.path.exists(dst):
-            failed_list.append(f"{normalized_input}: {status}")
+
+    def _on_item_started(src, _dst, _index, _total):
+        if tracker is not None:
+            tracker.set_current_item(src, "图片转 PDF")
+        if _is_parallel_enabled(app) and not merge:
+            app.log(f"🖼️ [图片转PDF] 已加入并行处理：{os.path.basename(src)}")
+
+    def _on_item_finished(src, dst, item):
+        _add_task_result_output(result, dst)
+        if item.get("merge"):
+            app.log(f"✅ [多图合并PDF] 已输出：{os.path.basename(dst)}")
+        else:
+            app.log(f"✅ [图片转PDF] {os.path.basename(src)} -> {os.path.basename(dst)}")
+
+    def _on_item_failed(src, _dst, status):
+        if merge:
             app.log(f"❌ [失败] 多图合并 PDF: {status}")
         else:
-            success_count = len(image_files)
-            _add_task_result_output(result, dst)
-            app.log(f"✅ [多图合并PDF] 已输出：{os.path.basename(dst)}")
-            if should_delete:
-                for src in image_files:
-                    try:
-                        os.remove(src)
-                    except Exception as exc:
-                        failed_list.append(f"{src}: 删除源文件失败: {exc}")
+            app.log(f"❌ [失败] {os.path.basename(src)}: {status}")
+
+    completed_units = {"value": 0}
+
+    def _on_item_completed(units):
+        completed_units["value"] += int(units or 0)
         if tracker is not None:
-            tracker.complete_units(len(image_files))
+            tracker.complete_units(units)
         else:
-            app.progress_bar.set(1)
-    else:
-        total = len(image_files)
-        app.log(f"📄 [图片转PDF] 共 {total} 张图片，逐张生成 PDF...")
-        reserved_outputs = set()
-        jobs = [
-            (src, _reserve_unique_output_path(src, output_folder, _build_image_pdf_output_path, reserved_outputs))
-            for src in image_files
-        ]
+            app.progress_bar.set(min(1.0, completed_units["value"] / max(1, total)))
 
-        def process_one_image_pdf(job):
-            src, dst = job
-            status = _image_file_to_pdf(src, dst)
-            return {"src": src, "dst": dst, "ok": status == "SUCCESS", "status": status}
-
-        parallel_workers = _get_parallel_worker_count(total) if _is_parallel_enabled(app) else 1
-        if parallel_workers > 1:
-            app.log(f"🚀 [批量并行] 图片转 PDF 启用 {parallel_workers} 个线程。")
-            futures = {}
-            with concurrent.futures.ThreadPoolExecutor(max_workers=parallel_workers) as executor:
-                for job in jobs:
-                    if getattr(app, "stop_event", False):
-                        app.log("⏹️ [停止] 图片转 PDF 任务已被用户中止")
-                        break
-                    src, _dst = job
-                    if tracker is not None:
-                        tracker.set_current_item(src, "图片转 PDF")
-                    app.log(f"🖼️ [图片转PDF] 已加入并行处理：{os.path.basename(src)}")
-                    futures[executor.submit(process_one_image_pdf, job)] = job
-                for future in concurrent.futures.as_completed(futures):
-                    src, _dst = futures[future]
-                    try:
-                        item = future.result()
-                    except Exception as exc:
-                        item = {"src": src, "dst": _dst, "ok": False, "status": str(exc)}
-                    if not item.get("ok"):
-                        failed_list.append(f"{item.get('src', src)}: {item.get('status')}")
-                        app.log(f"❌ [失败] {os.path.basename(str(item.get('src', src)))}: {item.get('status')}")
-                    else:
-                        success_count += 1
-                        dst = item["dst"]
-                        _add_task_result_output(result, dst)
-                        app.log(f"✅ [图片转PDF] {os.path.basename(item['src'])} -> {os.path.basename(dst)}")
-                        if should_delete:
-                            try:
-                                os.remove(item["src"])
-                            except Exception as exc:
-                                failed_list.append(f"{item['src']}: 删除源文件失败: {exc}")
-                    if tracker is not None:
-                        tracker.complete_units(1)
-                    else:
-                        app.progress_bar.set(min(1.0, (success_count + len(failed_list)) / total))
-        else:
-            for index, (src, dst) in enumerate(jobs):
-                if getattr(app, "stop_event", False):
-                    app.log("⏹️ [停止] 图片转 PDF 任务已被用户中止")
-                    break
-                if tracker is not None:
-                    tracker.set_current_item(src, "图片转 PDF")
-                try:
-                    item = process_one_image_pdf((src, dst))
-                    if not item.get("ok"):
-                        failed_list.append(f"{src}: {item.get('status')}")
-                        app.log(f"❌ [失败] {os.path.basename(src)}: {item.get('status')}")
-                    else:
-                        success_count += 1
-                        _add_task_result_output(result, dst)
-                        app.log(f"✅ [图片转PDF] {os.path.basename(src)} -> {os.path.basename(dst)}")
-                        if should_delete:
-                            os.remove(src)
-                except Exception as exc:
-                    failed_list.append(f"{src}: {exc}")
-                    app.log(f"❌ [失败] {os.path.basename(src)}: {exc}")
-                finally:
-                    if tracker is not None:
-                        tracker.complete_units(1)
-                    else:
-                        app.progress_bar.set((index + 1) / total)
+    parallel_workers = _get_parallel_worker_count(total) if (_is_parallel_enabled(app) and not merge) else 1
+    core_result = run_image_pdf_task_core(
+        image_files,
+        input_root,
+        normalized_input,
+        output_folder,
+        ImagePdfTaskOptions(
+            merge=merge,
+            delete_source=should_delete,
+            parallel_workers=parallel_workers,
+            executor_factory=concurrent.futures.ThreadPoolExecutor,
+            image_to_pdf=_image_file_to_pdf,
+            merge_images_to_pdf=merge_images_to_pdf,
+        ),
+        ImagePdfTaskCallbacks(
+            log=app.log,
+            stop_requested=lambda: getattr(app, "stop_event", False),
+            on_item_started=_on_item_started,
+            on_item_finished=_on_item_finished,
+            on_item_failed=_on_item_failed,
+            on_item_completed=_on_item_completed,
+            on_merge_started=_on_merge_started,
+        ),
+    )
+    failed_list = list(core_result.get("failed_items") or [])
+    success_count = int(core_result.get("success_count") or 0)
+    processed_count = int(core_result.get("processed_count") or 0)
 
     if failed_list:
         result["failed_items"] = list(failed_list)
@@ -5068,7 +5534,7 @@ def _run_image_to_pdf_task(app, input_folder, merge=False):
             detail=f"成功处理 {success_count} 个文件",
         )
     else:
-        _set_task_result_counts(result, processed=success_count + len(failed_list), success=success_count, failed=len(failed_list), skipped=0)
+        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=len(failed_list), skipped=0)
         _set_task_result_finished(result, "stopped", message="用户停止图片 PDF 任务", detail="用户停止图片 PDF 任务", stopped=True)
 
 
@@ -5091,9 +5557,11 @@ def _patch_pdf_ocr_mode():
             from tools.fx_pdf_ocr import (
                 build_backend_display_map,
                 build_backend_status_text,
+                build_preprocess_display_map,
                 build_profile_display_map,
                 default_model_root,
                 get_default_backend_display,
+                get_default_preprocess_display,
                 get_default_profile_display,
             )
 
@@ -5140,6 +5608,11 @@ def _patch_pdf_ocr_mode():
                 "imageOnly | 仅 OCR 图片": "imageOnly",
             }
             self.pdf_ocr_mode = tkinter.StringVar(value="mixed | 混合 OCR / 原文本 (推荐)")
+            preprocess_map = build_preprocess_display_map()
+            if not preprocess_map:
+                preprocess_map = {get_default_preprocess_display(): "auto"}
+            self._fx_pdf_ocr_preprocess_map = preprocess_map
+            self.pdf_ocr_preprocess = tkinter.StringVar(value=get_default_preprocess_display())
             self.pdf_ocr_cls = tkinter.BooleanVar(value=False)
             self.pdf_ocr_compare_report = tkinter.BooleanVar(value=False)
 
@@ -5440,6 +5913,25 @@ def _patch_pdf_ocr_mode():
                 **self._get_combo_style(),
             ).pack(fill="x")
 
+            preprocess_field = customtkinter.CTkFrame(ocr_mid_fields, fg_color="transparent")
+            preprocess_field.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+            customtkinter.CTkLabel(
+                preprocess_field,
+                text="图像增强：",
+                text_color=COLOR_TEXT_SOFT,
+                font=customtkinter.CTkFont(size=11),
+                height=18,
+            ).pack(anchor="w", pady=(0, 2))
+
+            customtkinter.CTkComboBox(
+                preprocess_field,
+                values=list(self._fx_pdf_ocr_preprocess_map.keys()),
+                variable=self.pdf_ocr_preprocess,
+                height=32,
+                **self._get_combo_style(),
+            ).pack(fill="x")
+
             refresh_field = customtkinter.CTkFrame(ocr_mid_fields, fg_color="transparent")
             refresh_field.pack(side="left", fill="y")
 
@@ -5490,7 +5982,7 @@ def _patch_pdf_ocr_mode():
 
             customtkinter.CTkLabel(
                 ocr_panel,
-                text="说明：生成双层可搜索 PDF，保留原页面画面并叠加透明文字层。",
+                text="说明：生成双层可搜索 PDF，保留原页面画面并叠加透明文字层；自动增强会在识别偏弱时尝试去灰底、增强对比和降噪。",
                 text_color=COLOR_TEXT_SOFT,
                 font=customtkinter.CTkFont(size=10),
                 justify="left",
@@ -5896,6 +6388,35 @@ def _patch_audio_parallel_task():
 _patch_audio_parallel_task()
 
 
+def _patch_zip_core_task():
+    try:
+        original_run_process = FengxiToolboxApp.run_process
+    except Exception as exc:
+        _debug(f"patch_zip_core:missing:{exc}")
+        return
+
+    if getattr(original_run_process, "__fx_zip_core_patch__", False):
+        return
+
+    def patched_run_process(self, input_folder, task_type):
+        if task_type == "zip":
+            try:
+                _run_zip_task_with_core(self, input_folder)
+            except Exception as exc:
+                self.log(f"[ZIP] ERROR: {exc}")
+            finally:
+                self.reset_ui()
+            return
+        return original_run_process(self, input_folder, task_type)
+
+    patched_run_process.__fx_zip_core_patch__ = True
+    FengxiToolboxApp.run_process = patched_run_process
+    _debug("patch_zip_core:installed")
+
+
+_patch_zip_core_task()
+
+
 def _iter_widget_tree(widget):
     if widget is None:
         return
@@ -5983,14 +6504,193 @@ def _watermark_filename_matches_rule(name_no_ext, mode, marker):
     return normalized_name.endswith(normalized_marker)
 
 
-def _get_user_pref_root():
-    local_app_data = (os.environ.get("LOCALAPPDATA") or "").strip()
-    if local_app_data:
-        return Path(local_app_data) / "FengxiToolbox"
+def _get_preview_mode_detail(app, task_type):
     try:
-        return Path.home() / ".fengxi_toolbox"
+        if task_type == "pdf" and getattr(app, "pdf_mode_var", None) is not None:
+            mode = str(app.pdf_mode_var.get() or "")
+            return _get_feature_preview_mode_label(task_type, mode, mode)
+        if task_type == "image":
+            mode = _get_image_pdf_mode(app)
+            return _get_feature_preview_mode_label(task_type, mode, mode)
+        if task_type == "zip" and getattr(app, "zip_mode_var", None) is not None:
+            mode = str(app.zip_mode_var.get() or "")
+            return _get_feature_preview_mode_label(task_type, mode, mode)
+        if task_type == "file" and getattr(app, "file_mode_var", None) is not None:
+            mode = str(app.file_mode_var.get() or "")
+            return _get_feature_preview_mode_label(task_type, mode, mode)
+        if task_type == "remove_wm":
+            mode = _get_remove_wm_mode(app)
+            return _get_feature_preview_mode_label(task_type, mode, _get_remove_wm_mode_label(mode))
+        if task_type == "audio":
+            mode, target_fmt, bitrate, _delete_source = _get_audio_task_args(app)
+            return f"{mode} -> {target_fmt} ({bitrate})"
+        if task_type == "watermark":
+            return _get_feature_preview_mode_label(task_type, "default", "添加水印")
     except Exception:
-        return Path(__file__).resolve().parent
+        return ""
+    return ""
+
+
+def _collect_preview_files(app, input_value, task_type):
+    normalized_input = _normalize_input_path_value(input_value)
+    if not normalized_input:
+        return []
+    try:
+        if task_type == "pdf":
+            all_files = app.collect_input_files(normalized_input, "pdf")
+            return [item for item in all_files if str(item).lower().endswith(".pdf")]
+        if task_type == "image" and _get_image_pdf_mode(app) in {"to_pdf", "merge_pdf"}:
+            return _collect_image_to_pdf_files(app, normalized_input)
+        if task_type == "audio":
+            return _collect_audio_files(app, normalized_input)
+        return list(app.collect_input_files(normalized_input, task_type))
+    except Exception:
+        if normalized_input and os.path.isfile(normalized_input):
+            return [normalized_input]
+    return []
+
+
+def _count_watermark_preview_skips(app, files):
+    rule = _get_watermark_filename_rule(app)
+    if not rule:
+        return 0
+    mode, marker = rule
+    skipped = 0
+    for path in files:
+        try:
+            name_no_ext = os.path.splitext(os.path.basename(str(path)))[0]
+        except Exception:
+            continue
+        if _watermark_filename_matches_rule(name_no_ext, mode, marker):
+            skipped += 1
+    return skipped
+
+
+def _get_start_preview_risks(app, task_type, output_strategy):
+    risks = []
+    try:
+        if output_strategy == "overwrite":
+            risks.append("将覆盖原文件")
+        if task_type == "remove_wm" and _get_remove_wm_overwrite_original(app):
+            risks.append("去水印将直接覆盖原文件")
+        if task_type == "watermark" and bool(_safe_var_get(app, "wm_delete_var", False)):
+            risks.append("水印完成后会删除源文件")
+        if task_type == "pdf" and bool(_safe_var_get(app, "pdf_delete_var", False)):
+            risks.append("PDF 处理完成后会删除源文件")
+        if task_type == "image" and bool(_safe_var_get(app, "img_delete_var", False)):
+            risks.append("图片处理完成后会删除源文件")
+        if task_type == "audio":
+            _mode, _fmt, _bitrate, delete_source = _get_audio_task_args(app)
+            if delete_source:
+                risks.append("音视频转换完成后会删除源文件")
+        if task_type == "file" and str(_safe_var_get(app, "file_mode_var", "")) == "dedup":
+            risks.append("文件去重可能移动或删除重复文件")
+    except Exception as exc:
+        _debug(f"start_preview:risk_error:{exc}")
+    return risks
+
+
+def _build_start_preview(app, input_value=None, task_type=None):
+    task_type = str(task_type or getattr(app, "current_task", "") or "")
+    normalized_input = _normalize_input_path_value(input_value if input_value is not None else _safe_var_get(app, "input_path", ""))
+    files = _collect_preview_files(app, normalized_input, task_type)
+    skipped = _count_watermark_preview_skips(app, files) if task_type == "watermark" else 0
+    effective_count = max(0, len(files) - skipped)
+    output_strategy = _get_task_output_strategy(app, task_type)
+    mode_detail = _get_preview_mode_detail(app, task_type)
+    risks = _get_start_preview_risks(app, task_type, output_strategy)
+    return {
+        "task_type": task_type,
+        "task_label": _get_feature_label(task_type),
+        "mode_detail": mode_detail,
+        "input": normalized_input,
+        "input_kind": "单文件" if normalized_input and os.path.isfile(normalized_input) else "文件夹",
+        "total_count": len(files),
+        "skipped_count": skipped,
+        "effective_count": effective_count,
+        "output_strategy": output_strategy,
+        "output_strategy_label": _get_output_strategy_label(output_strategy),
+        "risks": risks,
+    }
+
+
+def _format_start_preview_message(preview):
+    lines = [
+        "请确认本次任务：",
+        "",
+        f"功能：{preview.get('task_label')}",
+    ]
+    if preview.get("mode_detail"):
+        lines.append(f"模式：{preview.get('mode_detail')}")
+    lines.extend(
+        [
+            f"输入类型：{preview.get('input_kind')}",
+            f"将处理：{preview.get('effective_count')} 个文件",
+        ]
+    )
+    if int(preview.get("skipped_count") or 0) > 0:
+        lines.append(f"预计跳过：{preview.get('skipped_count')} 个文件")
+    lines.append(f"输出策略：{preview.get('output_strategy_label')}")
+    risks = list(preview.get("risks") or [])
+    if risks:
+        lines.extend(["", "风险提示："])
+        lines.extend(f"- {item}" for item in risks)
+    lines.extend(["", "是否开始处理？"])
+    return "\n".join(lines)
+
+
+def _confirm_start_preview(app, input_value=None, task_type=None):
+    if getattr(app, "_fx_start_via_queue", False):
+        return True
+    preview = _build_start_preview(app, input_value=input_value, task_type=task_type)
+    if int(preview.get("effective_count") or 0) <= 0:
+        app.log("⚠️ [预览] 未找到可处理的文件")
+        tkinter.messagebox.showwarning("任务预览", "未找到可处理的文件，请检查输入路径或当前功能模式。")
+        return False
+    app._fx_last_start_preview = preview
+    try:
+        risk_text = "；".join(preview.get("risks") or []) or "无高风险选项"
+        app.log(
+            f"🔎 [任务预览] {preview.get('task_label')} {preview.get('mode_detail') or ''} | "
+            f"将处理 {preview.get('effective_count')} 个文件 | 输出策略：{preview.get('output_strategy_label')} | {risk_text}"
+        )
+    except Exception:
+        pass
+    return bool(
+        tkinter.messagebox.askokcancel(
+            "任务预览",
+            _format_start_preview_message(preview),
+            parent=app,
+        )
+    )
+
+
+def _patch_start_preview_confirmation():
+    try:
+        original_on_start_click = FengxiToolboxApp.on_start_click
+    except Exception as exc:
+        _debug(f"start_preview:missing:{exc}")
+        return
+    if getattr(original_on_start_click, "__fx_start_preview_patch__", False):
+        return
+
+    def patched_on_start_click(self):
+        if getattr(self, "is_running", False):
+            return original_on_start_click(self)
+        if getattr(self, "current_task", None) in {"help", "donate"}:
+            return original_on_start_click(self)
+        selected_input = _normalize_input_path_value(self.input_path.get())
+        if selected_input and os.path.exists(selected_input):
+            if not _confirm_start_preview(self, selected_input, getattr(self, "current_task", "")):
+                return
+        return original_on_start_click(self)
+
+    patched_on_start_click.__fx_start_preview_patch__ = True
+    FengxiToolboxApp.on_start_click = patched_on_start_click
+    _debug("start_preview:patch_installed")
+
+
+_patch_start_preview_confirmation()
 
 
 def _get_user_pref_file():
@@ -6128,9 +6828,9 @@ def _coerce_output_strategy_value(value):
 def _resolve_output_strategy(task_type, requested_value=None):
     normalized_task = str(task_type or "")
     requested = _coerce_output_strategy_value(requested_value or _get_saved_output_strategy() or OUTPUT_STRATEGY_DEFAULT)
-    if normalized_task in OUTPUT_STRATEGY_FORCE_RESULT_FOLDER_TASKS:
+    if _feature_forces_result_folder(normalized_task):
         return "result_folder"
-    if normalized_task not in OUTPUT_STRATEGY_SUPPORTED_TASKS:
+    if not _feature_supports_output_strategy(normalized_task):
         return "same_dir"
     if normalized_task == "zip" and requested == "overwrite":
         return "same_dir"
@@ -6172,7 +6872,7 @@ def _refresh_output_strategy_hint(app):
     requested_value = _coerce_output_strategy_value(requested or None)
     resolved = _resolve_output_strategy(task_type, requested_value)
     label = _get_output_strategy_label(resolved)
-    if task_type in OUTPUT_STRATEGY_FORCE_RESULT_FOLDER_TASKS and resolved != requested_value:
+    if _feature_forces_result_folder(task_type) and resolved != requested_value:
         text = f"当前功能将自动使用：{label}"
     elif task_type == "zip" and requested_value == "overwrite":
         text = "批量压缩不支持覆盖原文件，已自动改为同目录新文件。"
@@ -6932,14 +7632,23 @@ def _get_parallel_mode_message(app, task_type=None):
         return "并行状态：请选择具体功能。"
     if getattr(app, "_fx_single_input_target", None):
         return "并行状态：单文件输入会自动单线程，避免 UI 日志线程冲突。"
-    if (task_type, detail) in PARALLEL_FORCED_SINGLE_DETAILS:
-        return "并行状态：稳定单线程 · " + PARALLEL_FORCED_SINGLE_DETAILS[(task_type, detail)]
-    if (task_type, "") in PARALLEL_FORCED_SINGLE_DETAILS:
-        return "并行状态：稳定单线程 · " + PARALLEL_FORCED_SINGLE_DETAILS[(task_type, "")]
-    if task_type in PARALLEL_FORCED_SINGLE_TASKS:
+    spec = _get_feature_spec(task_type)
+    parallel = spec.get("parallel") if isinstance(spec.get("parallel"), dict) else {}
+    details = parallel.get("detail") if isinstance(parallel.get("detail"), dict) else {}
+    detail_value = details.get(detail)
+    if detail_value is None:
+        detail_value = details.get("")
+    if detail_value is not None:
+        detail_mode = parallel.get("mode", "")
+        detail_message = detail_value
+        if isinstance(detail_value, (tuple, list)) and len(detail_value) >= 2:
+            detail_mode, detail_message = detail_value[0], detail_value[1]
+        if detail_mode == "forced_single":
+            return "并行状态：稳定单线程 · " + str(detail_message or "当前功能使用专用流程。")
+    if parallel.get("mode") == "forced_single":
         return "并行状态：稳定单线程 · 当前功能使用专用流程。"
-    if task_type in PARALLEL_SAFE_TASKS:
-        return "并行状态：可提速 · " + PARALLEL_SUPPORTED_HINTS.get(task_type, "多文件批处理可尝试并行。")
+    if parallel.get("mode") == "safe":
+        return "并行状态：可提速 · " + str(parallel.get("hint") or "多文件批处理可尝试并行。")
     return "并行状态：按当前功能自动选择。"
 
 
@@ -7171,6 +7880,7 @@ def _capture_preset_settings(app, category=None):
         backend_display = _safe_var_get(app, "pdf_ocr_backend", "")
         language_display = _safe_var_get(app, "pdf_ocr_language", "")
         mode_display = _safe_var_get(app, "pdf_ocr_mode", "")
+        preprocess_display = _safe_var_get(app, "pdf_ocr_preprocess", "")
         settings.update(
             {
                 "pdf_mode_var": "ocr",
@@ -7183,6 +7893,8 @@ def _capture_preset_settings(app, category=None):
                 "pdf_ocr_language_key": getattr(app, "_fx_pdf_ocr_lang_map", {}).get(language_display, ""),
                 "pdf_ocr_mode": mode_display,
                 "pdf_ocr_mode_key": getattr(app, "_fx_pdf_ocr_mode_map", {}).get(mode_display, ""),
+                "pdf_ocr_preprocess": preprocess_display,
+                "pdf_ocr_preprocess_key": getattr(app, "_fx_pdf_ocr_preprocess_map", {}).get(preprocess_display, ""),
                 "pdf_ocr_cls": bool(_safe_var_get(app, "pdf_ocr_cls", False)),
                 "pdf_ocr_compare_report": bool(_safe_var_get(app, "pdf_ocr_compare_report", False)),
             }
@@ -7318,6 +8030,15 @@ def _apply_preset_settings(app, preset, switch_task=True):
                 settings.get("pdf_ocr_mode", ""),
                 settings.get("pdf_ocr_mode_key", ""),
                 getattr(app, "_fx_pdf_ocr_mode_map", {}),
+            ),
+        )
+        _safe_var_set(
+            app,
+            "pdf_ocr_preprocess",
+            _preset_pick_display_from_key(
+                settings.get("pdf_ocr_preprocess", ""),
+                settings.get("pdf_ocr_preprocess_key", ""),
+                getattr(app, "_fx_pdf_ocr_preprocess_map", {}),
             ),
         )
         _safe_var_set(app, "pdf_ocr_cls", bool(settings.get("pdf_ocr_cls", False)))
@@ -7580,7 +8301,7 @@ def _queue_restore_app_state(app, task):
 
 
 def _queue_describe_task(app, task_type, input_path):
-    label = QUEUE_TASK_LABELS.get(task_type, task_type or "未知任务")
+    label = _get_feature_label(task_type, fallback="未知任务")
     name = os.path.basename(str(input_path or "").rstrip("\\/")) or str(input_path or "未选择路径")
     detail = ""
     try:
@@ -7604,83 +8325,39 @@ def _queue_describe_task(app, task_type, input_path):
     return f"{label}{suffix} · {name}"
 
 
+def _get_queue_history_context():
+    return QueueHistoryContext(
+        history_file=_get_queue_history_file,
+        retention_days=QUEUE_HISTORY_RETENTION_DAYS,
+        history_limit=QUEUE_HISTORY_LIMIT,
+        status_labels=QUEUE_STATUS_LABELS,
+        status_label_to_value=QUEUE_HISTORY_STATUS_LABEL_TO_VALUE,
+        task_label_to_value=QUEUE_HISTORY_TASK_LABEL_TO_VALUE,
+        failure_label_to_value=QUEUE_HISTORY_FAILURE_LABEL_TO_VALUE,
+        classify_failure_reason=_classify_failure_reason,
+        task_result_snapshot=_task_result_snapshot,
+        debug=_debug,
+    )
+
+
 def _load_queue_history():
-    path = _get_queue_history_file()
-    try:
-        if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                pruned = _prune_queue_history_entries(data)
-                if len(pruned) != len(data):
-                    _save_queue_history(pruned)
-                return pruned
-    except Exception as exc:
-        _debug(f"queue:history_load_error:{exc}")
-    return []
+    return load_queue_history(_get_queue_history_context())
 
 
 def _save_queue_history(entries):
-    path = _get_queue_history_file()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        safe_entries = _prune_queue_history_entries(entries)
-        path.write_text(json.dumps(safe_entries, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as exc:
-        _debug(f"queue:history_save_error:{exc}")
+    return save_queue_history(entries, _get_queue_history_context())
 
 
 def _queue_history_entry_timestamp(entry):
-    if not isinstance(entry, dict):
-        return None
-    for key in ("finished_at", "created_at", "started_at"):
-        try:
-            value = entry.get(key)
-            if value is not None:
-                return float(value)
-        except Exception:
-            continue
-    task_result = entry.get("task_result")
-    if isinstance(task_result, dict):
-        for key in ("finished_at", "started_at"):
-            try:
-                value = task_result.get(key)
-                if value is not None:
-                    return float(value)
-            except Exception:
-                continue
-    return None
+    return queue_history_entry_timestamp(entry)
 
 
 def _prune_queue_history_entries(entries, now=None):
-    try:
-        cutoff = float(now if now is not None else time.time()) - QUEUE_HISTORY_RETENTION_DAYS * 86400
-    except Exception:
-        cutoff = time.time() - QUEUE_HISTORY_RETENTION_DAYS * 86400
-    kept = []
-    for entry in list(entries or []):
-        timestamp = _queue_history_entry_timestamp(entry)
-        if timestamp is not None and timestamp < cutoff:
-            continue
-        kept.append(entry)
-    if len(kept) > QUEUE_HISTORY_LIMIT:
-        kept = kept[-QUEUE_HISTORY_LIMIT:]
-    return kept
+    return prune_queue_history_entries(entries, _get_queue_history_context(), now=now)
 
 
 def _normalize_queue_history_entry(task):
-    entry = dict(task or {})
-    entry.pop("status_var", None)
-    entry.pop("row", None)
-    entry.pop("action_button", None)
-    entry.pop("index_label", None)
-    entry.pop("retry_source_id", None)
-    entry.pop("retry_staging_root", None)
-    entry.pop("retry_mode", None)
-    entry.pop("retry_failed_items", None)
-    task_result = entry.get("task_result")
-    if isinstance(task_result, dict):
-        entry["task_result"] = _task_result_snapshot(task_result)
-    return entry
+    return normalize_queue_history_entry(task, _get_queue_history_context())
 
 
 def _append_queue_history(app, task):
@@ -7694,7 +8371,7 @@ def _append_queue_history(app, task):
 
 
 def _queue_status_text(status):
-    return QUEUE_STATUS_LABELS.get(status, status or "")
+    return queue_status_text(status, _get_queue_history_context())
 
 
 def _queue_status_color(status):
@@ -7712,30 +8389,7 @@ def _queue_status_color(status):
 
 
 def _build_queue_history_search_blob(entry):
-    parts = [
-        entry.get("title", ""),
-        entry.get("input", ""),
-        entry.get("detail", ""),
-        entry.get("error", ""),
-        entry.get("output_root", ""),
-        _queue_status_text(entry.get("status")),
-    ]
-    task_result = entry.get("task_result")
-    if isinstance(task_result, dict):
-        failure_kind, failure_reason = _classify_failure_reason(entry)
-        parts.extend(
-            [
-                task_result.get("message", ""),
-                task_result.get("detail", ""),
-                task_result.get("error", ""),
-                task_result.get("output_root", ""),
-                failure_kind,
-                failure_reason,
-            ]
-        )
-        parts.extend(list(task_result.get("outputs") or []))
-        parts.extend(list(task_result.get("failed_items") or []))
-    return " ".join(str(item or "") for item in parts).lower()
+    return build_queue_history_search_blob(entry, _get_queue_history_context())
 
 
 def _classify_failure_reason(entry):
@@ -7773,24 +8427,14 @@ def _filter_queue_history_entries(
     failure_filter=QUEUE_HISTORY_FAILURE_DEFAULT,
     keyword="",
 ):
-    status_value = QUEUE_HISTORY_STATUS_LABEL_TO_VALUE.get(str(status_filter or "").strip(), "")
-    task_value = QUEUE_HISTORY_TASK_LABEL_TO_VALUE.get(str(task_filter or "").strip(), "")
-    failure_value = QUEUE_HISTORY_FAILURE_LABEL_TO_VALUE.get(str(failure_filter or "").strip(), "")
-    normalized_keyword = str(keyword or "").strip().lower()
-    filtered = []
-    for entry in list(entries or []):
-        if status_value and str(entry.get("status") or "") != status_value:
-            continue
-        if task_value and str(entry.get("task_type") or "") != task_value:
-            continue
-        if failure_value:
-            failure_kind, _failure_reason = _classify_failure_reason(entry)
-            if failure_kind != failure_value:
-                continue
-        if normalized_keyword and normalized_keyword not in _build_queue_history_search_blob(entry):
-            continue
-        filtered.append(entry)
-    return filtered
+    return filter_queue_history_entries(
+        entries,
+        _get_queue_history_context(),
+        status_filter=status_filter,
+        task_filter=task_filter,
+        failure_filter=failure_filter,
+        keyword=keyword,
+    )
 
 
 def _get_queue_history_filters(app):
@@ -7856,7 +8500,7 @@ def _build_task_history_detail_text(entry):
     task_result = item.get("task_result") if isinstance(item.get("task_result"), dict) else {}
     lines = [
         f"标题：{item.get('title', '')}",
-        f"功能：{QUEUE_TASK_LABELS.get(item.get('task_type'), item.get('task_type') or '未知任务')}",
+        f"功能：{_get_feature_label(item.get('task_type'), fallback='未知任务')}",
         f"状态：{_queue_status_text(item.get('status'))}",
         f"输入：{item.get('input', '')}",
         f"创建时间：{_format_queue_time(item.get('created_at'))}",
@@ -7993,27 +8637,30 @@ def _apply_task_history_detail_highlights(detail_box, detail_text, entry):
             start_index = end_index
 
 
+def _get_task_history_export_context():
+    return TaskHistoryExportContext(
+        normalize_path=_normalize_input_path_value,
+        export_task_result=_export_task_result,
+        sanitize_filename_component=_sanitize_filename_component,
+        format_queue_time=_format_queue_time,
+        get_feature_label=_get_feature_label,
+        queue_status_text=_queue_status_text,
+        classify_failure_reason=_classify_failure_reason,
+        failure_value_to_label=QUEUE_HISTORY_FAILURE_VALUE_TO_LABEL,
+        project_root=Path(__file__).resolve().parent,
+        user_home=Path.home(),
+        probe_environment=_probe_diagnostic_environment,
+        load_queue_history=_load_queue_history,
+        debug=_debug,
+    )
+
+
 def _build_task_history_export_filename(entry):
-    item = dict(entry or {})
-    task_type = QUEUE_TASK_LABELS.get(item.get("task_type"), item.get("task_type") or "task")
-    task_slug = _sanitize_filename_component(task_type, fallback="task")
-    title_slug = _sanitize_filename_component(item.get("title") or item.get("input") or "history", fallback="history")
-    timestamp = _sanitize_filename_component(_format_queue_time(item.get("finished_at") or item.get("created_at")), fallback="time")
-    return f"fengxi_task_result_{task_slug}_{title_slug}_{timestamp}.json"
+    return build_task_history_export_filename(entry, _get_task_history_export_context())
 
 
 def _export_task_history_entry(entry, output_path):
-    item = dict(entry or {})
-    task_result = item.get("task_result") if isinstance(item.get("task_result"), dict) else {}
-    if not task_result:
-        return False, "当前历史记录没有可导出的结构化结果。"
-    normalized_output = _normalize_input_path_value(output_path)
-    if not normalized_output:
-        return False, "未选择导出位置。"
-    ok = _export_task_result(task_result, normalized_output)
-    if not ok:
-        return False, f"导出失败：{normalized_output}"
-    return True, normalized_output
+    return export_task_history_entry(entry, output_path, _get_task_history_export_context())
 
 
 def _prompt_export_task_history_entry(app, entry, output_path=None):
@@ -8057,49 +8704,15 @@ def _prompt_export_task_history_entry(app, entry, output_path=None):
 
 
 def _build_task_history_log_export_text(entry):
-    item = dict(entry or {})
-    task_result = item.get("task_result") if isinstance(item.get("task_result"), dict) else {}
-    logs = list(item.get("logs") or task_result.get("logs") or task_result.get("log_lines") or [])
-    lines = [
-        f"标题：{item.get('title', '')}",
-        f"功能：{QUEUE_TASK_LABELS.get(item.get('task_type'), item.get('task_type') or '未知任务')}",
-        f"状态：{_queue_status_text(item.get('status'))}",
-        f"输入：{item.get('input', '')}",
-        f"创建时间：{_format_queue_time(item.get('created_at'))}",
-        f"结束时间：{_format_queue_time(item.get('finished_at') or item.get('created_at'))}",
-        "",
-        "日志：",
-    ]
-    if logs:
-        lines.extend(f"- {text}" for text in logs)
-    else:
-        lines.append("- (empty)")
-    return "\n".join(lines)
+    return build_task_history_log_export_text(entry, _get_task_history_export_context())
 
 
 def _build_task_history_log_export_filename(entry):
-    item = dict(entry or {})
-    task_type = QUEUE_TASK_LABELS.get(item.get("task_type"), item.get("task_type") or "task")
-    task_slug = _sanitize_filename_component(task_type, fallback="task")
-    title_slug = _sanitize_filename_component(item.get("title") or item.get("input") or "history", fallback="history")
-    timestamp = _sanitize_filename_component(_format_queue_time(item.get("finished_at") or item.get("created_at")), fallback="time")
-    return f"fengxi_task_log_{task_slug}_{title_slug}_{timestamp}.txt"
+    return build_task_history_log_export_filename(entry, _get_task_history_export_context())
 
 
 def _export_task_history_log(entry, output_path):
-    item = dict(entry or {})
-    text = _build_task_history_log_export_text(item)
-    normalized_output = _normalize_input_path_value(output_path)
-    if not normalized_output:
-        return False, "未选择导出位置。"
-    try:
-        path = Path(normalized_output)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-        return True, normalized_output
-    except Exception as exc:
-        _debug(f"queue:history_log_export_error:{exc}")
-        return False, f"导出失败：{normalized_output}"
+    return export_task_history_log(entry, output_path, _get_task_history_export_context())
 
 
 def _prompt_export_task_history_log(app, entry, output_path=None):
@@ -8136,147 +8749,137 @@ def _prompt_export_task_history_log(app, entry, output_path=None):
 
 
 def _build_task_history_report_export_filename(entry):
-    item = dict(entry or {})
-    task_type = QUEUE_TASK_LABELS.get(item.get("task_type"), item.get("task_type") or "task")
-    task_slug = _sanitize_filename_component(task_type, fallback="task")
-    title_slug = _sanitize_filename_component(item.get("title") or item.get("input") or "history", fallback="history")
-    timestamp = _sanitize_filename_component(_format_queue_time(item.get("finished_at") or item.get("created_at")), fallback="time")
-    return f"fengxi_task_report_{task_slug}_{title_slug}_{timestamp}.md"
+    return build_task_history_report_export_filename(entry, _get_task_history_export_context())
 
 
 def _build_task_history_report_text(entry):
-    item = dict(entry or {})
-    task_result = item.get("task_result") if isinstance(item.get("task_result"), dict) else {}
-    outputs = list(task_result.get("outputs") or item.get("outputs") or [])
-    failed_items = list(task_result.get("failed_items") or item.get("failed_items") or [])
-    logs = [str(text).strip() for text in (item.get("logs") or task_result.get("logs") or task_result.get("log_lines") or []) if str(text).strip()]
-    has_content = bool(
-        task_result
-        or outputs
-        or failed_items
-        or logs
-        or any(item.get(key) for key in ("title", "task_type", "status", "input", "detail", "error", "output_root"))
-    )
-    if not has_content:
-        return ""
-
-    def _safe_int(value):
-        try:
-            return max(0, int(value or 0))
-        except Exception:
-            return 0
-
-    duration_seconds = task_result.get("duration_seconds", item.get("duration_seconds", 0.0))
-    try:
-        duration_seconds = float(duration_seconds or 0.0)
-    except Exception:
-        duration_seconds = 0.0
-
-    processed_count = _safe_int(task_result.get("processed_count", item.get("processed_count", 0)))
-    success_count = _safe_int(task_result.get("success_count", item.get("success_count", 0)))
-    failed_count = _safe_int(task_result.get("failed_count", item.get("failed_count", 0)))
-    skipped_count = _safe_int(task_result.get("skipped_count", item.get("skipped_count", 0)))
-    output_root = task_result.get("output_root") or item.get("output_root", "")
-    output_strategy_label = task_result.get("output_strategy_label") or item.get("output_strategy_label", "")
-    output_strategy = task_result.get("output_strategy") or item.get("output_strategy", "")
-    error_text = str(task_result.get("error") or item.get("error") or "").strip()
-    detail_text = str(task_result.get("detail") or item.get("detail") or "").strip()
-    message_text = str(task_result.get("message") or item.get("message") or "").strip()
-    failure_kind, failure_reason = _classify_failure_reason(item)
-    failure_label = QUEUE_HISTORY_FAILURE_VALUE_TO_LABEL.get(failure_kind, failure_kind or "未知失败")
-    failed_log_lines = [
-        text for text in logs if any(marker in text.lower() for marker in ("❌", "🔥", "错误", "失败", "error", "failed", "traceback"))
-    ]
-
-    lines = [
-        "# 风兮工具箱任务报告",
-        "",
-        "## 基本信息",
-        f"- 标题：{item.get('title', '')}",
-        f"- 功能：{QUEUE_TASK_LABELS.get(item.get('task_type'), item.get('task_type') or '未知任务')}",
-        f"- 状态：{_queue_status_text(item.get('status'))}",
-        f"- 输入：{item.get('input', '')}",
-        f"- 创建时间：{_format_queue_time(item.get('created_at'))}",
-        f"- 结束时间：{_format_queue_time(item.get('finished_at') or item.get('created_at'))}",
-    ]
-    if duration_seconds > 0:
-        lines.append(f"- 耗时：{duration_seconds:.3f}s")
-
-    lines.extend(
-        [
-            "",
-            "## 结果统计",
-            f"- 处理总数：{processed_count}",
-            f"- 成功数：{success_count}",
-            f"- 失败数：{failed_count}",
-            f"- 跳过数：{skipped_count}",
-        ]
-    )
-    if message_text:
-        lines.append(f"- 结果消息：{message_text}")
-    if detail_text:
-        lines.append(f"- 结果详情：{detail_text}")
-    if error_text:
-        lines.append(f"- 错误信息：{error_text}")
-
-    lines.extend(["", "## 输出位置"])
-    if output_strategy_label:
-        lines.append(f"- 输出策略：{output_strategy_label}")
-    elif output_strategy:
-        lines.append(f"- 输出策略：{output_strategy}")
-    if output_root:
-        lines.append(f"- 输出目录：{output_root}")
-    else:
-        lines.append("- 输出目录：")
-    if outputs:
-        lines.append("- 输出文件：")
-        lines.extend(f"  - {path}" for path in outputs)
-    else:
-        lines.append("- 输出文件：无")
-
-    if item.get("status") == "failed" or error_text or failed_items or failed_log_lines:
-        lines.extend(["", "## 失败分析", f"- 失败分类：{failure_label}"])
-        if failure_reason:
-            lines.append(f"- 失败原因：{failure_reason}")
-        if failed_items:
-            lines.append(f"- 失败项数量：{len(failed_items)}")
-            lines.append("- 失败项：")
-            lines.extend(f"  - {path}" for path in failed_items)
-
-    lines.extend(["", "## 关键日志"])
-    if failed_log_lines:
-        lines.extend(f"- {text}" for text in failed_log_lines[-8:])
-    elif logs:
-        lines.extend(f"- {text}" for text in logs[-12:])
-    else:
-        lines.append("- (empty)")
-
-    lines.extend(["", "## 结构化结果摘要"])
-    if task_result:
-        lines.append("```json")
-        lines.append(json.dumps(task_result, ensure_ascii=False, indent=2))
-        lines.append("```")
-    else:
-        lines.append("- 无结构化结果。")
-    return "\n".join(lines)
+    return build_task_history_report_text(entry, _get_task_history_export_context())
 
 
 def _export_task_history_report(entry, output_path):
-    item = dict(entry or {})
-    text = _build_task_history_report_text(item)
-    if not text:
-        return False, "当前历史记录为空，无法导出任务报告。"
-    normalized_output = _normalize_input_path_value(output_path)
-    if not normalized_output:
-        return False, "未选择导出位置。"
+    return export_task_history_report(entry, output_path, _get_task_history_export_context())
+
+
+def _build_task_history_diagnostic_filename(entry):
+    return build_task_history_diagnostic_filename(entry, _get_task_history_export_context())
+
+
+def _diagnostic_path_replacements():
+    return diagnostic_path_replacements(_get_task_history_export_context())
+
+
+def _redact_diagnostic_text(value):
+    return redact_diagnostic_text(value, _get_task_history_export_context())
+
+
+def _redact_diagnostic_payload(value):
+    return redact_diagnostic_payload(value, _get_task_history_export_context())
+
+
+def _diagnostic_write_json(zip_file, arcname, payload):
+    return diagnostic_write_json(zip_file, arcname, payload, _get_task_history_export_context())
+
+
+def _diagnostic_write_text(zip_file, arcname, text):
+    return diagnostic_write_text(zip_file, arcname, text, _get_task_history_export_context())
+
+
+def _probe_diagnostic_environment():
+    ffmpeg_path = _locate_ffmpeg()
+    ocr_status = {}
     try:
-        path = Path(normalized_output)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-        return True, str(path.resolve())
+        from tools.fx_pdf_ocr import discover_backend_status
+
+        ocr_status = discover_backend_status(detailed=True)
     except Exception as exc:
-        _debug(f"queue:history_report_export_error:{exc}")
-        return False, f"导出失败：{normalized_output}"
+        ocr_status = {"error": str(exc)}
+
+    office_status = {}
+    for label, progid in (("word", "Word.Application"), ("powerpoint", "PowerPoint.Application")):
+        status = {"available": False, "version": "", "error": ""}
+        try:
+            pythoncom.CoInitialize()
+            try:
+                app = win32com.client.DispatchEx(progid)
+                status["available"] = True
+                status["version"] = str(getattr(app, "Version", "") or "")
+                try:
+                    app.Quit()
+                except Exception:
+                    pass
+            finally:
+                pythoncom.CoUninitialize()
+        except Exception as exc:
+            status["error"] = str(exc)
+        office_status[label] = status
+
+    return {
+        "app": {
+            "release_version": APP_RELEASE_VERSION,
+            "display_version": APP_DISPLAY_VERSION,
+            "frozen": bool(getattr(sys, "frozen", False)),
+        },
+        "system": {
+            "platform": platform.platform(),
+            "python": sys.version,
+            "executable": sys.executable,
+            "cwd": str(Path.cwd()),
+        },
+        "dependencies": {
+            "ffmpeg": {"available": bool(ffmpeg_path), "path": ffmpeg_path or ""},
+            "ocr": ocr_status,
+            "office": office_status,
+        },
+        "performance": {
+            "log_path": str(_get_performance_log_file()),
+            "recent": _load_recent_performance_entries(limit=40),
+        },
+    }
+
+
+def _build_diagnostic_summary(entry, environment):
+    return build_diagnostic_summary(entry, environment, _get_task_history_export_context())
+
+
+def _build_recent_history_diagnostic_snapshot(entry, limit=12):
+    return build_recent_history_diagnostic_snapshot(entry, _get_task_history_export_context(), limit=limit)
+
+
+def _export_task_history_diagnostic_package(entry, output_path):
+    return export_task_history_diagnostic_package(entry, output_path, _get_task_history_export_context())
+
+
+def _prompt_export_task_history_diagnostic_package(app, entry, output_path=None):
+    item = dict(entry or {})
+    selected_path = output_path
+    if not selected_path:
+        initial_dir = _resolve_task_history_open_target(item) or str(Path.cwd())
+        try:
+            selected_path = tkinter.filedialog.asksaveasfilename(
+                title="导出诊断包",
+                parent=app,
+                defaultextension=".zip",
+                initialdir=_normalize_input_path_value(initial_dir) or str(Path.cwd()),
+                initialfile=_build_task_history_diagnostic_filename(item),
+                filetypes=[("ZIP 诊断包", "*.zip"), ("所有文件", "*.*")],
+            )
+        except Exception as exc:
+            _debug(f"queue:diagnostic_export_dialog_error:{exc}")
+            selected_path = ""
+    ok, payload = _export_task_history_diagnostic_package(item, selected_path)
+    try:
+        if ok:
+            tkinter.messagebox.showinfo("导出诊断包", f"诊断包已导出到：\n{payload}", parent=app)
+        elif selected_path:
+            tkinter.messagebox.showerror("导出诊断包", payload, parent=app)
+    except Exception:
+        pass
+    if ok:
+        try:
+            app.log(f"[任务历史] 已导出诊断包：{payload}")
+        except Exception:
+            pass
+    return ok
 
 
 def _prompt_export_task_history_report(app, entry, output_path=None):
@@ -8424,6 +9027,10 @@ def _show_task_history_detail(app, entry):
                 current_entry = getattr(detail_window, "_fx_entry", None)
                 _prompt_export_task_history_report(app, current_entry)
 
+            def export_detail_diagnostic():
+                current_entry = getattr(detail_window, "_fx_entry", None)
+                _prompt_export_task_history_diagnostic_package(app, current_entry)
+
             def open_output_location():
                 current_entry = getattr(detail_window, "_fx_entry", None)
                 _prompt_open_task_history_output(app, current_entry)
@@ -8452,6 +9059,17 @@ def _show_task_history_detail(app, entry):
             ).grid(row=0, column=2, sticky="e", padx=(0, 8))
             customtkinter.CTkButton(
                 actions,
+                text="诊断包",
+                command=export_detail_diagnostic,
+                height=34,
+                width=92,
+                corner_radius=10,
+                fg_color="#68474A",
+                hover_color="#7A5558",
+                text_color="#FFF0F1",
+            ).grid(row=0, column=3, sticky="e", padx=(0, 8))
+            customtkinter.CTkButton(
+                actions,
                 text="打开位置",
                 command=open_output_location,
                 height=34,
@@ -8460,7 +9078,7 @@ def _show_task_history_detail(app, entry):
                 fg_color="#3F5B57",
                 hover_color="#4D6C67",
                 text_color="#EAF6F3",
-            ).grid(row=0, column=3, sticky="e", padx=(0, 8))
+            ).grid(row=0, column=4, sticky="e", padx=(0, 8))
             customtkinter.CTkButton(
                 actions,
                 text="导出日志",
@@ -8471,7 +9089,7 @@ def _show_task_history_detail(app, entry):
                 fg_color="#5A4E3D",
                 hover_color="#6A5B49",
                 text_color="#F8F1E6",
-            ).grid(row=0, column=4, sticky="e", padx=(0, 8))
+            ).grid(row=0, column=5, sticky="e", padx=(0, 8))
 
             customtkinter.CTkButton(
                 actions,
@@ -8483,7 +9101,7 @@ def _show_task_history_detail(app, entry):
                 fg_color="#44566C",
                 hover_color="#51657D",
                 text_color="#EEF5FF",
-            ).grid(row=0, column=5, sticky="e")
+            ).grid(row=0, column=6, sticky="e")
         detail_box = getattr(detail_window, "_fx_detail_box", None)
         detail_window._fx_entry = dict(entry or {})
         if detail_box is not None:
@@ -8927,7 +9545,7 @@ def _refresh_history_panel(app):
                 stats_parts.append(f"耗时 {duration_seconds:.2f}s")
             detail_lines = [
                 item.get("input", ""),
-                f"功能：{QUEUE_TASK_LABELS.get(item.get('task_type'), item.get('task_type') or '未知任务')} · 时间：{_format_queue_time(item.get('finished_at') or item.get('created_at'))}",
+                f"功能：{_get_feature_label(item.get('task_type'), fallback='未知任务')} · 时间：{_format_queue_time(item.get('finished_at') or item.get('created_at'))}",
             ]
             if stats_parts:
                 detail_lines.append(" · ".join(stats_parts))
@@ -9689,26 +10307,43 @@ def _ensure_lazy_tab_initialized(app, task_name):
     if not callable(initializer):
         return False
 
+    started_at = time.perf_counter()
     _debug(f"lazy_tab:init:{task_name}:start")
-    initializer()
-    lazy_state[task_name] = True
     try:
-        _tighten_layout(app, task_name=task_name)
-    except Exception as exc:
-        _debug(f"lazy_tab:layout_refresh_error:{task_name}:{exc}")
-    try:
-        _restore_last_settings_for_task(app, task_name)
-    except Exception as exc:
-        _debug(f"last_settings:lazy_restore_error:{task_name}:{exc}")
-    try:
-        app.update_idletasks()
+        initializer()
+        lazy_state[task_name] = True
+        try:
+            _tighten_layout(app, task_name=task_name)
+        except Exception as exc:
+            _debug(f"lazy_tab:layout_refresh_error:{task_name}:{exc}")
+        try:
+            _restore_last_settings_for_task(app, task_name)
+        except Exception as exc:
+            _debug(f"last_settings:lazy_restore_error:{task_name}:{exc}")
+        try:
+            app.update_idletasks()
+        except Exception:
+            pass
     except Exception:
-        pass
+        _record_performance(
+            "lazy_tab_init",
+            started_at=started_at,
+            task_name=task_name,
+            details={"status": "error"},
+        )
+        raise
+    _record_performance(
+        "lazy_tab_init",
+        started_at=started_at,
+        task_name=task_name,
+        details={"status": "success"},
+    )
     _debug(f"lazy_tab:init:{task_name}:done")
     return True
 
 
 def _show_ready_window(app):
+    started_at = time.perf_counter()
     _install_fast_close_protocol(app)
     try:
         app.update_idletasks()
@@ -9720,6 +10355,12 @@ def _show_ready_window(app):
         _debug("startup:window_shown")
     except Exception as exc:
         _debug(f"startup:window_show_error:{exc}")
+    _record_performance("startup_show_ready", started_at=started_at)
+    _record_performance(
+        "startup_total",
+        started_at=BOOTSTRAP_STARTED_AT,
+        details={"default_tab": DEFAULT_STARTUP_TAB},
+    )
 
 
 def _request_fast_close(app):
@@ -9804,117 +10445,27 @@ def _install_fast_close_protocol(app):
 
 
 def _patch_startup_performance():
-    try:
-        original_setup_main_area = FengxiToolboxApp.setup_main_area
-        original_switch_tab = FengxiToolboxApp.switch_tab
-        original_ctk_init = customtkinter.CTk.__init__
-    except Exception as exc:
-        _debug(f"patch_startup_performance:missing:{exc}")
-        return
-
-    original_getattr = getattr(FengxiToolboxApp, "__getattr__", None)
-
-    if getattr(original_setup_main_area, "__fx_lazy_startup_patch__", False):
-        return
-
-    def patched_show_readme(self):
-        return _show_inline_help(self)
-
-    def patched_show_donate_window(self):
-        return _show_inline_donate(self)
-
-    def patched_ctk_init(self, *args, **kwargs):
-        original_ctk_init(self, *args, **kwargs)
-        if _get_internal_attr(self, "_fx_start_hidden", False):
-            return
-        try:
-            self.withdraw()
-            self._fx_start_hidden = True
-            _debug("startup:window_hidden")
-        except Exception as exc:
-            _debug(f"startup:window_hidden_error:{exc}")
-
-    def patched_setup_main_area(self):
-        self._fx_lazy_tabs_state = {name: False for name in LAZY_TAB_SPECS}
-        self._fx_lazy_tab_initializers = {}
-        self._fx_lazy_startup_in_progress = True
-        try:
-            for task_name, spec in LAZY_TAB_SPECS.items():
-                init_name = spec["init"]
-                initializer = getattr(self, init_name, None)
-                if callable(initializer):
-                    self._fx_lazy_tab_initializers[task_name] = initializer
-                if task_name == DEFAULT_STARTUP_TAB:
-                    continue
-
-                def deferred_init(_task_name=task_name):
-                    _debug(f"lazy_tab:deferred:{_task_name}")
-                    return None
-
-                setattr(self, init_name, deferred_init)
-
-            result = original_setup_main_area(self)
-            self._fx_lazy_tabs_state[DEFAULT_STARTUP_TAB] = True
-            self._fx_lazy_startup_ready = True
-            return result
-        finally:
-            self._fx_lazy_startup_in_progress = False
-            for task_name, initializer in self._fx_lazy_tab_initializers.items():
-                try:
-                    setattr(self, LAZY_TAB_SPECS[task_name]["init"], initializer)
-                except Exception:
-                    pass
-
-    def patched_switch_tab(self, task_name, btn_obj):
-        try:
-            if not (
-                _get_internal_attr(self, "_fx_lazy_startup_in_progress", False)
-                and task_name == DEFAULT_STARTUP_TAB
-            ):
-                _ensure_lazy_tab_initialized(self, task_name)
-        except Exception as exc:
-            _debug(f"lazy_tab:switch_error:{task_name}:{exc}")
-        result = original_switch_tab(self, task_name, btn_obj)
-        try:
-            _set_help_button_selected(self, False)
-            _set_donate_button_selected(self, False)
-            _set_help_action_state(self, False)
-            _refresh_output_strategy_hint(self)
-            _refresh_parallel_mode_hint(self)
-            self.update_idletasks()
-            _refresh_visible_tab_layout(self, task_name)
-            self.update_idletasks()
-        except Exception as exc:
-            _debug(f"lazy_tab:visible_layout_refresh_error:{task_name}:{exc}")
-        return result
-
-    def patched_getattr(self, name):
-        task_name = _guess_lazy_tab_for_attr(name)
-        if task_name is not None:
-            try:
-                _ensure_lazy_tab_initialized(self, task_name)
-                return object.__getattribute__(self, name)
-            except AttributeError:
-                pass
-            except Exception as exc:
-                _debug(f"lazy_tab:getattr_error:{name}:{exc}")
-        if callable(original_getattr):
-            return original_getattr(self, name)
-        raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
-
-    patched_ctk_init.__fx_hidden_startup_patch__ = True
-    patched_setup_main_area.__fx_lazy_startup_patch__ = True
-    patched_switch_tab.__fx_lazy_startup_patch__ = True
-    patched_getattr.__fx_lazy_startup_patch__ = True
-    patched_show_readme.__fx_inline_help_patch__ = True
-    patched_show_donate_window.__fx_inline_donate_patch__ = True
-    customtkinter.CTk.__init__ = patched_ctk_init
-    FengxiToolboxApp.setup_main_area = patched_setup_main_area
-    FengxiToolboxApp.switch_tab = patched_switch_tab
-    FengxiToolboxApp.__getattr__ = patched_getattr
-    FengxiToolboxApp.show_readme = patched_show_readme
-    FengxiToolboxApp.show_donate_window = patched_show_donate_window
-    _debug("patch_startup_performance:installed")
+    return install_startup_performance_patch(
+        StartupPatchContext(
+            app_class=FengxiToolboxApp,
+            ctk_class=customtkinter.CTk,
+            lazy_tab_specs=LAZY_TAB_SPECS,
+            default_startup_tab=DEFAULT_STARTUP_TAB,
+            debug=_debug,
+            get_internal_attr=_get_internal_attr,
+            ensure_lazy_tab_initialized=_ensure_lazy_tab_initialized,
+            show_inline_help=_show_inline_help,
+            show_inline_donate=_show_inline_donate,
+            set_help_button_selected=_set_help_button_selected,
+            set_donate_button_selected=_set_donate_button_selected,
+            set_help_action_state=_set_help_action_state,
+            refresh_output_strategy_hint=_refresh_output_strategy_hint,
+            refresh_parallel_mode_hint=_refresh_parallel_mode_hint,
+            refresh_visible_tab_layout=_refresh_visible_tab_layout,
+            guess_lazy_tab_for_attr=_guess_lazy_tab_for_attr,
+            record_performance=_record_performance,
+        )
+    )
 
 
 _patch_startup_performance()
@@ -9965,13 +10516,22 @@ if __name__ == "__main__":
         run_packaged_ocr_diagnostics(diag_path)
         raise SystemExit(0)
     _debug("main:create_app")
+    _record_performance("main_enter", started_at=BOOTSTRAP_STARTED_AT)
+    main_step_started_at = time.perf_counter()
     app = FengxiToolboxApp()
+    _record_performance("main_create_app", started_at=main_step_started_at)
     _debug("main:app_created")
+    main_step_started_at = time.perf_counter()
     _apply_app_icon(app)
+    _record_performance("main_icon_apply", started_at=main_step_started_at)
     _debug("main:icon_applied")
+    main_step_started_at = time.perf_counter()
     _apply_release_identity(app)
+    _record_performance("main_release_identity", started_at=main_step_started_at)
     _debug("main:release_identity_applied")
+    main_step_started_at = time.perf_counter()
     _tighten_layout(app)
+    _record_performance("main_layout_tighten", started_at=main_step_started_at)
     _debug("main:layout_tightened")
     _show_ready_window(app)
     app.mainloop()

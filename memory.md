@@ -31,5 +31,7 @@
 - 版本发布脚本：`tools/fx_release_version.ps1`
 - 当前稳定区：批量压缩、添加水印
 - 当前新增 PDF 能力：OCR 搜索版 PDF
-- 当前 OCR 架构：风兮自有工作流 + 多后端可切换
+- 当前 OCR 架构：`tools/fx_pdf_ocr.py` 引擎后端 + `tools/fx_pdf_ocr_task.py` 任务编排 + 风兮自有工作流多后端可切换
+- 当前图片 PDF 架构：`tools/fx_image_pdf_task.py` 任务核心 + `Fengxi_Toolbox.py` UI/进度/历史适配层
+- 当前文件管家架构：`tools/fx_file_manager_core.py` 承接重命名核心；`dedup` 仍走 `run_process()` 运行时单线程专用分支
 - 当前发布基线：`4.0` / `v4.0.0`

@@ -13,13 +13,37 @@ import traceback
 from io import BytesIO, StringIO
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 
 MIN_RENDER_SIZE = 1080
 DEFAULT_PROFILE_KEY = "general"
 DEFAULT_BACKEND_KEY = "auto"
 AUTO_BACKEND_ORDER = ["rapidocr", "paddleocr", "easyocr", "tesseract_cli"]
+DEFAULT_PREPROCESS_MODE = "auto"
+OCR_QUALITY_ACCEPT_SCORE = 0.48
+OCR_PREPROCESS_OPTIONS = [
+    {
+        "key": "auto",
+        "label": "自动增强（推荐）",
+        "description": "原图优先，识别偏弱时自动尝试去灰底、增强对比和轻度降噪。",
+    },
+    {
+        "key": "off",
+        "label": "关闭增强",
+        "description": "直接把原始页面图像交给 OCR 后端。",
+    },
+    {
+        "key": "light",
+        "label": "轻度增强",
+        "description": "适合轻微灰底或偏淡扫描件，尽量保持原图细节。",
+    },
+    {
+        "key": "scan",
+        "label": "扫描件增强",
+        "description": "适合灰底、噪点、对比度不足的扫描件，会额外尝试黑白化。",
+    },
+]
 
 PROFILE_OPTIONS = [
     {
@@ -142,6 +166,46 @@ def get_default_backend_display():
             return display
     first = next(iter(display_map), None)
     return first or "自动选择（推荐） | auto"
+
+
+def get_preprocess_options():
+    return [{"key": item["key"], "label": item["label"]} for item in OCR_PREPROCESS_OPTIONS]
+
+
+def get_default_preprocess_key():
+    return DEFAULT_PREPROCESS_MODE
+
+
+def build_preprocess_display_map():
+    return {f'{item["label"]} | {item["key"]}': item["key"] for item in OCR_PREPROCESS_OPTIONS}
+
+
+def get_default_preprocess_display():
+    display_map = build_preprocess_display_map()
+    for display, mode_key in display_map.items():
+        if mode_key == DEFAULT_PREPROCESS_MODE:
+            return display
+    first = next(iter(display_map), None)
+    return first or "自动增强（推荐） | auto"
+
+
+def normalize_preprocess_mode(mode):
+    raw = str(mode or DEFAULT_PREPROCESS_MODE).strip()
+    if "|" in raw:
+        raw = raw.rsplit("|", 1)[-1].strip()
+    aliases = {
+        "none": "off",
+        "false": "off",
+        "0": "off",
+        "true": "auto",
+        "1": "auto",
+        "enhance": "auto",
+        "scanner": "scan",
+        "scanned": "scan",
+    }
+    key = aliases.get(raw.lower(), raw)
+    valid = {item["key"] for item in OCR_PREPROCESS_OPTIONS}
+    return key if key in valid else DEFAULT_PREPROCESS_MODE
 
 
 def get_backend_label(backend_key):
@@ -523,6 +587,188 @@ def _render_page_as_png_bytes(page, fitz):
     return pixmap.tobytes("png")
 
 
+def _image_to_png_bytes(image):
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _estimate_text_skew_degrees(gray_image):
+    try:
+        import numpy as np
+
+        sample = gray_image.copy()
+        sample.thumbnail((800, 800))
+        arr = np.asarray(sample)
+        if arr.size < 1000:
+            return 0.0
+        cutoff = min(210, max(80, int(float(arr.mean()) * 0.92)))
+        ys, xs = np.nonzero(arr < cutoff)
+        if len(xs) < 120:
+            return 0.0
+        if len(xs) > 8000:
+            step = max(1, len(xs) // 8000)
+            xs = xs[::step]
+            ys = ys[::step]
+        coords = np.column_stack((xs - xs.mean(), ys - ys.mean()))
+        cov = np.cov(coords, rowvar=False)
+        values, vectors = np.linalg.eigh(cov)
+        if len(values) < 2 or values[-1] <= 0:
+            return 0.0
+        if values[-1] / max(values[0], 1e-6) < 2.4:
+            return 0.0
+        vector = vectors[:, -1]
+        angle = math.degrees(math.atan2(vector[1], vector[0]))
+        while angle <= -45:
+            angle += 90
+        while angle > 45:
+            angle -= 90
+        if abs(angle) > 8:
+            return 0.0
+        return float(angle)
+    except Exception:
+        return 0.0
+
+
+def _deskew_gray_image(gray_image):
+    angle = _estimate_text_skew_degrees(gray_image)
+    if abs(angle) < 0.7:
+        return gray_image
+    resampling = getattr(Image, "Resampling", Image).BICUBIC
+    return gray_image.rotate(-angle, resample=resampling, expand=False, fillcolor=255)
+
+
+def _enhance_gray_image(gray_image, mode):
+    mode = normalize_preprocess_mode(mode)
+    gray = ImageOps.autocontrast(gray_image, cutoff=1)
+    contrast = 1.35 if mode == "light" else 1.55
+    sharpness = 1.15 if mode == "light" else 1.25
+    gray = ImageEnhance.Contrast(gray).enhance(contrast)
+    gray = ImageEnhance.Sharpness(gray).enhance(sharpness)
+    if mode in {"auto", "scan"}:
+        gray = _deskew_gray_image(gray)
+    if mode == "scan":
+        gray = gray.filter(ImageFilter.MedianFilter(size=3))
+    return gray
+
+
+def _threshold_gray_image(gray_image):
+    histogram = gray_image.histogram()
+    total = sum(histogram)
+    if total <= 0:
+        threshold = 170
+    else:
+        weighted = sum(index * count for index, count in enumerate(histogram))
+        mean = weighted / total
+        threshold = int(max(130, min(205, mean * 0.92)))
+    return gray_image.point(lambda pixel: 255 if pixel > threshold else 0)
+
+
+def build_ocr_preprocess_candidates(image_bytes, preprocess_mode=None):
+    mode = normalize_preprocess_mode(preprocess_mode)
+    candidates = [{"key": "original", "label": "原图", "bytes": image_bytes}]
+    if mode == "off":
+        return candidates
+
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            image = ImageOps.exif_transpose(image)
+            gray = image.convert("L")
+            enhanced = _enhance_gray_image(gray, mode)
+            enhanced_bytes = _image_to_png_bytes(enhanced)
+            if enhanced_bytes != image_bytes:
+                candidates.append({"key": "enhanced", "label": "增强", "bytes": enhanced_bytes})
+            if mode == "scan":
+                binary = _threshold_gray_image(enhanced)
+                binary_bytes = _image_to_png_bytes(binary)
+                if binary_bytes not in {item["bytes"] for item in candidates}:
+                    candidates.append({"key": "binary", "label": "黑白增强", "bytes": binary_bytes})
+    except Exception:
+        return candidates
+
+    return candidates
+
+
+def _count_signal_chars(text):
+    count = 0
+    for char in text:
+        if char.isalnum() or "\u4e00" <= char <= "\u9fff":
+            count += 1
+    return count
+
+
+def score_ocr_rows(rows):
+    if not rows:
+        return 0.0
+    texts = [(row.get("text") or "").strip() for row in rows]
+    joined = "".join(texts)
+    signal_chars = _count_signal_chars(joined)
+    if signal_chars <= 0:
+        return 0.0
+    scores = []
+    for row in rows:
+        try:
+            score = float(row.get("score", 0))
+        except Exception:
+            score = 0.0
+        if score > 0:
+            scores.append(max(0.0, min(score, 1.0)))
+    confidence = sum(scores) / len(scores) if scores else 0.55
+    text_factor = min(signal_chars / 24.0, 1.0)
+    block_factor = min(len(rows) / 6.0, 1.0)
+    return round(confidence * 0.55 + text_factor * 0.35 + block_factor * 0.10, 4)
+
+
+def _ocr_backend_image_with_preprocess(backend, image_bytes, preprocess_mode=None, backend_key=None):
+    candidates = build_ocr_preprocess_candidates(image_bytes, preprocess_mode)
+    best_attempt = None
+    attempts = []
+    last_error = None
+    for candidate in candidates:
+        try:
+            rows = backend.ocr_image_bytes(candidate["bytes"])
+        except Exception as exc:
+            last_error = exc
+            attempts.append(
+                {
+                    "backend": backend_key or getattr(backend, "backend_key", ""),
+                    "preprocess": candidate["key"],
+                    "quality": 0.0,
+                    "line_count": 0,
+                    "error": str(exc),
+                }
+            )
+            continue
+        quality = score_ocr_rows(rows)
+        attempt = {
+            "backend": backend_key or getattr(backend, "backend_key", ""),
+            "preprocess": candidate["key"],
+            "quality": quality,
+            "line_count": len(rows),
+            "error": "",
+        }
+        attempts.append(attempt)
+        if best_attempt is None or quality > best_attempt["quality"]:
+            best_attempt = dict(attempt)
+            best_attempt["rows"] = rows
+        if quality >= OCR_QUALITY_ACCEPT_SCORE:
+            break
+
+    if best_attempt is None:
+        if last_error is not None:
+            raise last_error
+        best_attempt = {
+            "backend": backend_key or getattr(backend, "backend_key", ""),
+            "preprocess": "original",
+            "quality": 0.0,
+            "line_count": 0,
+            "error": "",
+            "rows": [],
+        }
+    best_attempt["attempts"] = attempts
+    return best_attempt.get("rows", []), best_attempt
+
+
 def compare_pdf_ocr_backends(
     src,
     profile_key=None,
@@ -532,6 +778,7 @@ def compare_pdf_ocr_backends(
     page_index=0,
     cpu_threads=4,
     limit_side_len=2880,
+    preprocess_mode=None,
 ):
     import fitz
 
@@ -581,7 +828,12 @@ def compare_pdf_ocr_backends(
                 limit_side_len=limit_side_len,
                 cpu_threads=cpu_threads,
             )
-            rows = backend.ocr_image_bytes(image_bytes)
+            rows, attempt = _ocr_backend_image_with_preprocess(
+                backend,
+                image_bytes,
+                preprocess_mode=preprocess_mode,
+                backend_key=backend_key,
+            )
             text = "\n".join((row.get("text") or "").strip() for row in rows if (row.get("text") or "").strip())
             elapsed = time.perf_counter() - started
             preview = text[:240].replace("\r", " ").replace("\n", " | ")
@@ -593,6 +845,8 @@ def compare_pdf_ocr_backends(
                     "text_length": len(text),
                     "text_preview": preview,
                     "line_count": len(rows),
+                    "quality": attempt.get("quality", 0.0),
+                    "preprocess": attempt.get("preprocess", "original"),
                     "reason": info.get("reason", ""),
                 }
             )
@@ -606,6 +860,8 @@ def compare_pdf_ocr_backends(
                     "text_length": 0,
                     "text_preview": "",
                     "line_count": 0,
+                    "quality": 0.0,
+                    "preprocess": "",
                     "reason": str(exc),
                 }
             )
@@ -619,6 +875,7 @@ def compare_pdf_ocr_backends(
         "profile": profile_key,
         "model_root": str(model_root),
         "compare_mode": "fullPage_first_page",
+        "preprocess": normalize_preprocess_mode(preprocess_mode),
         "results": results,
     }
 
@@ -633,6 +890,7 @@ def write_pdf_ocr_comparison_report(
     page_index=0,
     cpu_threads=4,
     limit_side_len=2880,
+    preprocess_mode=None,
 ):
     summary = compare_pdf_ocr_backends(
         src=src,
@@ -643,6 +901,7 @@ def write_pdf_ocr_comparison_report(
         page_index=page_index,
         cpu_threads=cpu_threads,
         limit_side_len=limit_side_len,
+        preprocess_mode=preprocess_mode,
     )
 
     report_path = Path(report_path).resolve()
@@ -655,18 +914,20 @@ def write_pdf_ocr_comparison_report(
         f"- 采样页：第 {summary['page_index'] + 1} 页",
         "- 采样方式：整页渲染（用于统一比较各 OCR 后端）",
         f"- OCR 配置：`{summary['profile']}`",
+        f"- 图像增强：`{summary['preprocess']}`",
         f"- 模型目录：`{summary['model_root']}`",
         "",
         "## 结果概览",
         "",
-        "| 后端 | 状态 | 耗时(秒) | 文本长度 | 识别块数 | 说明 |",
-        "| --- | --- | ---: | ---: | ---: | --- |",
+        "| 后端 | 状态 | 耗时(秒) | 文本长度 | 识别块数 | 质量 | 增强 | 说明 |",
+        "| --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
     ]
 
     for item in summary["results"]:
         seconds = "-" if item["seconds"] is None else str(item["seconds"])
         lines.append(
-            f"| `{item['backend']}` | {item['status']} | {seconds} | {item['text_length']} | {item['line_count']} | {item['reason']} |"
+            f"| `{item['backend']}` | {item['status']} | {seconds} | {item['text_length']} | {item['line_count']} | "
+            f"{item.get('quality', 0.0)} | {item.get('preprocess', '')} | {item['reason']} |"
         )
 
     lines.extend(["", "## 文本预览", ""])
@@ -677,6 +938,8 @@ def write_pdf_ocr_comparison_report(
             lines.append(f"- 耗时：`{item['seconds']}` 秒")
         if item["reason"]:
             lines.append(f"- 说明：{item['reason']}")
+        if item.get("preprocess"):
+            lines.append(f"- 图像增强：`{item.get('preprocess')}`，质量评分：`{item.get('quality', 0.0)}`")
         preview = item["text_preview"] or "(无文本预览)"
         lines.append("")
         lines.append("```text")
@@ -1084,6 +1347,7 @@ class FengxiPdfOcrEngine:
         cls=False,
         limit_side_len=2880,
         cpu_threads=4,
+        preprocess_mode=None,
     ):
         import fitz
 
@@ -1094,20 +1358,94 @@ class FengxiPdfOcrEngine:
         self.use_cls = bool(cls)
         self.cpu_threads = max(1, int(cpu_threads))
         self.limit_side_len = int(limit_side_len)
+        self.preprocess_mode = normalize_preprocess_mode(preprocess_mode)
+        self.backend_usage = {}
+        self.backend_errors = []
+        self._backend_cache = {}
         self.backend_key = _resolve_backend_key(self.requested_backend_key)
-        backend_cls = BACKEND_CLASS_MAP[self.backend_key]
-        self.backend = backend_cls(
+        self.backend = self._init_primary_backend()
+
+    def _init_primary_backend(self):
+        errors = []
+        if self.requested_backend_key == "auto":
+            for backend_key in AUTO_BACKEND_ORDER:
+                try:
+                    _probe_backend_import(backend_key)
+                    backend = self._get_backend(backend_key)
+                    self.backend_key = backend_key
+                    return backend
+                except Exception as exc:
+                    errors.append(f"{backend_key}: {exc}")
+                    self.backend_errors.append({"backend": backend_key, "error": str(exc)})
+            error_text = "；".join(errors) if errors else "未发现可尝试的后端。"
+            raise RuntimeError(f"当前环境没有可用的 OCR 后端。已尝试: {error_text}")
+        return self._get_backend(self.backend_key)
+
+    def _get_backend(self, backend_key):
+        if backend_key in self._backend_cache:
+            return self._backend_cache[backend_key]
+        backend_cls = BACKEND_CLASS_MAP[backend_key]
+        backend = backend_cls(
             self.profile_key,
             cls=self.use_cls,
             model_root=self.model_root,
             limit_side_len=self.limit_side_len,
             cpu_threads=self.cpu_threads,
         )
+        self._backend_cache[backend_key] = backend
+        return backend
+
+    def _iter_backend_candidates(self):
+        if self.requested_backend_key == "auto":
+            return list(AUTO_BACKEND_ORDER)
+        return [self.backend_key]
 
     def close(self):
-        if getattr(self, "backend", None):
-            self.backend.close()
+        for backend in list(getattr(self, "_backend_cache", {}).values()):
+            try:
+                backend.close()
+            except Exception:
+                pass
+        self._backend_cache = {}
         self.backend = None
+
+    def _ocr_one_image(self, image_bytes):
+        best_rows = None
+        best_attempt = None
+        errors = []
+        for backend_key in self._iter_backend_candidates():
+            try:
+                if backend_key not in self._backend_cache:
+                    _probe_backend_import(backend_key)
+                backend = self._get_backend(backend_key)
+                rows, attempt = _ocr_backend_image_with_preprocess(
+                    backend,
+                    image_bytes,
+                    preprocess_mode=self.preprocess_mode,
+                    backend_key=backend_key,
+                )
+            except Exception as exc:
+                errors.append(f"{backend_key}: {exc}")
+                self.backend_errors.append({"backend": backend_key, "error": str(exc)})
+                if self.requested_backend_key != "auto":
+                    raise
+                continue
+
+            quality = float(attempt.get("quality", 0.0))
+            if best_attempt is None or quality > float(best_attempt.get("quality", 0.0)):
+                best_rows = rows
+                best_attempt = attempt
+            if self.requested_backend_key != "auto" or quality >= OCR_QUALITY_ACCEPT_SCORE:
+                break
+
+        if best_rows is None:
+            error_text = "；".join(errors) if errors else "没有可用 OCR 后端。"
+            raise RuntimeError(f"OCR 识别失败，已尝试: {error_text}")
+
+        selected_backend = best_attempt.get("backend") or self.backend_key
+        self.backend_usage[selected_backend] = self.backend_usage.get(selected_backend, 0) + 1
+        self.backend_key = selected_backend
+        return best_rows, best_attempt
 
     def _render_full_page(self, page):
         rect = page.rect
@@ -1205,7 +1543,7 @@ class FengxiPdfOcrEngine:
     def _ocr_images(self, images):
         results = []
         for image in images:
-            backend_rows = self.backend.ocr_image_bytes(image["bytes"])
+            backend_rows, attempt = self._ocr_one_image(image["bytes"])
             x, y = image["xy"]
             scale_w = image["scale_w"]
             scale_h = image["scale_h"]
@@ -1224,6 +1562,9 @@ class FengxiPdfOcrEngine:
                         "text": row["text"],
                         "score": float(row.get("score", 0)),
                         "from": row.get("from", "ocr"),
+                        "backend": attempt.get("backend", self.backend_key),
+                        "preprocess": attempt.get("preprocess", "original"),
+                        "quality": attempt.get("quality", 0.0),
                     }
                 )
         return results
@@ -1275,5 +1616,7 @@ class FengxiPdfOcrEngine:
             "requested_backend": self.requested_backend_key,
             "backend": self.backend_key,
             "backend_label": get_backend_label(self.backend_key),
+            "preprocess": self.preprocess_mode,
+            "backend_usage": dict(self.backend_usage),
             "model_root": str(self.model_root),
         }
