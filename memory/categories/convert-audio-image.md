@@ -10,6 +10,25 @@
 - `convert` 任务整体走单线程安全路径。
 - `pdf2word` 支持复杂/大文件跳过策略，避免乱码。
 
+## 2026-05-24 格式转换单文件 adapter seam
+- `tools/fx_convert_task.py` 新增 `ConvertFileContext` 与 `process_convert_file(...)`，用于单文件 `word2pdf` / `pdf2word` / `ppt2pdf` 的窄适配。
+- adapter 负责统一输出路径规划、复杂 PDF 跳过复制、日志、返回字典和测试注入；真实转换仍调用 context 注入的 runtime 能力：
+  - `convert_doc_to_pdf(...)`
+  - `convert_pdf_to_word(...)`
+  - `convert_ppt_to_pdf(...)`
+- `Fengxi_Toolbox.py` 的 `_patch_convert_file_adapter()` 只接管 `task_type == "convert"` 且模式为 `word2pdf` / `pdf2word` / `ppt2pdf` 的 `process_single_file(...)`；`imgs2pdf` 继续走专用任务 adapter。
+- 当前边界：这一步没有重写 Office COM 或 `pdf2docx` 后端，只把可测试 seam 先建立起来。后续如果某个转换后端失败，应优先在 `ConvertFileContext` 或 `process_convert_file(...)` 外围补能力。
+- 回归：`convert_file_adapter_module_exports`，并确认 `pdf_to_word`、`word_to_pdf`、`ppt_to_pdf`、`imgs2pdf_workflow` 继续通过。
+- 验证：`py_compile` 通过，`smoke_test.py` 14/14，`full_debug_test.py` 146/146。
+
+## 2026-05-24 格式转换核心与 imgs2pdf 任务适配
+- `tools/fx_convert_core.py` 已承接纯规则：`CONVERT_MODE_SPECS`、模式归一化、模式描述、输入文件收集、输出路径规划。
+- `Fengxi_Toolbox.py` 的 `FEATURE_REGISTRY["convert"].preview_modes` 已覆盖 `word2pdf`、`pdf2word`、`ppt2pdf`、`imgs2pdf`；开始前预览和队列描述通过 `_get_convert_preview_detail(...)` / `_collect_convert_files(...)` 使用该核心。
+- `tools/fx_convert_task.py` 新增 `ConvertImgsToPdfCallbacks` 与 `run_convert_imgs_to_pdf_task_core(...)`，当前只接管 `convert + imgs2pdf`，复用图片 PDF 核心的合并能力和结果统计。
+- `Fengxi_Toolbox.py` 新增 `_run_convert_imgs_to_pdf_task(...)` 与 `_patch_convert_imgs_to_pdf_task()`，仅在 `task_type == "convert"` 且模式为 `imgs2pdf` 时路由到新模块；输出继续固定到 `【处理完成】结果文件夹`，保持原 `imgs2pdf_图集合并.pdf` 命名语义。
+- `word2pdf`、`pdf2word`、`ppt2pdf` 暂不下沉到新模块，仍保留原 `fengxi_runtime.bin` / runtime `run_process()` 路径，因为依赖 Office COM 与 `pdf2docx` 细节。
+- 回归：`convert_core_module_exports`、`convert_task_imgs2pdf_module_exports`、`convert_preview_uses_core_rules`、`imgs2pdf_workflow`。验证：`py_compile` 通过，`smoke_test.py` 14/14，`full_debug_test.py` 145/145。
+
 ## 音频工具
 - 任务类型：`audio`
 - 模式：
@@ -29,6 +48,13 @@
 - 线程内只做文件转换/复制，日志、进度、统一任务结果仍在主流程汇总，避免 Tk UI 跨线程写入。
 - 结构化结果会写回 `processed_count`、`success_count`、`failed_count`、`outputs`、`output_root`，失败时保留相对路径失败项。
 - 回归：`audio_parallel_executor` 会 monkeypatch `convert_audio_format` 与 `ThreadPoolExecutor`，确认多 worker、输出 `a.mp3`/`b.mp3`，且 `task_result.status == success`。
+
+## 2026-05-24 音频任务模块化收口
+- 新增并接管 `tools/fx_audio_task.py`，当前导出 `AudioTaskCallbacks`、`collect_audio_files(...)`、`get_audio_task_args(...)`、`build_audio_output_path(...)`、`process_one_audio_file(...)`、`run_audio_task_core(...)`。
+- `Fengxi_Toolbox.py` 的 `_collect_audio_files(...)`、`_get_audio_task_args(...)`、`_build_audio_output_path(...)`、`_process_one_audio_file(...)`、`_run_audio_task(...)` 都是薄包装或 adapter。
+- 已清理主文件里 `return run_audio_task_core(...)` 后面残留的旧音频实现，避免后续维护者误以为主文件还有第二套执行路径。
+- 行为边界继续保持：`video2mp3` 只处理视频源；`convert` 只处理音频源；不支持的文件原样复制；缺少后端时复制原文件并记录警告状态。
+- 回归：`audio_task_module_exports` 覆盖模块级接口；`audio_parallel_executor` 覆盖真实 `app.run_process(..., "audio")` 并行路径。
 
 ## 图片工厂
 - 任务类型：`image`

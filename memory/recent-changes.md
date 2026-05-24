@@ -1,5 +1,65 @@
 # 最近变更
 
+## 2026-05-24 20:03:54 | runtime
+- 摘要：packaged and opened latest build after prefs modularization
+- 文件：dist_release_ascii\fx_toolbox\fx_toolbox.exe,tools\fx_user_prefs.py,Fengxi_Toolbox.py,memory\recent-changes.md,memory\changes.jsonl
+- 说明：Built the onedir release successfully with package.bat after the user-preferences modularization pass, then opened dist_release_ascii/fx_toolbox/fx_toolbox.exe for manual testing. The build completed cleanly and the app process was started from the release directory.
+
+## 2026-05-24 20:00:59 | runtime
+- 摘要：legacy presets storage seam
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, tools/fx_user_prefs.py, memory.md, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：Moved legacy preset storage helpers into tools/fx_user_prefs.py without adding any dedicated preset center UI. Fengxi_Toolbox.py keeps compatibility wrappers; last_settings_no_dedicated_preset_center remains covered. Validation passed with py_compile, smoke_test 14/14, and full_debug_test 149/149.
+
+## 2026-05-24 19:53:02 | runtime
+- 摘要：last settings storage seam
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, tools/fx_user_prefs.py, memory.md, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：Moved pure last_settings storage helpers into tools/fx_user_prefs.py: category normalization, load/save last settings entries, and active category resolution. UI capture/apply logic remains in Fengxi_Toolbox.py. Validation passed with py_compile, smoke_test 14/14, and full_debug_test 148/148.
+
+## 2026-05-24 19:43:11 | runtime
+- 摘要：user prefs storage modularization
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, tools/fx_user_prefs.py, memory.md, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：Added tools/fx_user_prefs.py with UserPrefsContext for user_prefs.json storage, output strategy, remove-watermark mode, watermark text, and watermark filename rule persistence. Fengxi_Toolbox.py keeps compatibility wrappers and UI trace bindings unchanged. Validation passed with py_compile, smoke_test 14/14, and full_debug_test 147/147.
+
+## 2026-05-24 19:24:29 | convert
+- 摘要：convert single-file adapter seam
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, tools/fx_convert_core.py, tools/fx_convert_task.py, memory.md, memory/architecture.md, memory/categories/convert-audio-image.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：Added ConvertFileContext and process_convert_file for word2pdf/pdf2word/ppt2pdf single-file adapter routing while keeping real Office COM/pdf2docx conversion on runtime-injected functions. imgs2pdf remains on the dedicated task adapter. Validation passed with py_compile, smoke_test 14/14, and full_debug_test 146/146.
+
+## 2026-05-24 18:45:56 | runtime
+- 摘要：packaged and opened convert modularization build
+- 文件：dist_release_ascii/fx_toolbox/fx_toolbox.exe, memory/recent-changes.md, memory/changes.jsonl
+- 说明：Built release onedir after convert imgs2pdf task adapter modularization and opened dist_release_ascii/fx_toolbox/fx_toolbox.exe for manual testing. Source validation before packaging: py_compile passed, smoke_test 14/14, full_debug_test 145/145.
+
+## 2026-05-24 18:40:37 | convert
+- 摘要：convert imgs2pdf task adapter modularization
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, tools/fx_convert_core.py, tools/fx_convert_task.py, memory/architecture.md, memory/categories/convert-audio-image.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：Added tools/fx_convert_task.py to route only convert/imgs2pdf through a dedicated task adapter over the new convert core. Fengxi_Toolbox.py now keeps a thin convert imgs2pdf adapter while word/pdf/ppt conversion stays on the runtime path. Added regression coverage for the convert task module and real imgs2pdf workflow. Validation passed with py_compile, smoke_test 14/14, and full_debug_test 145/145.
+
+## 2026-05-24 12:51:28 | runtime
+- 摘要：audio module cleanup and OCR test stabilization
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, tools/fx_audio_task.py, memory.md, memory/architecture.md, memory/categories/convert-audio-image.md, memory/debug-status.md, memory/recent-changes.md, agent.md
+- 说明：Removed the dead post-return legacy audio implementation from Fengxi_Toolbox.py so audio now stays on the new task module seam only. Also stabilized full_debug_test OCR coverage by avoiding network-dependent rapidocr model-download behavior in the workflow test, while keeping the real OCR engine code unchanged. Validation passed with py_compile, smoke_test 14/14, and full_debug_test 142/142.
+
+## 2026-05-24 10:59:01 | pdf_file
+- 摘要：meta core modularization
+- 文件：Fengxi_Toolbox.py, tools/fx_meta_core.py, full_debug_test.py, memory.md, memory/architecture.md, memory/categories/pdf-file-meta-zip.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：Added tools/fx_meta_core.py for metadata/privacy helpers: file timestamp copying, PDF author metadata writing, Office author helper, output path planning, and meta process_single_file adapter. Fengxi_Toolbox.py now keeps thin wrappers and routes task_type=meta through the module while preserving legacy semantics. Verified with py_compile, smoke_test 14/14, and full_debug_test 141/141.
+
+## 2026-05-24 09:35:32 | runtime
+- 摘要：file dedup task adapter modularization
+- 文件：Fengxi_Toolbox.py, tools/fx_file_manager_task.py, tools/fx_file_manager_core.py, full_debug_test.py, memory.md, memory/architecture.md, memory/categories/pdf-file-meta-zip.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：Added tools/fx_file_manager_task.py as the file + dedup task adapter layer. Fengxi_Toolbox.py now routes real file dedup work through _run_file_dedup_task_core -> run_file_dedup_task while tools/fx_file_manager_core.py keeps the MD5 dedup core. Added regression coverage for the task adapter seam and verified with py_compile, smoke_test 14/14, and full_debug_test 139/139.
+
+## 2026-05-24 01:17:42 | runtime
+- 摘要：file dedup core run_process route
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory.md, memory/architecture.md, memory/categories/pdf-file-meta-zip.md, memory/debug-status.md, memory/recent-changes.md
+- 说明：Routed file + dedup through the loader adapter and tools.fx_file_manager_core.run_file_dedup_task while preserving single-thread whole-folder MD5 duplicate deletion semantics. Strengthened the real app.run_process file_dedup regression to prove the core module path is used. Verified with py_compile, smoke_test 14/14, and full_debug_test 138/138.
+
+## 2026-05-24 00:43:45 | ui
+- 摘要：bottom progress status moved out of action row
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory.md, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md, memory/categories/pdf-file-meta-zip.md
+- 说明：Moved the bottom progress status label out of the button action row and into an independent grid slot on the bottom bar so long file names no longer squeeze the multithread switch, start/stop buttons, or queue actions. Added a regression that asserts the status label uses grid on the bottom bar, not pack inside the action row. Verified with py_compile, smoke_test 14/14, and full_debug_test 138/138.
+
 ## 2026-05-23 20:13:42 | runtime
 - 摘要：文件管家重命名核心模块化
 - 文件：Fengxi_Toolbox.py, tools/fx_file_manager_core.py, full_debug_test.py, memory.md, memory/architecture.md, memory/categories/pdf-file-meta-zip.md, memory/debug-status.md, memory/recent-changes.md

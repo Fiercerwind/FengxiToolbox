@@ -35,6 +35,30 @@ from pathlib import Path
 from reportlab.lib import pagesizes
 from reportlab.pdfbase import ttfonts
 from reportlab.pdfgen import canvas
+from tools.fx_audio_task import (
+    AUDIO_VALID_AUDIO_EXTS,
+    AUDIO_VALID_VIDEO_EXTS,
+    AudioTaskCallbacks,
+    build_audio_output_path as _audio_task_build_output_path,
+    collect_audio_files as _audio_task_collect_files,
+    get_audio_task_args as _audio_task_get_args,
+    process_one_audio_file as _audio_task_process_one_file,
+    run_audio_task_core,
+)
+from tools.fx_convert_core import (
+    CONVERT_IMAGE_EXTS,
+    CONVERT_MODE_SPECS,
+    collect_convert_files as _convert_core_collect_files,
+    describe_convert_mode as _convert_core_describe_mode,
+    normalize_convert_mode as _convert_core_normalize_mode,
+    plan_convert_output_path as _convert_core_plan_output_path,
+)
+from tools.fx_convert_task import (
+    ConvertFileContext,
+    ConvertImgsToPdfCallbacks,
+    process_convert_file,
+    run_convert_imgs_to_pdf_task_core,
+)
 from tools.fx_image_pdf_task import (
     IMAGE_TO_PDF_EXTS,
     ImagePdfTaskCallbacks,
@@ -72,6 +96,13 @@ from tools.fx_file_manager_core import (
     rename_file_name as _file_core_rename_file_name,
     run_file_dedup_task as _file_core_run_file_dedup_task,
 )
+from tools.fx_file_manager_task import run_file_dedup_task_core as _run_file_dedup_task_core
+from tools.fx_meta_core import (
+    modify_file_timestamp as _meta_core_modify_file_timestamp,
+    modify_office_meta as _meta_core_modify_office_meta,
+    modify_pdf_author as _meta_core_modify_pdf_author,
+    process_meta_file as _meta_core_process_meta_file,
+)
 from tools.fx_task_history_exports import (
     TaskHistoryExportContext,
     build_diagnostic_summary,
@@ -91,6 +122,28 @@ from tools.fx_task_history_exports import (
     export_task_history_report,
     redact_diagnostic_payload,
     redact_diagnostic_text,
+)
+from tools.fx_user_prefs import (
+    UserPrefsContext,
+    get_saved_output_strategy as _prefs_get_saved_output_strategy,
+    get_saved_remove_wm_mode as _prefs_get_saved_remove_wm_mode,
+    get_saved_watermark_filename_rule_settings as _prefs_get_saved_watermark_filename_rule_settings,
+    get_saved_watermark_text as _prefs_get_saved_watermark_text,
+    get_active_last_settings_category as _prefs_get_active_last_settings_category,
+    delete_preset_entry as _prefs_delete_preset_entry,
+    find_preset_entry as _prefs_find_preset_entry,
+    load_presets as _prefs_load_presets,
+    load_last_settings as _prefs_load_last_settings,
+    load_user_prefs as _prefs_load_user_prefs,
+    make_preset_id as _prefs_make_preset_id,
+    save_preset_entry as _prefs_save_preset_entry,
+    save_presets as _prefs_save_presets,
+    save_last_settings_entry as _prefs_save_last_settings_entry,
+    save_output_strategy as _prefs_save_output_strategy,
+    save_remove_wm_mode as _prefs_save_remove_wm_mode,
+    save_user_prefs as _prefs_save_user_prefs,
+    save_watermark_filename_rule_settings as _prefs_save_watermark_filename_rule_settings,
+    save_watermark_text as _prefs_save_watermark_text,
 )
 from tools.fx_watermark_core import (
     add_watermark_to_pdf as _watermark_core_add_watermark_to_pdf,
@@ -395,8 +448,6 @@ QUEUE_HISTORY_LIMIT = 80
 QUEUE_HISTORY_RETENTION_DAYS = 90
 PROGRESS_STATUS_IDLE_TEXT = "进度：等待任务"
 PARALLEL_MAX_WORKERS = 4
-AUDIO_VALID_AUDIO_EXTS = (".mp3", ".wav", ".flac", ".m4a", ".ogg", ".wma", ".aac")
-AUDIO_VALID_VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv")
 PARALLEL_SWITCH_TEXT = "批量并行（部分生效）"
 PRESET_CATEGORY_LABELS = {
     "watermark": "批量水印",
@@ -455,7 +506,12 @@ FEATURE_REGISTRY = {
         "input": {"file": True, "folder": True, "drag_drop": True},
         "output_strategy": {"supported": False, "force_result_folder": False},
         "parallel": {"mode": "forced_single", "detail": {"": "Office/PDF 转换依赖 COM 或重型转换器，已强制单线程。"}},
-        "preview_modes": {},
+        "preview_modes": {
+            "word2pdf": "Word 转 PDF",
+            "pdf2word": "PDF 转 Word",
+            "ppt2pdf": "PPT 转 PDF",
+            "imgs2pdf": "多图合并 ➔ PDF电子书",
+        },
     },
     "audio": {
         "label": "音频工具",
@@ -2101,12 +2157,20 @@ def _apply_shell_layout_tightening(app):
     app.bottom_bar.configure(height=228)
     try:
         app.bottom_bar.grid_propagate(False)
+        app.bottom_bar.grid_columnconfigure(0, weight=1)
+        app.bottom_bar.grid_columnconfigure(1, weight=1)
         app.bottom_bar.grid_rowconfigure(2, weight=0, minsize=128)
     except Exception:
         pass
     for child in app.bottom_bar.winfo_children():
         if child is app.progress_bar:
-            child.grid_configure(pady=(10, 8), padx=24)
+            child.grid_configure(row=0, column=0, columnspan=1, pady=(10, 8), padx=(24, 12), sticky="ew")
+        elif child is getattr(app, "_fx_progress_status_label", None):
+            try:
+                child.configure(height=30, anchor="w", justify="left")
+            except Exception:
+                pass
+            child.grid_configure(row=0, column=1, padx=(0, 24), pady=(8, 8), sticky="ew")
         elif child is app.log_box:
             try:
                 child.configure(height=128)
@@ -2767,6 +2831,27 @@ _ns["add_watermark_to_word"] = add_watermark_to_word
 _debug("bootstrap:watermark_core_wrapped")
 
 
+def modify_file_timestamp(src, dst, timestamp):
+    return _meta_core_modify_file_timestamp(src, dst, timestamp)
+
+
+def modify_office_meta(app, src, dst, author_name, app_type="word"):
+    return _meta_core_modify_office_meta(app, src, dst, author_name, app_type=app_type)
+
+
+def modify_pdf_author(src, dst, author_name):
+    return _meta_core_modify_pdf_author(src, dst, author_name)
+
+
+globals()["modify_file_timestamp"] = modify_file_timestamp
+globals()["modify_office_meta"] = modify_office_meta
+globals()["modify_pdf_author"] = modify_pdf_author
+_ns["modify_file_timestamp"] = modify_file_timestamp
+_ns["modify_office_meta"] = modify_office_meta
+_ns["modify_pdf_author"] = modify_pdf_author
+_debug("bootstrap:meta_core_wrapped")
+
+
 def _patch_task_routing():
     try:
         original = FengxiToolboxApp.resolve_task_config
@@ -3068,125 +3153,153 @@ def _patch_file_manager_core():
 _patch_file_manager_core()
 
 
-def _run_file_dedup_task(app, input_folder):
-    normalized_input = _normalize_input_path_value(input_folder)
-    result = _get_last_task_result(app)
-    if result is None:
-        result = _start_task_result(app, normalized_input, "file")
-    _set_task_result_output_strategy(result, "file", _get_task_output_strategy(app, "file"))
-    _set_task_result_output_root(result, normalized_input)
-
-    all_files = []
+def _patch_meta_core():
     try:
-        all_files = list(app.collect_input_files(normalized_input, "file"))
-    except Exception:
-        if normalized_input and os.path.isfile(normalized_input):
-            all_files = [normalized_input]
-
-    if not all_files:
-        app.log("⚠️ 未找到可去重的文件。")
-        _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=1)
-        _set_task_result_finished(result, "skipped", message="未找到可去重的文件", detail="未找到可去重的文件", skipped=True)
+        original_process_single = FengxiToolboxApp.process_single_file
+    except Exception as exc:
+        _debug(f"patch_meta_core:missing:{exc}")
         return
 
-    tracker = _get_active_progress_tracker(app)
-    progress_bar = getattr(app, "progress_bar", None)
-    progress_status = {"completed": 0, "total": len(all_files)}
+    if getattr(original_process_single, "__fx_meta_core_patch__", False):
+        return
 
-    def report_progress(*, completed=0, total=1, current_path="", stage="hashing", fraction=0.0):
-        progress_status["completed"] = int(completed or 0)
-        progress_status["total"] = max(1, int(total or 1))
-        current_name = os.path.basename(str(current_path or "").rstrip("\\/")) or str(current_path or "")
-        stage_label = "正在比对" if stage == "hashing" else ("已完成" if stage == "done" else str(stage or "处理中"))
-        if tracker is not None:
-            try:
-                tracker.total_units = max(1, int(total or tracker.total_units or 1))
-            except Exception:
-                pass
-            tracker.set_current_item(current_name, f"文件去重 · {stage_label}")
-            if stage == "done":
-                tracker.complete_units(1, f"文件去重 · {stage_label}")
-            return
-        try:
-            if progress_bar is not None:
-                progress_bar.set(_clamp_progress_value(fraction))
-        except Exception:
-            pass
-        try:
-            _set_progress_status(
-                app,
-                current_file=current_name,
-                stage=f"文件去重 · {stage_label}",
-                fraction=_clamp_progress_value(fraction),
-                completed=int(completed or 0),
-                total=max(1, int(total or 1)),
+    def patched_process_single_file(self, src, input_folder, output_folder, task_type, args, failed_list):
+        if task_type == "meta":
+            return _meta_core_process_meta_file(
+                src,
+                input_folder,
+                output_folder,
+                args,
+                failed_list,
+                copy_file_safe=copy_file_safe,
+                log=getattr(self, "log", None),
             )
-        except Exception:
-            pass
+        return original_process_single(self, src, input_folder, output_folder, task_type, args, failed_list)
 
-    def log_message(message):
-        try:
-            app.log(str(message))
-        except Exception:
-            pass
-
-    try:
-        dedup_result = _file_core_run_file_dedup_task(
-            all_files,
-            delete_file=os.remove,
-            log=log_message,
-            stop_requested=lambda: bool(getattr(app, "stop_event", False)),
-            progress=report_progress,
-        )
-    except Exception as exc:
-        failed_items = list(all_files)
-        result["failed_items"] = failed_items
-        _set_task_result_counts(result, processed=len(all_files), success=0, failed=len(failed_items), skipped=0)
-        _set_task_result_finished(result, "failed", message=str(exc), detail=str(exc), error=str(exc))
-        raise
-
-    kept = list(dedup_result.get("kept") or [])
-    removed = list(dedup_result.get("removed") or [])
-    failed_items = list(dedup_result.get("failed_items") or [])
-    result["failed_items"] = failed_items
-    for path in kept:
-        _add_task_result_output(result, path)
-    _set_task_result_output_root(result, os.path.dirname(kept[0]) if kept else normalized_input)
-    _set_task_result_counts(
-        result,
-        processed=int(dedup_result.get("processed_count") or len(all_files)),
-        success=int(dedup_result.get("kept_count") or len(kept)),
-        failed=int(dedup_result.get("failed_count") or len(failed_items)),
-        skipped=0,
+    patched_process_single_file.__fx_meta_core_patch__ = True
+    patched_process_single_file.__fx_file_manager_core_patch__ = bool(
+        getattr(original_process_single, "__fx_file_manager_core_patch__", False)
     )
+    patched_process_single_file.__wrapped__ = original_process_single
+    FengxiToolboxApp.process_single_file = patched_process_single_file
+    _debug("patch_meta_core:installed")
 
-    status = str(dedup_result.get("status") or "unknown")
-    if status == "success":
-        log_message(f"✅ [文件去重] 完成，保留 {len(kept)} 个文件，删除 {len(removed)} 个重复文件。")
-        _set_task_result_finished(
-            result,
-            "success",
-            message=f"文件去重已完成，删除 {len(removed)} 个重复文件",
-            detail=f"保留 {len(kept)} 个文件，删除 {len(removed)} 个重复文件",
-        )
-    elif status == "stopped":
-        log_message("⏹️ [文件去重] 已停止。")
-        _set_task_result_finished(
-            result,
-            "stopped",
-            message="用户停止文件去重任务",
-            detail="用户停止文件去重任务",
-            stopped=True,
-        )
-    else:
-        log_message(f"❌ [文件去重] 完成但存在失败：{len(failed_items)} 项。")
-        _set_task_result_finished(
-            result,
-            "failed",
-            message=f"文件去重任务结束，但有 {len(failed_items)} 个文件处理失败。",
-            detail=f"失败 {len(failed_items)} 个文件",
-            error=f"失败 {len(failed_items)} 个文件",
-        )
+
+_patch_meta_core()
+
+
+def _patch_convert_file_adapter():
+    try:
+        original_process_single = FengxiToolboxApp.process_single_file
+    except Exception as exc:
+        _debug(f"patch_convert_file_adapter:missing:{exc}")
+        return
+
+    if getattr(original_process_single, "__fx_convert_file_adapter_patch__", False):
+        return
+
+    def patched_process_single_file(self, src, input_folder, output_folder, task_type, args, failed_list):
+        if task_type == "convert":
+            values = list(args or [])
+            mode = _convert_core_normalize_mode(values[0] if values else _get_convert_mode(self))
+            if mode != "imgs2pdf":
+                skip_complex = bool(values[1]) if len(values) > 1 else False
+                result = process_convert_file(
+                    src,
+                    input_folder,
+                    output_folder,
+                    mode,
+                    ConvertFileContext(
+                        word_app=values[2] if len(values) > 2 else None,
+                        ppt_app=values[3] if len(values) > 3 else None,
+                        skip_complex=skip_complex,
+                        convert_doc_to_pdf=convert_doc_to_pdf,
+                        convert_pdf_to_word=convert_pdf_to_word,
+                        convert_ppt_to_pdf=convert_ppt_to_pdf,
+                        check_pdf_complexity=check_pdf_complexity,
+                        copy_file_safe=copy_file_safe,
+                        log=getattr(self, "log", None),
+                    ),
+                )
+                if not result.get("ok"):
+                    try:
+                        failed_list.append(str(src))
+                    except Exception:
+                        pass
+                return None
+        return original_process_single(self, src, input_folder, output_folder, task_type, args, failed_list)
+
+    patched_process_single_file.__fx_convert_file_adapter_patch__ = True
+    patched_process_single_file.__fx_meta_core_patch__ = bool(
+        getattr(original_process_single, "__fx_meta_core_patch__", False)
+    )
+    patched_process_single_file.__fx_file_manager_core_patch__ = bool(
+        getattr(original_process_single, "__fx_file_manager_core_patch__", False)
+    )
+    patched_process_single_file.__wrapped__ = original_process_single
+    FengxiToolboxApp.process_single_file = patched_process_single_file
+    _debug("patch_convert_file_adapter:installed")
+
+
+_patch_convert_file_adapter()
+
+
+def _run_file_dedup_task(app, input_folder):
+    normalized_input = _normalize_input_path_value(input_folder)
+    result = _run_file_dedup_task_core(
+        app,
+        normalized_input,
+        collect_input_files=getattr(app, "collect_input_files", None),
+        progress_tracker=_get_active_progress_tracker(app),
+        progress_bar=getattr(app, "progress_bar", None),
+        get_last_task_result=_get_last_task_result,
+        start_task_result=_start_task_result,
+        set_task_result_output_strategy=_set_task_result_output_strategy,
+        set_task_result_output_root=_set_task_result_output_root,
+        add_task_result_output=_add_task_result_output,
+        set_task_result_counts=_set_task_result_counts,
+        set_task_result_finished=_set_task_result_finished,
+        normalize_input_path=_normalize_input_path_value,
+        get_task_output_strategy=_get_task_output_strategy,
+        clamp_progress_value=_clamp_progress_value,
+        set_progress_status=_set_progress_status,
+        log=getattr(app, "log", None),
+    )
+    return result
+
+
+def _patch_file_dedup_core_task():
+    try:
+        original_run_process = FengxiToolboxApp.run_process
+    except Exception as exc:
+        _debug(f"patch_file_dedup_core:missing:{exc}")
+        return
+
+    if getattr(original_run_process, "__fx_file_dedup_core_patch__", False):
+        return
+
+    def patched_run_process(self, input_folder, task_type):
+        if task_type == "file":
+            try:
+                mode = str(self.file_mode_var.get() if getattr(self, "file_mode_var", None) is not None else "")
+            except Exception:
+                mode = ""
+            if mode.strip().lower() == "dedup":
+                try:
+                    _run_file_dedup_task(self, input_folder)
+                except Exception as exc:
+                    self.log(f"🔥 [严重错误] {exc}")
+                finally:
+                    self.reset_ui()
+                return
+        return original_run_process(self, input_folder, task_type)
+
+    patched_run_process.__fx_file_dedup_core_patch__ = True
+    FengxiToolboxApp.run_process = patched_run_process
+    _debug("patch_file_dedup_core:installed")
+
+
+_patch_file_dedup_core_task()
 
 
 def _safe_float(value, default=0.0):
@@ -5414,6 +5527,124 @@ def _get_image_pdf_mode(app):
         return ""
 
 
+def _get_convert_mode(app):
+    mode_var = getattr(app, "cv_mode", None)
+    try:
+        raw_mode = mode_var.get() if mode_var is not None else ""
+    except Exception:
+        raw_mode = ""
+    return _convert_core_normalize_mode(raw_mode)
+
+
+def _get_convert_preview_detail(app):
+    try:
+        return _convert_core_describe_mode(_get_convert_mode(app), fallback="格式转换")
+    except Exception:
+        return "格式转换"
+
+
+def _collect_convert_files(app, input_value):
+    normalized_input = _normalize_input_path_value(input_value)
+    return _convert_core_collect_files(
+        normalized_input,
+        _get_convert_mode(app),
+        collect_input_files=getattr(app, "collect_input_files", None),
+    )
+
+
+def _run_convert_imgs_to_pdf_task(app, input_folder):
+    normalized_input, input_root, output_folder, resolved_strategy = _resolve_output_root_for_task(
+        input_folder,
+        "image",
+        "result_folder",
+    )
+    result = _get_last_task_result(app)
+    if result is None:
+        result = _start_task_result(app, normalized_input, "convert")
+    _set_task_result_output_strategy(result, "image", resolved_strategy)
+    _set_task_result_output_root(result, output_folder)
+
+    tracker = _get_active_progress_tracker(app)
+    completed_units = {"value": 0}
+    expected_total = len(_collect_convert_files(app, normalized_input))
+
+    def _on_merge_started(dst, total):
+        if tracker is not None:
+            tracker.total_units = max(1, int(total or expected_total or 1))
+            tracker.set_current_item(dst, "格式转换 · 多图合并 PDF")
+
+    def _on_item_finished(src, dst, item):
+        _add_task_result_output(result, dst)
+        app.log(f"✅ [格式转换] 多图合并 PDF 已输出：{os.path.basename(dst)}")
+
+    def _on_item_failed(src, _dst, status):
+        app.log(f"❌ [失败] 多图合并 PDF: {status}")
+
+    def _on_item_completed(units):
+        completed_units["value"] += int(units or 0)
+        if tracker is not None:
+            tracker.complete_units(units)
+        else:
+            app.progress_bar.set(min(1.0, completed_units["value"] / max(1, expected_total)))
+
+    core_result = run_convert_imgs_to_pdf_task_core(
+        normalized_input,
+        input_root=input_root,
+        output_folder=output_folder,
+        collect_input_files=getattr(app, "collect_input_files", None),
+        merge_images_to_pdf=merge_images_to_pdf,
+        callbacks=ConvertImgsToPdfCallbacks(
+            log=app.log,
+            stop_requested=lambda: getattr(app, "stop_event", False),
+            on_merge_started=_on_merge_started,
+            on_item_finished=_on_item_finished,
+            on_item_failed=_on_item_failed,
+            on_item_completed=_on_item_completed,
+        ),
+    )
+
+    failed_list = list(core_result.get("failed_items") or [])
+    success_count = int(core_result.get("success_count") or 0)
+    processed_count = int(core_result.get("processed_count") or expected_total or 0)
+    skipped_count = int(core_result.get("skipped_count") or 0)
+
+    if core_result.get("status") == "skipped":
+        message = core_result.get("message") or "未找到可合并为 PDF 的图片文件"
+        app.log(f"⚠️ {message}")
+        _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=skipped_count or 1)
+        _set_task_result_finished(result, "skipped", message=message, detail=message, skipped=True)
+    elif failed_list:
+        result["failed_items"] = list(failed_list)
+        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=len(failed_list), skipped=0)
+        app.log("\n========= ❌ 失败清单 =========")
+        for item in failed_list:
+            app.log(f"• {item}")
+        report_path = _write_failed_report(output_folder, failed_list)
+        if report_path:
+            app.log(f"\n📄 [报告] 已生成报告: {report_path}")
+            _add_task_result_output(result, report_path)
+        _set_task_result_finished(
+            result,
+            "failed",
+            message=f"多图合并 PDF 任务结束，但有 {len(failed_list)} 个文件处理失败。",
+            detail=f"失败 {len(failed_list)} 个文件",
+            error=f"失败 {len(failed_list)} 个文件",
+        )
+    elif getattr(app, "stop_event", False):
+        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=0, skipped=0)
+        _set_task_result_finished(result, "stopped", message="用户停止多图合并 PDF 任务", detail="用户停止多图合并 PDF 任务", stopped=True)
+    else:
+        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=0, skipped=0)
+        app.log("\n🎉 [完成] 格式转换多图合并 PDF 已全部完成！")
+        _set_task_result_finished(
+            result,
+            "success",
+            message="格式转换多图合并 PDF 已全部完成",
+            detail=f"成功合并 {success_count} 张图片",
+        )
+    return result
+
+
 def _run_image_to_pdf_task(app, input_folder, merge=False):
     normalized_input, input_root, output_folder, resolved_strategy = _resolve_output_root_for_task(
         input_folder,
@@ -6122,96 +6353,50 @@ def _patch_image_pdf_modes():
 _patch_image_pdf_modes()
 
 
+def _patch_convert_imgs_to_pdf_task():
+    try:
+        original_run_process = FengxiToolboxApp.run_process
+    except Exception as exc:
+        _debug(f"patch_convert_imgs2pdf:missing:{exc}")
+        return
+
+    if getattr(original_run_process, "__fx_convert_imgs2pdf_patch__", False):
+        return
+
+    def patched_run_process(self, input_folder, task_type):
+        if task_type == "convert" and _get_convert_mode(self) == "imgs2pdf":
+            try:
+                _run_convert_imgs_to_pdf_task(self, input_folder)
+            except Exception as exc:
+                self.log(f"🔥 [严重错误] {exc}")
+            finally:
+                self.reset_ui()
+            return
+        return original_run_process(self, input_folder, task_type)
+
+    patched_run_process.__fx_convert_imgs2pdf_patch__ = True
+    FengxiToolboxApp.run_process = patched_run_process
+    _debug("patch_convert_imgs2pdf:installed")
+
+
+_patch_convert_imgs_to_pdf_task()
+
+
 def _collect_audio_files(app, input_value):
     normalized_input = _normalize_input_path_value(input_value)
-    if not normalized_input:
-        return []
-    if os.path.isfile(normalized_input):
-        return [normalized_input]
-    try:
-        return list(app.collect_input_files(normalized_input, "audio"))
-    except Exception:
-        return []
+    return _audio_task_collect_files(normalized_input, collect_input_files=getattr(app, "collect_input_files", None))
 
 
 def _get_audio_task_args(app):
-    try:
-        mode = app.audio_mode_var.get()
-    except Exception:
-        mode = "video2mp3"
-    try:
-        target_fmt = app.audio_target_fmt.get()
-    except Exception:
-        target_fmt = "mp3"
-    try:
-        bitrate = app.audio_bitrate.get()
-    except Exception:
-        bitrate = "192k"
-    try:
-        delete_source = bool(app.audio_delete_var.get())
-    except Exception:
-        delete_source = False
-    return str(mode or "video2mp3"), str(target_fmt or "mp3"), str(bitrate or "192k"), delete_source
+    return _audio_task_get_args(app)
 
 
 def _build_audio_output_path(src, input_root, output_folder, target_fmt):
-    rel = os.path.relpath(src, input_root)
-    dst = os.path.join(output_folder, rel)
-    dst_dir = os.path.dirname(dst)
-    fname = os.path.basename(src)
-    new_name = os.path.splitext(fname)[0] + f".{target_fmt}"
-    return dst, os.path.join(dst_dir, new_name)
+    return _audio_task_build_output_path(src, input_root, output_folder, target_fmt)
 
 
 def _process_one_audio_file(job):
-    src, input_root, output_folder, mode, target_fmt, bitrate, delete_source = job
-    fname = os.path.basename(src)
-    lower_name = fname.lower()
-    dst, final_dst = _build_audio_output_path(src, input_root, output_folder, target_fmt)
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-
-    is_video = lower_name.endswith(AUDIO_VALID_VIDEO_EXTS)
-    is_audio = lower_name.endswith(AUDIO_VALID_AUDIO_EXTS)
-    if not is_video and not is_audio:
-        copy_file_safe(src, dst)
-        return {"src": src, "dst": dst, "output": dst, "status": "copied", "ok": True, "message": "not_audio_video"}
-
-    if mode == "video2mp3" and not is_video:
-        copy_file_safe(src, dst)
-        return {"src": src, "dst": dst, "output": dst, "status": "copied", "ok": True, "message": "not_video"}
-
-    if mode == "convert" and not is_audio:
-        copy_file_safe(src, dst)
-        return {"src": src, "dst": dst, "output": dst, "status": "copied", "ok": True, "message": "not_audio"}
-
-    status = convert_audio_format(src, final_dst, target_fmt, bitrate)
-    if status == "SUCCESS":
-        delete_error = ""
-        if delete_source:
-            try:
-                os.remove(src)
-            except Exception as exc:
-                delete_error = str(exc)
-        return {
-            "src": src,
-            "dst": dst,
-            "output": final_dst,
-            "status": "success",
-            "ok": True,
-            "message": status,
-            "delete_error": delete_error,
-        }
-
-    copy_file_safe(src, dst)
-    missing_lib = str(status or "").startswith("MISSING_LIB")
-    return {
-        "src": src,
-        "dst": dst,
-        "output": dst,
-        "status": "missing_lib" if missing_lib else "failed",
-        "ok": missing_lib,
-        "message": status,
-    }
+    return _audio_task_process_one_file(job, convert_audio_format, copy_file_safe)
 
 
 def _run_audio_task(app, input_folder):
@@ -6220,143 +6405,35 @@ def _run_audio_task(app, input_folder):
     result = _get_last_task_result(app)
     if result is None:
         result = _start_task_result(app, input_folder, "audio")
-    _set_task_result_output_root(result, output_folder)
-
-    if not audio_files:
-        _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=1)
-        _set_task_result_finished(result, "skipped", message="未找到可处理的音视频文件", detail="未找到可处理的音视频文件", skipped=True)
-        try:
-            app.log("⚠️ [跳过] 未找到可处理的音视频文件")
-        except Exception:
-            pass
-        return
-
-    mode, target_fmt, bitrate, delete_source = _get_audio_task_args(app)
-    tracker = _get_active_progress_tracker(app)
-    total = len(audio_files)
-    jobs = [(src, input_root, output_folder, mode, target_fmt, bitrate, delete_source) for src in audio_files]
-    failed_list = []
-    success_count = 0
-    copied_count = 0
-
-    try:
-        app.log(f"🎧 [音频] 共 {total} 个文件，目标格式：{target_fmt}，码率：{bitrate}")
-    except Exception:
-        pass
-
-    def handle_item(item):
-        nonlocal success_count, copied_count
-        src = item.get("src", "")
-        fname = os.path.basename(src)
-        status = item.get("status")
-        if status == "success":
-            success_count += 1
-            _add_task_result_output(result, item.get("output"))
-            try:
-                app.log(f"🎵 [音频] 转换成功: {fname}")
-            except Exception:
-                pass
-            if item.get("delete_error"):
-                failed_list.append(f"{src}: 删除源文件失败 {item.get('delete_error')}")
-                try:
-                    app.log(f"⚠️ [源文件] 删除失败: {fname}: {item.get('delete_error')}")
-                except Exception:
-                    pass
-        elif status == "missing_lib":
-            copied_count += 1
-            _add_task_result_output(result, item.get("output"))
-            try:
-                app.log(f"⚠️ [跳过] 缺少 moviepy/ffmpeg 后端: {fname}")
-            except Exception:
-                pass
-        elif status == "copied":
-            copied_count += 1
-            _add_task_result_output(result, item.get("output"))
-            try:
-                app.log(f"⏭️ [跳过] 已原样复制: {fname}")
-            except Exception:
-                pass
-        else:
-            failed_list.append(f"{src}: {item.get('message')}")
-            try:
-                app.log(f"❌ [失败] 音频转换错误: {fname}")
-            except Exception:
-                pass
-        if tracker is not None:
-            tracker.complete_units(1)
-        else:
-            app.progress_bar.set(min(1.0, (success_count + copied_count + len(failed_list)) / max(1, total)))
-
-    parallel_workers = _get_parallel_worker_count(total) if _is_parallel_enabled(app) else 1
-    if parallel_workers > 1:
-        try:
-            app.log(f"🚀 [批量并行] 音视频转换启用 {parallel_workers} 个线程。")
-        except Exception:
-            pass
-        futures = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=parallel_workers) as executor:
-            for job in jobs:
-                if getattr(app, "stop_event", False):
-                    break
-                src = job[0]
-                if tracker is not None:
-                    tracker.set_current_item(src, "音视频转换")
-                futures[executor.submit(_process_one_audio_file, job)] = job
-            for future in concurrent.futures.as_completed(futures):
-                src = futures[future][0]
-                try:
-                    item = future.result()
-                except Exception as exc:
-                    item = {"src": src, "output": "", "status": "failed", "ok": False, "message": str(exc)}
-                handle_item(item)
-    else:
-        for index, job in enumerate(jobs):
-            if getattr(app, "stop_event", False):
-                break
-            src = job[0]
-            if tracker is not None:
-                tracker.set_current_item(src, "音视频转换")
-            try:
-                item = _process_one_audio_file(job)
-            except Exception as exc:
-                item = {"src": src, "output": "", "status": "failed", "ok": False, "message": str(exc)}
-            handle_item(item)
-            if tracker is None:
-                app.progress_bar.set((index + 1) / total)
-
-    processed_count = success_count + copied_count + len(failed_list)
-    if failed_list:
-        result["failed_items"] = list(failed_list)
-        _set_task_result_counts(result, processed=total, success=success_count + copied_count, failed=len(failed_list), skipped=0)
-        report_path = _write_failed_report(output_folder, failed_list)
-        if report_path:
-            _add_task_result_output(result, report_path)
-            try:
-                app.log(f"\n📄 [报告] 已生成报告: {report_path}")
-            except Exception:
-                pass
-        _set_task_result_finished(
-            result,
-            "failed",
-            message=f"音视频转换完成，但有 {len(failed_list)} 个文件失败",
-            detail=f"成功/复制 {success_count + copied_count} 个，失败 {len(failed_list)} 个",
-            error=f"失败 {len(failed_list)} 个文件",
-        )
-    elif getattr(app, "stop_event", False):
-        _set_task_result_counts(result, processed=processed_count, success=success_count + copied_count, failed=0, skipped=0)
-        _set_task_result_finished(result, "stopped", message="用户停止音视频转换任务", detail="用户停止音视频转换任务", stopped=True)
-    else:
-        _set_task_result_counts(result, processed=total, success=success_count + copied_count, failed=0, skipped=0)
-        try:
-            app.log("\n🎉 [完成] 音视频转换已全部完成！")
-        except Exception:
-            pass
-        _set_task_result_finished(
-            result,
-            "success",
-            message="音视频转换已全部完成",
-            detail=f"转换成功 {success_count} 个，原样复制 {copied_count} 个",
-        )
+    callbacks = AudioTaskCallbacks(
+        log=getattr(app, "log", None),
+        stop_requested=lambda: bool(getattr(app, "stop_event", False)),
+    )
+    return run_audio_task_core(
+        app,
+        input_folder,
+        normalized_input=normalized_input,
+        input_root=input_root,
+        output_folder=output_folder,
+        audio_files=audio_files,
+        result=result,
+        tracker=_get_active_progress_tracker(app),
+        is_parallel_enabled=_is_parallel_enabled,
+        get_parallel_worker_count=_get_parallel_worker_count,
+        convert_audio_format=convert_audio_format,
+        copy_file_safe=copy_file_safe,
+        set_task_result_counts=_set_task_result_counts,
+        set_task_result_finished=_set_task_result_finished,
+        set_task_result_output_root=_set_task_result_output_root,
+        add_task_result_output=_add_task_result_output,
+        write_failed_report=_write_failed_report,
+        log=getattr(app, "log", None),
+        progress_bar=getattr(app, "progress_bar", None),
+        stop_requested=lambda: bool(getattr(app, "stop_event", False)),
+        executor_factory=concurrent.futures.ThreadPoolExecutor,
+        get_audio_task_args=_get_audio_task_args,
+        callbacks=callbacks,
+    )
 
 
 def _patch_audio_parallel_task():
@@ -6512,6 +6589,8 @@ def _get_preview_mode_detail(app, task_type):
         if task_type == "image":
             mode = _get_image_pdf_mode(app)
             return _get_feature_preview_mode_label(task_type, mode, mode)
+        if task_type == "convert":
+            return _get_convert_preview_detail(app)
         if task_type == "zip" and getattr(app, "zip_mode_var", None) is not None:
             mode = str(app.zip_mode_var.get() or "")
             return _get_feature_preview_mode_label(task_type, mode, mode)
@@ -6541,6 +6620,8 @@ def _collect_preview_files(app, input_value, task_type):
             return [item for item in all_files if str(item).lower().endswith(".pdf")]
         if task_type == "image" and _get_image_pdf_mode(app) in {"to_pdf", "merge_pdf"}:
             return _collect_image_to_pdf_files(app, normalized_input)
+        if task_type == "convert":
+            return _collect_convert_files(app, normalized_input)
         if task_type == "audio":
             return _collect_audio_files(app, normalized_input)
         return list(app.collect_input_files(normalized_input, task_type))
@@ -6701,59 +6782,44 @@ def _get_queue_history_file():
     return _get_user_pref_root() / "queue_history.json"
 
 
+def _user_prefs_context():
+    return UserPrefsContext(
+        pref_file=_get_user_pref_file,
+        output_strategy_values=OUTPUT_STRATEGY_VALUES,
+        output_strategy_default=OUTPUT_STRATEGY_DEFAULT,
+        remove_wm_values=REMOVE_WM_MODE_VALUES,
+        remove_wm_default=REMOVE_WM_MODE_DEFAULT,
+        remove_wm_label_to_value=REMOVE_WM_MODE_LABEL_TO_VALUE,
+        preset_categories=tuple(PRESET_CATEGORY_LABELS.keys()),
+        preset_category_labels=PRESET_CATEGORY_LABELS,
+        preset_category_to_task=PRESET_CATEGORY_TO_TASK,
+        preset_label_to_category=PRESET_LABEL_TO_CATEGORY,
+        debug=_debug,
+    )
+
+
 def _load_user_prefs():
-    path = _get_user_pref_file()
-    try:
-        if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        _debug(f"user_prefs:load_error:{exc}")
-    return {}
+    return _prefs_load_user_prefs(_user_prefs_context())
 
 
 def _save_user_prefs(data):
-    path = _get_user_pref_file()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as exc:
-        _debug(f"user_prefs:save_error:{exc}")
+    _prefs_save_user_prefs(data, _user_prefs_context())
 
 
 def _get_saved_output_strategy():
-    prefs = _load_user_prefs()
-    value = prefs.get("output_strategy")
-    if isinstance(value, str) and value in OUTPUT_STRATEGY_VALUES:
-        return value
-    return OUTPUT_STRATEGY_DEFAULT
+    return _prefs_get_saved_output_strategy(_user_prefs_context())
 
 
 def _save_output_strategy(value):
-    normalized = str(value or "").strip()
-    if normalized not in OUTPUT_STRATEGY_VALUES:
-        normalized = OUTPUT_STRATEGY_DEFAULT
-    prefs = _load_user_prefs()
-    prefs["output_strategy"] = normalized
-    _save_user_prefs(prefs)
+    _prefs_save_output_strategy(value, _user_prefs_context())
 
 
 def _get_saved_remove_wm_mode():
-    prefs = _load_user_prefs()
-    watermark_prefs = prefs.get("watermark")
-    if isinstance(watermark_prefs, dict):
-        return _coerce_remove_wm_mode(watermark_prefs.get("remove_wm_mode"))
-    return REMOVE_WM_MODE_DEFAULT
+    return _prefs_get_saved_remove_wm_mode(_user_prefs_context())
 
 
 def _save_remove_wm_mode(value):
-    normalized = _coerce_remove_wm_mode(value)
-    prefs = _load_user_prefs()
-    watermark_prefs = prefs.get("watermark")
-    if not isinstance(watermark_prefs, dict):
-        watermark_prefs = {}
-    watermark_prefs["remove_wm_mode"] = normalized
-    prefs["watermark"] = watermark_prefs
-    _save_user_prefs(prefs)
+    _prefs_save_remove_wm_mode(value, _user_prefs_context())
 
 
 def _get_remove_wm_mode(app=None):
@@ -6919,56 +6985,15 @@ def _install_output_strategy_memory(app):
 
 
 def _get_saved_watermark_text():
-    prefs = _load_user_prefs()
-    watermark_prefs = prefs.get("watermark")
-    if isinstance(watermark_prefs, dict):
-        value = watermark_prefs.get("text")
-        if isinstance(value, str):
-            return value
-    return ""
+    return _prefs_get_saved_watermark_text(_user_prefs_context())
 
 
 def _save_watermark_text(value):
-    normalized = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
-    prefs = _load_user_prefs()
-    watermark_prefs = prefs.get("watermark")
-    if not isinstance(watermark_prefs, dict):
-        watermark_prefs = {}
-
-    if normalized.strip():
-        watermark_prefs["text"] = normalized
-        prefs["watermark"] = watermark_prefs
-    else:
-        watermark_prefs.pop("text", None)
-        if watermark_prefs:
-            prefs["watermark"] = watermark_prefs
-        else:
-            prefs.pop("watermark", None)
-
-    _save_user_prefs(prefs)
+    _prefs_save_watermark_text(value, _user_prefs_context())
 
 
 def _get_saved_watermark_filename_rule_settings():
-    prefs = _load_user_prefs()
-    watermark_prefs = prefs.get("watermark")
-    if not isinstance(watermark_prefs, dict):
-        return {}
-    settings = watermark_prefs.get("filename_skip_rule")
-    if not isinstance(settings, dict):
-        return {}
-
-    saved = {}
-    if "enabled" in settings:
-        saved["enabled"] = bool(settings.get("enabled"))
-
-    position = settings.get("position")
-    if isinstance(position, str) and position in ("开头", "结尾"):
-        saved["position"] = position
-
-    marker = settings.get("marker")
-    if isinstance(marker, str):
-        saved["marker"] = marker
-    return saved
+    return _prefs_get_saved_watermark_filename_rule_settings(_user_prefs_context())
 
 
 def _save_watermark_filename_rule_settings(app):
@@ -6977,11 +7002,6 @@ def _save_watermark_filename_rule_settings(app):
     marker_var = getattr(app, "wm_skip_name_text_var", None)
     if skip_var is None and mode_var is None and marker_var is None:
         return
-
-    prefs = _load_user_prefs()
-    watermark_prefs = prefs.get("watermark")
-    if not isinstance(watermark_prefs, dict):
-        watermark_prefs = {}
 
     enabled = False
     position = "结尾"
@@ -7007,13 +7027,12 @@ def _save_watermark_filename_rule_settings(app):
     except Exception:
         marker = "-"
 
-    watermark_prefs["filename_skip_rule"] = {
-        "enabled": enabled,
-        "position": position,
-        "marker": marker,
-    }
-    prefs["watermark"] = watermark_prefs
-    _save_user_prefs(prefs)
+    _prefs_save_watermark_filename_rule_settings(
+        _user_prefs_context(),
+        enabled=enabled,
+        position=position,
+        marker=marker,
+    )
 
 
 def _flush_watermark_filename_rule_persistence(app):
@@ -7737,103 +7756,33 @@ def _get_current_preset_category(app):
 
 
 def _make_preset_id():
-    return f"preset_{int(time.time() * 1000)}_{os.getpid()}"
+    return _prefs_make_preset_id()
 
 
 def _load_presets():
-    prefs = _load_user_prefs()
-    presets = prefs.get("presets")
-    if not isinstance(presets, list):
-        return []
-    normalized = []
-    for entry in presets:
-        if not isinstance(entry, dict):
-            continue
-        category = _normalize_preset_category(entry.get("category"))
-        settings = entry.get("settings")
-        if not isinstance(settings, dict):
-            settings = {}
-        name = str(entry.get("name") or "").strip()
-        if not name:
-            name = PRESET_CATEGORY_LABELS.get(category, "预设")
-        normalized.append(
-            {
-                "id": str(entry.get("id") or _make_preset_id()),
-                "name": name,
-                "category": category,
-                "category_label": PRESET_CATEGORY_LABELS.get(category, category),
-                "settings": settings,
-                "created_at": float(entry.get("created_at") or time.time()),
-                "updated_at": float(entry.get("updated_at") or entry.get("created_at") or time.time()),
-            }
-        )
-    return normalized
+    return _prefs_load_presets(_user_prefs_context())
 
 
 def _save_presets(presets):
-    prefs = _load_user_prefs()
-    safe_presets = []
-    for entry in list(presets or []):
-        if not isinstance(entry, dict):
-            continue
-        category = _normalize_preset_category(entry.get("category"))
-        safe_presets.append(
-            {
-                "id": str(entry.get("id") or _make_preset_id()),
-                "name": str(entry.get("name") or PRESET_CATEGORY_LABELS.get(category, "预设")).strip(),
-                "category": category,
-                "category_label": PRESET_CATEGORY_LABELS.get(category, category),
-                "settings": dict(entry.get("settings") or {}),
-                "created_at": float(entry.get("created_at") or time.time()),
-                "updated_at": float(entry.get("updated_at") or time.time()),
-            }
-        )
-    prefs["presets"] = safe_presets[-120:]
-    _save_user_prefs(prefs)
-    return prefs["presets"]
+    return _prefs_save_presets(presets, _user_prefs_context())
 
 
 def _save_preset_entry(name, category, settings):
-    category = _normalize_preset_category(category)
-    name = str(name or "").strip() or f"{PRESET_CATEGORY_LABELS.get(category, '预设')} {_format_queue_time()}"
-    presets = _load_presets()
-    now = time.time()
-    matched = None
-    for entry in presets:
-        if entry.get("category") == category and str(entry.get("name") or "").strip() == name:
-            matched = entry
-            break
-    if matched is None:
-        matched = {
-            "id": _make_preset_id(),
-            "name": name,
-            "category": category,
-            "category_label": PRESET_CATEGORY_LABELS.get(category, category),
-            "created_at": now,
-        }
-        presets.append(matched)
-    matched["settings"] = dict(settings or {})
-    matched["updated_at"] = now
-    _save_presets(presets)
-    return dict(matched)
+    return _prefs_save_preset_entry(
+        name,
+        category,
+        settings,
+        _user_prefs_context(),
+        default_name_suffix=_format_queue_time(),
+    )
 
 
 def _delete_preset_entry(preset_id):
-    preset_id = str(preset_id or "")
-    presets = _load_presets()
-    kept = [entry for entry in presets if str(entry.get("id") or "") != preset_id]
-    if len(kept) == len(presets):
-        return False
-    _save_presets(kept)
-    return True
+    return _prefs_delete_preset_entry(preset_id, _user_prefs_context())
 
 
 def _find_preset_entry(preset_id):
-    preset_id = str(preset_id or "")
-    for entry in _load_presets():
-        if str(entry.get("id") or "") == preset_id:
-            return entry
-    return None
+    return _prefs_find_preset_entry(preset_id, _user_prefs_context())
 
 
 def _preset_pick_display_from_key(display_value, key_value, mapping):
@@ -8061,51 +8010,16 @@ def _apply_preset_settings(app, preset, switch_task=True):
 
 
 def _load_last_settings():
-    prefs = _load_user_prefs()
-    data = prefs.get("last_settings")
-    if not isinstance(data, dict):
-        return {}
-    normalized = {}
-    for category, entry in data.items():
-        category = _normalize_preset_category(category)
-        settings = entry.get("settings") if isinstance(entry, dict) else entry
-        if not isinstance(settings, dict):
-            continue
-        normalized[category] = {
-            "category": category,
-            "settings": settings,
-            "updated_at": float((entry or {}).get("updated_at") or time.time()) if isinstance(entry, dict) else time.time(),
-        }
-    return normalized
+    return _prefs_load_last_settings(_user_prefs_context())
 
 
 def _save_last_settings_entry(category, settings, update_active=True):
-    category = _normalize_preset_category(category)
-    if category not in PRESET_CATEGORY_TO_TASK:
-        return None
-    prefs = _load_user_prefs()
-    last_settings = prefs.get("last_settings")
-    if not isinstance(last_settings, dict):
-        last_settings = {}
-    now = time.time()
-    entry = {
-        "category": category,
-        "settings": dict(settings or {}),
-        "updated_at": now,
-    }
-    last_settings[category] = entry
-    prefs["last_settings"] = last_settings
-
-    if update_active:
-        active = prefs.get("last_settings_active")
-        if not isinstance(active, dict):
-            active = {}
-        task_type = PRESET_CATEGORY_TO_TASK.get(category)
-        if task_type:
-            active[task_type] = category
-        prefs["last_settings_active"] = active
-    _save_user_prefs(prefs)
-    return entry
+    return _prefs_save_last_settings_entry(
+        category,
+        settings,
+        _user_prefs_context(),
+        update_active=update_active,
+    )
 
 
 def _last_settings_category_ready(app, category):
@@ -8170,25 +8084,7 @@ def _save_initialized_last_settings(app):
 
 
 def _get_active_last_settings_category(task_name):
-    prefs = _load_user_prefs()
-    active = prefs.get("last_settings_active")
-    if not isinstance(active, dict):
-        active = {}
-    category = _normalize_preset_category(active.get(task_name))
-    if task_name == "pdf":
-        if category in {"ocr", "pdf_compress"}:
-            return category
-        last_settings = _load_last_settings()
-        if "ocr" in last_settings:
-            return "ocr"
-        if "pdf_compress" in last_settings:
-            return "pdf_compress"
-        return None
-    if task_name == "file":
-        return "rename" if "rename" in _load_last_settings() else None
-    if task_name == "watermark":
-        return "watermark" if "watermark" in _load_last_settings() else None
-    return None
+    return _prefs_get_active_last_settings_category(task_name, _user_prefs_context())
 
 
 def _restore_last_settings_category(app, category):
@@ -8311,8 +8207,8 @@ def _queue_describe_task(app, task_type, input_path):
             detail = app.img_mode_var.get()
         elif task_type == "zip" and getattr(app, "zip_mode_var", None) is not None:
             detail = app.zip_mode_var.get()
-        elif task_type == "convert" and getattr(app, "cv_mode", None) is not None:
-            detail = app.cv_mode.get()
+        elif task_type == "convert":
+            detail = _get_convert_preview_detail(app)
         elif task_type == "file" and getattr(app, "file_mode_var", None) is not None:
             detail = app.file_mode_var.get()
         elif task_type == "watermark":
@@ -10006,32 +9902,40 @@ def _start_task_queue(app):
 def _install_progress_status_label(app):
     if getattr(app, "_fx_progress_status_ready", False):
         return
-    action_row = None
-    try:
-        for child in app.bottom_bar.winfo_children():
-            if isinstance(child, customtkinter.CTkFrame) and child.winfo_children():
-                action_row = child
-                break
-    except Exception:
-        action_row = None
     try:
         app._fx_progress_status_var = tkinter.StringVar(master=app, value=PROGRESS_STATUS_IDLE_TEXT)
     except Exception:
         app._fx_progress_status_var = None
-    if action_row is None:
+    bottom_bar = getattr(app, "bottom_bar", None)
+    if bottom_bar is None:
         _set_progress_status(app)
         app._fx_progress_status_ready = True
         return
     try:
+        progress_bar = getattr(app, "progress_bar", None)
+        if progress_bar is not None:
+            progress_bar.grid_configure(row=0, column=0, columnspan=1, padx=(24, 12), pady=(10, 8), sticky="ew")
+        bottom_bar.grid_columnconfigure(0, weight=1)
+        bottom_bar.grid_columnconfigure(1, weight=1)
+    except Exception:
+        pass
+    try:
+        stale_label = getattr(app, "_fx_progress_status_label", None)
+        if stale_label is not None and stale_label.winfo_exists():
+            stale_label.destroy()
+    except Exception:
+        pass
+    try:
         label = customtkinter.CTkLabel(
-            action_row,
+            bottom_bar,
             textvariable=app._fx_progress_status_var,
             text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
             font=customtkinter.CTkFont(family="Microsoft YaHei UI", size=12),
-            anchor="e",
-            justify="right",
+            anchor="w",
+            justify="left",
+            height=30,
         )
-        label.pack(side="right", fill="x", expand=True, padx=(12, 0))
+        label.grid(row=0, column=1, padx=(0, 24), pady=(8, 8), sticky="ew")
         app._fx_progress_status_label = label
     except Exception as exc:
         _debug(f"progress_status:label_error:{exc}")

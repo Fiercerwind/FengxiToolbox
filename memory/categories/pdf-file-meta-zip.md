@@ -56,6 +56,7 @@
   - 恢复 OCR/PDF 压缩上次设置时会同步切换 PDF 右侧详情面板，避免只恢复变量但页面仍停在其他功能。
   - 2026-05-23 起，PDF 压缩核心实现已拆入 `tools/fx_pdf_compress_core.py`；主加载器只保留 UI、并行调度、进度、输出策略、失败报告和结构化结果收口。
   - 2026-05-23 起，PDF OCR 任务编排已拆入 `tools/fx_pdf_ocr_task.py`；主加载器只保留 UI 参数读取、输出策略、进度 adapter、失败报告和结构化结果收口。
+  - 2026-05-24 起，PDF 压缩等长文件名任务完成时，底部进度状态文本显示在进度条右侧的独立 `bottom_bar` grid 区域，不再进入按钮 action row，避免遮挡或挤压队列历史按钮。
 
 ## PDF 压缩实现说明
 - PDF 压缩核心模块：`tools/fx_pdf_compress_core.py`
@@ -147,25 +148,33 @@
   - 查找文本
   - 替换文本
   - 裁剪头尾字符数
-- `dedup` 依赖全目录 MD5 去重逻辑，必须走 `run_process()` 的专用单线程分支。
-- 已在加载器层补丁中强制 `dedup` 进入单线程。
+- `dedup` 依赖全目录 MD5 去重逻辑，必须保持单线程全局比对，避免重复文件删除顺序不稳定。
+- 2026-05-24 起，`dedup` 的真实 UI 工作流会先进入 `tools/fx_file_manager_task.py` 的 `run_file_dedup_task_core(...)` 任务适配层，再进入 `tools/fx_file_manager_core.py` 的 `run_file_dedup_task(...)`；`Fengxi_Toolbox.py` 的 `_patch_file_dedup_core_task()` 负责把真实 `run_process(...)` 接到这条链路，不再回落到原 runtime 去重分支。
+- `_run_file_dedup_task(...)` 负责 app 侧输入收集、进度状态、日志、输出位置和结构化 task_result；`tools/fx_file_manager_task.py` 负责把这些 app 依赖注入核心层，`tools/fx_file_manager_core.py` 负责 MD5 计算、保留首个文件、删除重复文件和核心结果统计。
+- 已在加载器层补丁中继续强制 `dedup` 单线程。
 - 2026-05-23 起，`rename` 的核心规则已拆入 `tools/fx_file_manager_core.py`：
   - `normalize_file_rename_spec(...)` 负责把运行时参数转为 `FileRenameSpec`。
   - `rename_file_name(...)` 负责 `add` / `replace` / `cut` 三种文件名变化。
   - `plan_renamed_output_path(...)` 负责输出路径规划。
   - `apply_rename_to_file(...)` 负责单文件复制到新名称，并复用加载器注入的 `copy_file_safe(...)`。
-- `Fengxi_Toolbox.py` 通过 `_patch_file_manager_core()` 只接管 `file + rename` 的 `process_single_file(...)`；`dedup` 不在本轮接管，继续走原运行时单线程专用路径。
-- 回归覆盖：`file_rename_add`、`file_rename_replace`、`file_rename_cut`、`file_manager_core_module_exports`、`file_dedup`。
-- 维护注意：如果只改重命名命名规则，优先改 `tools/fx_file_manager_core.py`；如果改去重删除策略、失败报告或全目录扫描，仍需先研究 `run_process()` 原分支。
+- `Fengxi_Toolbox.py` 通过 `_patch_file_manager_core()` 接管 `file + rename` 的 `process_single_file(...)`，通过 `_patch_file_dedup_core_task()` 接管 `file + dedup` 的 `run_process(...)`。
+- 回归覆盖：`file_rename_add`、`file_rename_replace`、`file_rename_cut`、`file_manager_core_module_exports`、`file_manager_task_module_exports`、`file_dedup`、`file_dedup_core_module_exports`。
+- 维护注意：如果只改重命名命名规则，优先改 `tools/fx_file_manager_core.py`；如果改去重删除策略或 MD5 比对细节，也优先改 `tools/fx_file_manager_core.py`；如果改 UI 进度、任务历史或结构化结果，优先改 `tools/fx_file_manager_task.py`，再由 `Fengxi_Toolbox.py` 的 `_run_file_dedup_task(...)` 适配层收口。
 
 ## 属性隐私
 - 任务类型：`meta`
 - 模式：
   - `author`
   - `time`
-- PDF 作者修改直接通过 `pypdf` 写元数据。
-- Office 作者修改依赖 COM。
-- 时间修改是通用文件操作。
+- 核心模块：`tools/fx_meta_core.py`
+- 当前接口：
+  - `modify_file_timestamp(src, dst, timestamp)`：复制文件后按 `%Y-%m-%d %H:%M:%S` 设置访问时间和修改时间。
+  - `modify_pdf_author(src, dst, author_name)`：用 `pypdf` 保留页面并更新 `/Author` 与 `/Creator`。
+  - `modify_office_meta(app, src, dst, author_name, app_type="word")`：使用外部传入的 Word/PPT COM app 修改 Author 与 Last Author。
+  - `process_meta_file(...)`：承接 `meta` 单文件处理路径，保持原运行时语义。
+- `Fengxi_Toolbox.py` 通过 `_patch_meta_core()` 接管 `task_type == "meta"` 的 `process_single_file(...)`，并继续暴露同名薄包装，兼容旧入口。
+- 注意：当前 `process_single_file` 路径对 `.doc/.docx/.ppt/.pptx` 作者修改保持原 runtime 空处理语义；Office 作者 helper 仍可被测试或未来任务编排独立调用。
+- 回归覆盖：`meta_time`、`meta_author_pdf`、`meta_core_module_exports`、`meta_core_process_file`、`word_meta_author`。
 
 ## 批量压缩
 - 任务类型：`zip`

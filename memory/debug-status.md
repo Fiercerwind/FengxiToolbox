@@ -1,5 +1,228 @@
 # 调试状态
 
+## 2026-05-24 用户偏好存储模块化
+- 本轮目标：
+  - 从 `Fengxi_Toolbox.py` 中抽出 `user_prefs.json` 基础读写与小型偏好字段，给后续“上次设置”继续拆分建立更清晰的 seam。
+- 关键修复：
+  - 新增 `tools/fx_user_prefs.py` 和 `UserPrefsContext`。
+  - 主加载器中的 `_load_user_prefs(...)`、`_save_user_prefs(...)`、`_get_saved_output_strategy(...)`、`_save_output_strategy(...)`、`_get_saved_remove_wm_mode(...)`、`_save_remove_wm_mode(...)`、`_get_saved_watermark_text(...)`、`_save_watermark_text(...)`、`_get_saved_watermark_filename_rule_settings(...)` 等改为薄包装。
+  - 水印文件名跳过规则保存仍由主文件读取 app 控件，再把 normalized 数据交给 `fx_user_prefs`；UI 绑定行为不变。
+- 新增回归：
+  - `user_prefs_module_context`
+- 关键既有回归继续通过：
+  - `output_strategy_memory_save_load`
+  - `remove_wm_mode_memory_save_load`
+  - `last_settings_watermark_save_restore`
+  - `last_settings_ocr_save_restore`
+  - `last_settings_pdf_compress_save_restore`
+  - `last_settings_rename_save_restore`
+  - `watermark_filename_rule_memory_save`
+  - `watermark_filename_rule_memory_load`
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py tools\fx_user_prefs.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：147/147 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未改稳定区批量压缩和添加水印核心业务。
+  - 未删除项目外文件。
+
+## 2026-05-24 last_settings 存储 seam 下沉
+- 本轮目标：
+  - 在 `tools/fx_user_prefs.py` 已接管基础偏好后，继续下沉 `last_settings` 的纯 JSON schema 和 active-category 选择逻辑。
+- 关键修复：
+  - `tools/fx_user_prefs.py` 新增 `normalize_pref_category(...)`、`load_last_settings(...)`、`save_last_settings_entry(...)`、`get_active_last_settings_category(...)`。
+  - `Fengxi_Toolbox.py` 的 `_load_last_settings(...)`、`_save_last_settings_entry(...)`、`_get_active_last_settings_category(...)` 改为薄包装。
+  - 保留主文件里的 `_capture_preset_settings(...)` 和 `_apply_preset_settings(...)`，因为这两块仍然依赖 UI 控件、懒加载页面和 app 当前状态。
+- 新增回归：
+  - `user_prefs_last_settings_module_context`
+- 关键既有回归继续通过：
+  - `last_settings_watermark_save_restore`
+  - `last_settings_ocr_save_restore`
+  - `last_settings_pdf_compress_save_restore`
+  - `last_settings_rename_save_restore`
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py tools\fx_user_prefs.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：148/148 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未改稳定区批量压缩和添加水印核心业务。
+  - 未删除项目外文件。
+
+## 2026-05-24 legacy presets 存储 helper 下沉
+- 本轮目标：
+  - 继续收口 `user_prefs.json` schema，把残留的 legacy `presets` 读写 helper 从主加载器挪到 `tools/fx_user_prefs.py`。
+- 关键修复：
+  - `tools/fx_user_prefs.py` 新增 `make_preset_id(...)`、`load_presets(...)`、`save_presets(...)`、`save_preset_entry(...)`、`delete_preset_entry(...)`、`find_preset_entry(...)`。
+  - `Fengxi_Toolbox.py` 保留同名 `_load_presets(...)` 等薄包装，兼容潜在旧调用。
+  - 未新增“预设中心”UI；`last_settings_no_dedicated_preset_center` 继续确认页面和入口不存在。
+- 新增回归：
+  - `user_prefs_presets_module_context`
+- 关键既有回归继续通过：
+  - `last_settings_no_dedicated_preset_center`
+  - `user_prefs_module_context`
+  - `user_prefs_last_settings_module_context`
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py tools\fx_user_prefs.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：149/149 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未改稳定区批量压缩和添加水印核心业务。
+  - 未删除项目外文件。
+
+## 2026-05-24 格式转换单文件 adapter seam
+- 本轮目标：
+  - 在已有 `convert` 核心规则与 `imgs2pdf` 任务 adapter 基础上，继续为 `word2pdf` / `pdf2word` / `ppt2pdf` 建立更窄的单文件 adapter seam。
+- 关键修复：
+  - `tools/fx_convert_task.py` 新增 `ConvertFileContext` 和 `process_convert_file(...)`。
+  - `Fengxi_Toolbox.py` 新增 `_patch_convert_file_adapter()`，在 `task_type == "convert"` 且模式为 `word2pdf` / `pdf2word` / `ppt2pdf` 时路由到新 adapter。
+  - `imgs2pdf` 仍由 `_patch_convert_imgs_to_pdf_task()` 接管；单文件 adapter 不抢多图合并路径。
+  - 复杂 PDF 跳过策略在 adapter 中保持：检测为复杂/大文件时复制原 PDF 到输出目录并返回 `skipped_complex`，避免强转导致乱码。
+- 新增/增强回归：
+  - `convert_file_adapter_module_exports`
+- 关键既有回归继续通过：
+  - `convert_task_imgs2pdf_module_exports`
+  - `imgs2pdf_workflow`
+  - `pdf_to_word`
+  - `word_to_pdf`
+  - `ppt_to_pdf`
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py tools\fx_convert_core.py tools\fx_convert_task.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：146/146 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未重写 Office COM / `pdf2docx` 真实转换后端。
+  - 未改稳定区批量压缩和添加水印核心业务。
+  - 未删除项目外文件。
+
+## 2026-05-24 格式转换核心与 imgs2pdf 任务适配
+- 本轮目标：
+  - 继续拆 `Fengxi_Toolbox.py` 的转换页补丁层，把低风险的 `convert + imgs2pdf` 先收进独立任务适配模块。
+- 关键修复：
+  - 新增 `tools/fx_convert_core.py`，统一 `convert` 的模式归一化、模式描述、文件收集和输出规划。
+  - 新增 `tools/fx_convert_task.py`，当前只接管 `imgs2pdf` 多图合并 PDF 任务适配，复用图片 PDF 核心的合并执行。
+  - `Fengxi_Toolbox.py` 新增 `_run_convert_imgs_to_pdf_task(...)` 与 `_patch_convert_imgs_to_pdf_task()`，只在 `task_type == "convert"` 且 `cv_mode == "imgs2pdf"` 时触发，其他转换模式继续走原 runtime。
+- 新增/增强回归：
+  - `convert_core_module_exports`
+  - `convert_task_imgs2pdf_module_exports`
+  - `convert_preview_uses_core_rules`
+  - `imgs2pdf_workflow` 现在追踪真实 `run_convert_imgs_to_pdf_task_core(...)` 调用和结构化 `task_result`。
+- 关键既有回归继续通过：
+  - `pdf_to_word`
+  - `word_to_pdf`
+  - `ppt_to_pdf`
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py tools\fx_convert_core.py tools\fx_convert_task.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：145/145 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未迁移 `word2pdf` / `pdf2word` / `ppt2pdf` 的实际执行。
+  - 未改稳定区批量压缩和添加水印核心业务。
+  - 未删除项目外文件。
+
+## 2026-05-24 属性隐私核心模块化
+- 本轮目标：
+  - 继续拆 `Fengxi_Toolbox.py` 补丁层，把 `meta` 属性隐私的时间修改、PDF 作者写入和 Office 作者 helper 收进独立核心模块。
+- 关键修复：
+  - 新增 `tools/fx_meta_core.py`，提供 `modify_file_timestamp(...)`、`modify_pdf_author(...)`、`modify_office_meta(...)`、`build_meta_output_path(...)`、`process_meta_file(...)`。
+  - `Fengxi_Toolbox.py` 保留同名薄包装并回写 `_ns`，让运行时旧入口和测试入口继续可用。
+  - `_patch_meta_core()` 接管 `task_type == "meta"` 的 `process_single_file(...)`；同时继承 `__fx_file_manager_core_patch__`，避免外层 wrapper 遮住文件管家回归标记。
+- 新增回归：
+  - `meta_core_module_exports`
+  - `meta_core_process_file`
+- 关键既有回归继续通过：
+  - `modify_timestamp`
+  - `meta_time`
+  - `meta_author_pdf`
+  - `word_meta_author`
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_meta_core.py full_debug_test.py smoke_test.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：141/141 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未改稳定区批量压缩和添加水印核心业务。
+  - 未删除项目外文件。
+
+## 2026-05-24 音频任务清尾与 OCR 回归稳定
+- 本轮目标：
+  - 清掉 `Fengxi_Toolbox.py` 里 `audio` 任务的旧实现死代码，只保留新模块 seam。
+  - 让 `full_debug_test.py` 的 OCR 工作流不再受 `rapidocr` 模型下载波动影响。
+- 关键修复：
+  - 已删除 `Fengxi_Toolbox.py` 中 `return run_audio_task_core(...)` 后面的 legacy audio implementation。
+  - `audio` 继续只走 `tools/fx_audio_task.py`。
+  - `full_debug_test.py` 的 `pdf_ocr_searchable` / `pdf_ocr_compare_report` / 单文件 OCR / 拖拽 OCR 改为本地稳定假引擎路径，保留真实工作流外壳，但不再依赖网络下载模型。
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：142/142 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未改 OCR 引擎实现。
+  - 未删除项目外文件。
+
+## 2026-05-24 文件管家去重任务适配层补齐
+- 本轮目标：
+  - 继续文件管家拆分，把 `file + dedup` 再收进 `tools/fx_file_manager_task.py` 的任务适配层，让 UI/app 依赖注入和核心去重算法之间的 seam 更深。
+- 关键修复：
+  - 新增 `run_file_dedup_task_core(...)`，负责把 `collect_input_files`、`progress_tracker`、`set_task_result_*`、`set_progress_status` 等 app 依赖串起来，再调用 `tools.fx_file_manager_core.run_file_dedup_task(...)`。
+  - `Fengxi_Toolbox.py` 的 `_run_file_dedup_task(...)` 现为薄 adapter，`_patch_file_dedup_core_task()` 继续接管 `task_type == "file"` 且 `file_mode_var == "dedup"` 的真实工作流。
+- 新增回归：
+  - `file_manager_task_module_exports`
+- 关键既有回归继续通过：
+  - `file_dedup`
+  - `file_dedup_core_module_exports`
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_file_manager_core.py tools\fx_file_manager_task.py full_debug_test.py smoke_test.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：139/139 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未改稳定区批量压缩和添加水印核心业务。
+  - 未删除项目外文件。
+
+## 2026-05-24 文件管家去重核心路由
+- 本轮目标：
+  - 继续文件管家模块化，把 `file + dedup` 的真实 `run_process(...)` 工作流从原 runtime 单线程分支接到 `tools/fx_file_manager_core.py` 的去重核心。
+- 关键修复：
+  - `Fengxi_Toolbox.py` 新增 `_patch_file_dedup_core_task()`，当 `task_type == "file"` 且 `file_mode_var == "dedup"` 时调用 `_run_file_dedup_task(...)`。
+  - `_run_file_dedup_task(...)` 继续负责输入收集、进度状态、日志、输出根目录、结构化 task_result 和失败/停止收口。
+  - `tools/fx_file_manager_core.py` 的 `run_file_dedup_task(...)` 继续负责 MD5 去重核心语义：保留首个文件，删除后续重复文件。
+- 回归增强：
+  - `file_dedup` 现在追踪 `mod._file_core_run_file_dedup_task` 调用，确认真实 `app.run_process(str(folder), "file")` 命中新核心。
+  - `file_dedup_core_module_exports` 继续验证核心模块可独立删除重复文件并返回统计。
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_file_manager_core.py full_debug_test.py smoke_test.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：138/138 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未改稳定区批量压缩和添加水印核心业务。
+  - 未删除项目外文件。
+
+## 2026-05-24 底部进度状态布局修复
+- 本轮目标：
+  - 修复 PDF 压缩等长文件名场景下，底部进度状态文本挤压 `批量并行`、开始/停止、`加入队列`、`队列历史` 的显示问题。
+- 关键修复：
+  - `_install_progress_status_label(...)` 不再把 `_fx_progress_status_label` pack 到按钮 action row。
+  - 进度条改为 `bottom_bar` 第 0 行左侧，进度状态文本改为第 0 行右侧，按钮行继续独立放在第 1 行。
+  - `_apply_shell_layout_tightening(...)` 同步识别 `_fx_progress_status_label` 并保持同一 grid 布局，防止后续布局刷新把它挤回按钮行。
+- 新增回归：
+  - `progress_status_separate_from_action_row`
+- 验证结果：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` 通过。
+  - `python smoke_test.py`：14/14 通过。
+  - `python full_debug_test.py`：138/138 通过。
+- 改动边界：
+  - 未改 `fengxi_runtime.bin`。
+  - 未改 PDF 压缩业务逻辑。
+  - 未触碰稳定区批量压缩和添加水印核心业务。
+  - 未删除项目外文件。
+
 ## 2026-05-23 OCR 任务编排模块化
 - 本轮目标：
   - 继续拆 `Fengxi_Toolbox.py` 补丁层，把 PDF OCR 的任务编排从 UI/历史/结果模型 adapter 中分离。

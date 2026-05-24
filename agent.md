@@ -22,6 +22,8 @@
 - 主入口是 `Fengxi_Toolbox.py`，但它本质上是加载器。
 - 绝大多数业务逻辑封装在 `fengxi_runtime.bin`，运行时通过 `marshal.loads(...)` 加载并注入全局。
 - UI 与任务调度核心类是 `FengxiToolboxApp`。
+- 文件管家去重现在分成两层：`tools/fx_file_manager_task.py` 负责任务适配，`tools/fx_file_manager_core.py` 负责去重核心；以后改 `file + dedup` 优先看这两层，不要直接回退到原 runtime 分支。
+- 音频任务现在由 `tools/fx_audio_task.py` 承接任务编排、输出路径、单文件处理和并行执行；`Fengxi_Toolbox.py` 只应保留薄包装和路由，不要把旧音频实现重新写回主文件。
 - 优先使用加载器层补丁或外围修补，不要轻易重构/反编译运行时主体。
 - 仓库当前是 Git 仓库，远端为 GitHub；发布与回退优先走 `git status`、`git diff`、标签与 Release 流程。
 

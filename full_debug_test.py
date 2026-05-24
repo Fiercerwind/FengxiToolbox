@@ -15,6 +15,26 @@ from tools.fx_task_history_exports import (
     build_task_history_export_filename,
     build_task_history_report_text,
 )
+from tools.fx_user_prefs import (
+    UserPrefsContext,
+    delete_preset_entry as delete_preset_entry_module,
+    find_preset_entry as find_preset_entry_module,
+    get_saved_output_strategy as get_saved_output_strategy_module,
+    get_saved_remove_wm_mode as get_saved_remove_wm_mode_module,
+    get_saved_watermark_filename_rule_settings as get_saved_watermark_filename_rule_settings_module,
+    get_saved_watermark_text as get_saved_watermark_text_module,
+    get_active_last_settings_category as get_active_last_settings_category_module,
+    load_last_settings as load_last_settings_module,
+    load_presets as load_presets_module,
+    load_user_prefs as load_user_prefs_module,
+    save_last_settings_entry as save_last_settings_entry_module,
+    save_output_strategy as save_output_strategy_module,
+    save_preset_entry as save_preset_entry_module,
+    save_presets as save_presets_module,
+    save_remove_wm_mode as save_remove_wm_mode_module,
+    save_watermark_filename_rule_settings as save_watermark_filename_rule_settings_module,
+    save_watermark_text as save_watermark_text_module,
+)
 from tools.fx_queue_history import (
     QueueHistoryContext,
     build_queue_history_search_blob,
@@ -51,6 +71,35 @@ from tools.fx_file_manager_core import (
     rename_file_name as rename_file_name_module,
     run_file_dedup_task as run_file_dedup_task_module,
 )
+from tools.fx_file_manager_task import run_file_dedup_task_core as run_file_dedup_task_core_module
+from tools.fx_audio_task import (
+    AudioTaskCallbacks as AudioTaskCallbacksModule,
+    build_audio_output_path as build_audio_output_path_module,
+    collect_audio_files as collect_audio_files_module,
+    get_audio_task_args as get_audio_task_args_module,
+    process_one_audio_file as process_one_audio_file_module,
+    run_audio_task_core as run_audio_task_core_module,
+)
+from tools.fx_convert_core import (
+    CONVERT_MODE_SPECS as CONVERT_MODE_SPECS_MODULE,
+    collect_convert_files as collect_convert_files_module,
+    describe_convert_mode as describe_convert_mode_module,
+    normalize_convert_mode as normalize_convert_mode_module,
+    plan_convert_output_path as plan_convert_output_path_module,
+)
+from tools.fx_convert_task import (
+    ConvertFileContext,
+    ConvertImgsToPdfCallbacks,
+    process_convert_file as process_convert_file_module,
+    run_convert_imgs_to_pdf_task_core as run_convert_imgs_to_pdf_task_core_module,
+)
+from tools.fx_meta_core import (
+    build_meta_output_path as build_meta_output_path_module,
+    modify_file_timestamp as modify_file_timestamp_module,
+    modify_office_meta as modify_office_meta_module,
+    modify_pdf_author as modify_pdf_author_module,
+    process_meta_file as process_meta_file_module,
+)
 from tools.fx_pdf_ocr_task import (
     PdfOcrTaskCallbacks,
     PdfOcrTaskOptions,
@@ -58,6 +107,7 @@ from tools.fx_pdf_ocr_task import (
     build_pdf_ocr_output_path,
     run_pdf_ocr_task_core,
 )
+import tools.fx_pdf_ocr_task as pdf_ocr_task_module
 from tools.fx_image_pdf_task import (
     ImagePdfTaskCallbacks,
     ImagePdfTaskOptions,
@@ -531,10 +581,12 @@ def main():
         "feature_registry_preview_labels",
         mod._get_feature_preview_mode_label("pdf", "ocr") == "OCR 搜索版 PDF"
         and mod._get_feature_preview_mode_label("image", "merge_pdf") == "多图合并 PDF"
+        and mod._get_feature_preview_mode_label("convert", "imgs2pdf") == "多图合并 ➔ PDF电子书"
         and mod._get_feature_label("remove_wm") == "去除水印",
         {
             "pdf_ocr": mod._get_feature_preview_mode_label("pdf", "ocr"),
             "image_merge": mod._get_feature_preview_mode_label("image", "merge_pdf"),
+            "convert_imgs": mod._get_feature_preview_mode_label("convert", "imgs2pdf"),
             "remove_wm": mod._get_feature_label("remove_wm"),
         },
     )
@@ -577,6 +629,36 @@ def main():
             "text": sidebar_preset_button.cget("text") if sidebar_preset_button is not None else "",
             "bottom_exists": bottom_preset_button is not None,
             "window_func": callable(getattr(mod, "_show_preset_center", None)),
+        },
+    )
+
+    progress_label = getattr(app, "_fx_progress_status_label", None)
+    action_rows = [
+        child
+        for child in app.bottom_bar.winfo_children()
+        if isinstance(child, mod.customtkinter.CTkFrame) and child.winfo_children()
+    ]
+    progress_grid = progress_label.grid_info() if progress_label is not None else {}
+    progress_pack = {}
+    try:
+        progress_pack = progress_label.pack_info() if progress_label is not None else {}
+    except Exception:
+        progress_pack = {}
+    record(
+        "progress_status_separate_from_action_row",
+        progress_label is not None
+        and progress_label.winfo_manager() == "grid"
+        and progress_label.master is app.bottom_bar
+        and progress_grid.get("row") == 0
+        and progress_grid.get("column") == 1
+        and not progress_pack
+        and all(progress_label not in row.winfo_children() for row in action_rows),
+        {
+            "manager": progress_label.winfo_manager() if progress_label is not None else None,
+            "grid": progress_grid,
+            "pack": progress_pack,
+            "master_is_bottom": progress_label.master is app.bottom_bar if progress_label is not None else False,
+            "action_rows": len(action_rows),
         },
     )
 
@@ -718,6 +800,83 @@ def main():
     mod._save_output_strategy("result_folder")
     app._fx_output_strategy_memory_ready = False
     mod._install_output_strategy_memory(app)
+
+    user_prefs_module_path = root / "user_prefs_module" / "user_prefs.json"
+    user_prefs_context = UserPrefsContext(
+        pref_file=lambda: user_prefs_module_path,
+        output_strategy_values=mod.OUTPUT_STRATEGY_VALUES,
+        output_strategy_default=mod.OUTPUT_STRATEGY_DEFAULT,
+        remove_wm_values=mod.REMOVE_WM_MODE_VALUES,
+        remove_wm_default=mod.REMOVE_WM_MODE_DEFAULT,
+        remove_wm_label_to_value=mod.REMOVE_WM_MODE_LABEL_TO_VALUE,
+        preset_categories=tuple(mod.PRESET_CATEGORY_LABELS.keys()),
+        preset_category_labels=mod.PRESET_CATEGORY_LABELS,
+        preset_category_to_task=mod.PRESET_CATEGORY_TO_TASK,
+        preset_label_to_category=mod.PRESET_LABEL_TO_CATEGORY,
+    )
+    save_output_strategy_module("overwrite", user_prefs_context)
+    save_remove_wm_mode_module(mod.REMOVE_WM_MODE_VALUE_TO_LABEL["standard"], user_prefs_context)
+    save_watermark_text_module("Line1\r\nLine2", user_prefs_context)
+    save_watermark_filename_rule_settings_module(
+        user_prefs_context,
+        enabled=True,
+        position="开头",
+        marker="FX",
+    )
+    user_prefs_payload = load_user_prefs_module(user_prefs_context)
+    record(
+        "user_prefs_module_context",
+        get_saved_output_strategy_module(user_prefs_context) == "overwrite"
+        and get_saved_remove_wm_mode_module(user_prefs_context) == "standard"
+        and get_saved_watermark_text_module(user_prefs_context) == "Line1\nLine2"
+        and get_saved_watermark_filename_rule_settings_module(user_prefs_context)
+        == {"enabled": True, "position": "开头", "marker": "FX"},
+        user_prefs_payload,
+    )
+    saved_last_settings_entry = save_last_settings_entry_module(
+        "ocr",
+        {"category": "ocr", "pdf_ocr_backend": "auto"},
+        user_prefs_context,
+        update_active=True,
+    )
+    loaded_last_settings_module = load_last_settings_module(user_prefs_context)
+    record(
+        "user_prefs_last_settings_module_context",
+        isinstance(saved_last_settings_entry, dict)
+        and loaded_last_settings_module.get("ocr", {}).get("settings", {}).get("pdf_ocr_backend") == "auto"
+        and get_active_last_settings_category_module("pdf", user_prefs_context) == "ocr",
+        {
+            "entry": saved_last_settings_entry,
+            "loaded": loaded_last_settings_module,
+            "active_pdf": get_active_last_settings_category_module("pdf", user_prefs_context),
+        },
+    )
+    saved_preset_entry = save_preset_entry_module(
+        "",
+        "pdf_compress",
+        {"pdf_compress_level_var": "强力"},
+        user_prefs_context,
+        default_name_suffix="debug",
+    )
+    loaded_presets_module = load_presets_module(user_prefs_context)
+    found_preset_module = find_preset_entry_module(saved_preset_entry.get("id"), user_prefs_context)
+    delete_preset_ok = delete_preset_entry_module(saved_preset_entry.get("id"), user_prefs_context)
+    record(
+        "user_prefs_presets_module_context",
+        isinstance(saved_preset_entry, dict)
+        and saved_preset_entry.get("name") == "PDF 压缩 debug"
+        and len(loaded_presets_module) == 1
+        and found_preset_module is not None
+        and delete_preset_ok
+        and load_presets_module(user_prefs_context) == [],
+        {
+            "saved": saved_preset_entry,
+            "loaded": loaded_presets_module,
+            "found": found_preset_module,
+            "deleted": delete_preset_ok,
+        },
+    )
+    save_presets_module([], user_prefs_context)
 
     preview_root = root / "start_preview"
     preview_root.mkdir()
@@ -1839,6 +1998,61 @@ def main():
         },
     )
 
+    file_task_root = root / "file_task_module"
+    file_task_root.mkdir()
+    (file_task_root / "keep.txt").write_text("same", encoding="utf-8")
+    (file_task_root / "dup.txt").write_text("same", encoding="utf-8")
+    file_task_app = type("FileTaskModuleApp", (), {"stop_event": False})()
+    file_task_result = {}
+    file_task_logs = []
+
+    def file_task_start(_app, input_value, task_type):
+        file_task_result.update({"task_type": task_type, "input": str(input_value), "outputs": []})
+        return file_task_result
+
+    def file_task_output(result, path):
+        result.setdefault("outputs", []).append(str(path))
+
+    def file_task_counts(result, **counts):
+        result.update(counts)
+
+    def file_task_finish(result, status, **kwargs):
+        result["status"] = status
+        result.update(kwargs)
+        return result
+
+    file_task_module_result = run_file_dedup_task_core_module(
+        file_task_app,
+        str(file_task_root),
+        collect_input_files=lambda _input, _task: [str(file_task_root / "keep.txt"), str(file_task_root / "dup.txt")],
+        get_last_task_result=lambda _app: None,
+        start_task_result=file_task_start,
+        set_task_result_output_strategy=lambda *_args, **_kwargs: None,
+        set_task_result_output_root=lambda result, path: result.update({"output_root": str(path)}),
+        add_task_result_output=file_task_output,
+        set_task_result_counts=file_task_counts,
+        set_task_result_finished=file_task_finish,
+        normalize_input_path=str,
+        get_task_output_strategy=lambda *_args: "same_dir",
+        clamp_progress_value=lambda value: float(value),
+        set_progress_status=lambda *_args, **_kwargs: None,
+        log=lambda message: file_task_logs.append(str(message)),
+    )
+    record(
+        "file_manager_task_module_exports",
+        callable(run_file_dedup_task_core_module)
+        and file_task_module_result.get("status") == "success"
+        and file_task_module_result.get("processed") == 2
+        and file_task_module_result.get("success") == 1
+        and sorted(p.name for p in file_task_root.glob("*.txt")) == ["keep.txt"]
+        and any("文件去重" in item for item in file_task_logs),
+        {
+            "result": file_task_module_result,
+            "logs": file_task_logs,
+            "remaining": sorted(p.name for p in file_task_root.glob("*.txt")),
+        },
+    )
+
     inp = root / "meta_in"
     out = root / "meta_out"
     inp.mkdir()
@@ -1849,6 +2063,22 @@ def main():
     mod.FengxiToolboxApp.process_single_file(dummy, str(src), str(inp), str(out), "meta", ("time", "2024-05-06 07:08:09"), failed)
     record("meta_time", (out / "a.txt").exists() and not failed, str(failed))
 
+    meta_core_time_src = root / "meta_core_time_src.txt"
+    meta_core_time_src.write_text("meta core time", encoding="utf-8")
+    meta_core_time_dst = root / "meta_core_time_dst.txt"
+    meta_core_time_status = modify_file_timestamp_module(str(meta_core_time_src), str(meta_core_time_dst), "2024-05-06 07:08:09")
+    record(
+        "meta_core_module_exports",
+        callable(build_meta_output_path_module)
+        and callable(modify_file_timestamp_module)
+        and callable(modify_pdf_author_module)
+        and callable(modify_office_meta_module)
+        and callable(process_meta_file_module)
+        and meta_core_time_status == "SUCCESS"
+        and meta_core_time_dst.exists(),
+        meta_core_time_status,
+    )
+
     inp = root / "meta_pdf_in"
     out = root / "meta_pdf_out"
     inp.mkdir()
@@ -1858,6 +2088,192 @@ def main():
     mod.FengxiToolboxApp.process_single_file(dummy, str(src), str(inp), str(out), "meta", ("author", "Tester"), [])
     meta_reader = PdfReader(str(out / "m.pdf"))
     record("meta_author_pdf", meta_reader.metadata.get("/Author") == "Tester", meta_reader.metadata)
+
+    meta_core_pdf_in = root / "meta_core_pdf_in"
+    meta_core_pdf_out = root / "meta_core_pdf_out"
+    meta_core_pdf_in.mkdir()
+    meta_core_pdf_out.mkdir()
+    meta_core_pdf_src = meta_core_pdf_in / "core.pdf"
+    make_pdf(meta_core_pdf_src, ["meta core pdf"])
+    meta_core_failures = []
+    process_meta_file_module(
+        str(meta_core_pdf_src),
+        str(meta_core_pdf_in),
+        str(meta_core_pdf_out),
+        ("author", "CoreTester"),
+        meta_core_failures,
+        copy_file_safe=mod.copy_file_safe,
+        log=lambda *_args, **_kwargs: None,
+    )
+    meta_core_reader = PdfReader(str(meta_core_pdf_out / "core.pdf"))
+    record(
+        "meta_core_process_file",
+        meta_core_reader.metadata.get("/Author") == "CoreTester" and not meta_core_failures,
+        meta_core_reader.metadata,
+    )
+
+    convert_core_root = root / "convert_core"
+    convert_core_root.mkdir()
+    (convert_core_root / "doc.docx").write_text("doc", encoding="utf-8")
+    (convert_core_root / "slides.pptx").write_text("ppt", encoding="utf-8")
+    make_pdf(convert_core_root / "scan.pdf", ["convert core"])
+    Image.new("RGB", (20, 20), "red").save(convert_core_root / "b.jpg")
+    Image.new("RGB", (20, 20), "blue").save(convert_core_root / "a.png")
+    (convert_core_root / "note.txt").write_text("ignore", encoding="utf-8")
+    convert_output_root = convert_core_root / "out"
+    convert_output_root.mkdir()
+    word_files = collect_convert_files_module(str(convert_core_root), "word2pdf")
+    img_files = collect_convert_files_module(str(convert_core_root), "imgs2pdf")
+    record(
+        "convert_core_module_exports",
+        normalize_convert_mode_module("pdf_to_word") == "pdf2word"
+        and describe_convert_mode_module("ppt2pdf") == "PPT 转 PDF"
+        and "imgs2pdf" in CONVERT_MODE_SPECS_MODULE
+        and [Path(path).name for path in word_files] == ["doc.docx"]
+        and [Path(path).name for path in img_files] == ["a.png", "b.jpg"]
+        and Path(plan_convert_output_path_module(str(convert_core_root / "scan.pdf"), str(convert_core_root), str(convert_output_root), "pdf2word")).name == "scan.docx"
+        and Path(plan_convert_output_path_module("", str(convert_core_root), str(convert_output_root), "imgs2pdf")).name == "convert_core_图集合并.pdf",
+        {
+            "word": [Path(path).name for path in word_files],
+            "images": [Path(path).name for path in img_files],
+            "pdf_out": plan_convert_output_path_module(str(convert_core_root / "scan.pdf"), str(convert_core_root), str(convert_output_root), "pdf2word"),
+            "imgs_out": plan_convert_output_path_module("", str(convert_core_root), str(convert_output_root), "imgs2pdf"),
+        },
+    )
+
+    convert_task_root = root / "convert_task_imgs"
+    convert_task_root.mkdir()
+    Image.new("RGB", (18, 18), "green").save(convert_task_root / "one.png")
+    Image.new("RGB", (18, 18), "yellow").save(convert_task_root / "two.jpg")
+    convert_task_out = root / "convert_task_out"
+    convert_task_logs = []
+    convert_task_result = run_convert_imgs_to_pdf_task_core_module(
+        str(convert_task_root),
+        input_root=str(convert_task_root),
+        output_folder=str(convert_task_out),
+        merge_images_to_pdf=mod.merge_images_to_pdf,
+        callbacks=ConvertImgsToPdfCallbacks(log=lambda message: convert_task_logs.append(str(message))),
+    )
+    convert_task_pdf = convert_task_out / "convert_task_imgs_图集合并.pdf"
+    record(
+        "convert_task_imgs2pdf_module_exports",
+        callable(run_convert_imgs_to_pdf_task_core_module)
+        and isinstance(ConvertImgsToPdfCallbacks(), ConvertImgsToPdfCallbacks)
+        and convert_task_result.get("status") == "success"
+        and convert_task_result.get("success_count") == 2
+        and convert_task_pdf.exists()
+        and any("多图合并PDF" in item for item in convert_task_logs),
+        {
+            "result": convert_task_result,
+            "logs": convert_task_logs,
+            "output": str(convert_task_pdf),
+        },
+    )
+
+    convert_file_root = root / "convert_file_adapter"
+    convert_file_root.mkdir()
+    convert_file_out = root / "convert_file_adapter_out"
+    convert_file_out.mkdir()
+    (convert_file_root / "doc.docx").write_text("doc", encoding="utf-8")
+    make_pdf(convert_file_root / "scan.pdf", ["convert file adapter"])
+    (convert_file_root / "slides.pptx").write_text("ppt", encoding="utf-8")
+    convert_file_calls = []
+    convert_file_copies = []
+    convert_file_logs = []
+
+    def fake_doc_to_pdf(app_obj, src, dst):
+        convert_file_calls.append(("word", Path(src).name, Path(dst).name, app_obj))
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst).write_bytes(b"word-pdf")
+        return "SUCCESS"
+
+    def fake_pdf_to_word(src, dst):
+        convert_file_calls.append(("pdf", Path(src).name, Path(dst).name))
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst).write_bytes(b"pdf-word")
+        return "SUCCESS"
+
+    def fake_ppt_to_pdf(app_obj, src, dst):
+        convert_file_calls.append(("ppt", Path(src).name, Path(dst).name, app_obj))
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst).write_bytes(b"ppt-pdf")
+        return "SUCCESS"
+
+    def fake_copy(src, dst):
+        convert_file_copies.append((Path(src).name, Path(dst).name))
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst).write_bytes(Path(src).read_bytes())
+
+    convert_file_context = ConvertFileContext(
+        word_app=object(),
+        ppt_app=object(),
+        skip_complex=False,
+        convert_doc_to_pdf=fake_doc_to_pdf,
+        convert_pdf_to_word=fake_pdf_to_word,
+        convert_ppt_to_pdf=fake_ppt_to_pdf,
+        check_pdf_complexity=lambda _src: False,
+        copy_file_safe=fake_copy,
+        log=lambda message: convert_file_logs.append(str(message)),
+    )
+    word_adapter_result = process_convert_file_module(
+        convert_file_root / "doc.docx",
+        convert_file_root,
+        convert_file_out,
+        "word2pdf",
+        convert_file_context,
+    )
+    pdf_adapter_result = process_convert_file_module(
+        convert_file_root / "scan.pdf",
+        convert_file_root,
+        convert_file_out,
+        "pdf2word",
+        convert_file_context,
+    )
+    ppt_adapter_result = process_convert_file_module(
+        convert_file_root / "slides.pptx",
+        convert_file_root,
+        convert_file_out,
+        "ppt2pdf",
+        convert_file_context,
+    )
+    complex_context = ConvertFileContext(
+        skip_complex=True,
+        check_pdf_complexity=lambda _src: True,
+        copy_file_safe=fake_copy,
+        log=lambda message: convert_file_logs.append(str(message)),
+    )
+    complex_adapter_result = process_convert_file_module(
+        convert_file_root / "scan.pdf",
+        convert_file_root,
+        convert_file_out / "complex",
+        "pdf2word",
+        complex_context,
+    )
+    record(
+        "convert_file_adapter_module_exports",
+        callable(process_convert_file_module)
+        and isinstance(ConvertFileContext(), ConvertFileContext)
+        and word_adapter_result.get("ok")
+        and pdf_adapter_result.get("ok")
+        and ppt_adapter_result.get("ok")
+        and complex_adapter_result.get("status") == "skipped_complex"
+        and (convert_file_out / "doc.pdf").exists()
+        and (convert_file_out / "scan.docx").exists()
+        and (convert_file_out / "slides.pdf").exists()
+        and (convert_file_out / "complex" / "scan.pdf").exists()
+        and ("word", "doc.docx", "doc.pdf", convert_file_context.word_app) in convert_file_calls
+        and ("pdf", "scan.pdf", "scan.docx") in convert_file_calls
+        and ("ppt", "slides.pptx", "slides.pdf", convert_file_context.ppt_app) in convert_file_calls,
+        {
+            "word": word_adapter_result,
+            "pdf": pdf_adapter_result,
+            "ppt": ppt_adapter_result,
+            "complex": complex_adapter_result,
+            "calls": convert_file_calls,
+            "copies": convert_file_copies,
+            "logs": convert_file_logs,
+        },
+    )
 
     pdf_src = root / "pdf2word_src.pdf"
     make_pdf(pdf_src, ["pdf to word test"])
@@ -1883,6 +2299,87 @@ def main():
     s2 = mod.convert_audio_format(str(wav), str(m4a), "m4a", "128k")
     record("video_to_audio", s1 == "SUCCESS" and mp3.exists() and mp3.stat().st_size > 0, s1)
     record("audio_convert", s2 == "SUCCESS" and m4a.exists() and m4a.stat().st_size > 0, s2)
+
+    audio_module_root = root / "audio_module"
+    audio_module_root.mkdir()
+    (audio_module_root / "one.wav").write_bytes(b"fake-audio-one")
+    (audio_module_root / "two.mp4").write_bytes(b"fake-video-two")
+    audio_module_files = collect_audio_files_module(str(audio_module_root), collect_input_files=lambda *_args, **_kwargs: [str(audio_module_root / "one.wav"), str(audio_module_root / "two.mp4")])
+    audio_module_output = build_audio_output_path_module(str(audio_module_root / "one.wav"), str(audio_module_root), str(audio_module_root / "out"), "mp3")
+    audio_module_statuses = []
+
+    class MiniAudioTracker:
+        def __init__(self):
+            self.units = 0
+            self.current = []
+
+        def set_current_item(self, value, stage):
+            self.current.append((value, stage))
+
+        def complete_units(self, value=1, stage=None):
+            self.units += int(value or 0)
+
+    def fake_module_convert(src, dst, target_fmt, bitrate="192k"):
+        audio_module_statuses.append((Path(src).name, Path(dst).name, target_fmt, bitrate))
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst).write_bytes(b"converted")
+        return "SUCCESS"
+
+    def fake_module_copy(src, dst):
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst).write_bytes(Path(src).read_bytes())
+        return dst
+
+    def set_audio_module_counts(result, *, processed=0, success=0, failed=0, skipped=0):
+        result.update(
+            {
+                "processed_count": processed,
+                "success_count": success,
+                "failed_count": failed,
+                "skipped_count": skipped,
+            }
+        )
+
+    audio_module_result = run_audio_task_core_module(
+        object(),
+        str(audio_module_root),
+        normalized_input=str(audio_module_root),
+        input_root=str(audio_module_root),
+        output_folder=str(audio_module_root / "out"),
+        audio_files=list(audio_module_files),
+        result={"outputs": [], "failed_items": []},
+        tracker=MiniAudioTracker(),
+        is_parallel_enabled=lambda *_args, **_kwargs: True,
+        get_parallel_worker_count=lambda total: 2,
+        convert_audio_format=fake_module_convert,
+        copy_file_safe=fake_module_copy,
+        set_task_result_counts=set_audio_module_counts,
+        set_task_result_finished=lambda result, status, **kwargs: result.update({"status": status, **kwargs}) or result,
+        set_task_result_output_root=lambda result, value: result.update({"output_root": value}),
+        add_task_result_output=lambda result, value: result.setdefault("outputs", []).append(str(value)),
+        write_failed_report=lambda *_args, **_kwargs: "",
+        log=lambda *_args, **_kwargs: None,
+        progress_bar=type("Bar", (), {"set": lambda self, value: None})(),
+        stop_requested=lambda: False,
+        executor_factory=mod.concurrent.futures.ThreadPoolExecutor,
+        get_audio_task_args=lambda _app: ("convert", "mp3", "128k", False),
+        callbacks=AudioTaskCallbacksModule(log=lambda *_args, **_kwargs: None, stop_requested=lambda: False),
+    )
+    record(
+        "audio_task_module_exports",
+        len(audio_module_files) == 2
+        and audio_module_output[1].endswith("one.mp3")
+        and audio_module_result.get("status") == "success"
+        and audio_module_result.get("processed_count") == 2
+        and audio_module_result.get("success_count") == 2
+        and len(audio_module_statuses) >= 1,
+        {
+            "files": audio_module_files,
+            "output": audio_module_output,
+            "result": audio_module_result,
+            "converted": audio_module_statuses,
+        },
+    )
 
     audio_parallel_root = root / "audio_parallel"
     audio_parallel_root.mkdir()
@@ -1985,9 +2482,33 @@ def main():
     (fd / "b.txt").write_text("same", encoding="utf-8")
     app.file_mode_var.set("dedup")
     app.current_task = "file"
-    app.run_process(str(fd), "file")
+    task_dedup_calls = []
+    original_task_dedup = mod._run_file_dedup_task_core
+
+    def traced_task_dedup(*args, **kwargs):
+        task_dedup_calls.append(True)
+        return original_task_dedup(*args, **kwargs)
+
+    mod._run_file_dedup_task_core = traced_task_dedup
+    try:
+        app.run_process(str(fd), "file")
+    finally:
+        mod._run_file_dedup_task_core = original_task_dedup
     wait_for(lambda: len(list(fd.glob("*.txt"))) == 1)
-    record("file_dedup", len(list(fd.glob("*.txt"))) == 1, [p.name for p in fd.glob("*.txt")])
+    dedup_task_result = mod._get_last_task_result(app)
+    record(
+        "file_dedup",
+        len(list(fd.glob("*.txt"))) == 1
+        and bool(task_dedup_calls)
+        and isinstance(dedup_task_result, dict)
+        and dedup_task_result.get("status") == "success"
+        and dedup_task_result.get("processed_count") == 2,
+        {
+            "remaining": [p.name for p in fd.glob("*.txt")],
+            "task_calls": len(task_dedup_calls),
+            "task_result": dedup_task_result,
+        },
+    )
 
     dedup_core_root = root / "file_dedup_core"
     dedup_core_root.mkdir()
@@ -2022,9 +2543,40 @@ def main():
     Image.new("RGB", (60, 60), "blue").save(img_root / "2.jpg")
     app.current_task = "convert"
     app.cv_mode.set("imgs2pdf")
-    app.run_process(str(img_root), "convert")
+    convert_preview = mod._build_start_preview(app, str(img_root), "convert")
+    record(
+        "convert_preview_uses_core_rules",
+        convert_preview["effective_count"] == 2
+        and convert_preview["mode_detail"] == "多图合并 ➔ PDF电子书",
+        convert_preview,
+    )
+    convert_task_calls = []
+    original_convert_imgs_task = mod.run_convert_imgs_to_pdf_task_core
+
+    def traced_convert_imgs_task(*args, **kwargs):
+        convert_task_calls.append(True)
+        return original_convert_imgs_task(*args, **kwargs)
+
+    mod.run_convert_imgs_to_pdf_task_core = traced_convert_imgs_task
+    try:
+        app.run_process(str(img_root), "convert")
+    finally:
+        mod.run_convert_imgs_to_pdf_task_core = original_convert_imgs_task
     imgs_pdf = img_root / "【处理完成】结果文件夹" / "imgs2pdf_图集合并.pdf"
-    record("imgs2pdf_workflow", wait_for(lambda: imgs_pdf.exists()), imgs_pdf)
+    imgs2pdf_result = mod._get_last_task_result(app)
+    record(
+        "imgs2pdf_workflow",
+        wait_for(lambda: imgs_pdf.exists())
+        and bool(convert_task_calls)
+        and isinstance(imgs2pdf_result, dict)
+        and imgs2pdf_result.get("status") == "success"
+        and imgs2pdf_result.get("task_type") == "convert",
+        {
+            "output": str(imgs_pdf),
+            "task_calls": len(convert_task_calls),
+            "task_result": imgs2pdf_result,
+        },
+    )
 
     rm_root = root / "pdf_remove"
     rm_root.mkdir()
@@ -2101,70 +2653,104 @@ def main():
     make_pdf(scan_pdf, ["Hello OCR PDF"])
     app.current_task = "pdf"
     app.pdf_mode_var.set("ocr")
-    if getattr(app, "_fx_pdf_ocr_backend_map", None):
-        for display, backend_key in app._fx_pdf_ocr_backend_map.items():
-            if backend_key == "rapidocr":
-                app.pdf_ocr_backend.set(display)
-                break
-    if hasattr(app, "pdf_ocr_compare_report"):
-        app.pdf_ocr_compare_report.set(True)
-    app.pdf_ocr_mode.set("fullPage | 整页强制 OCR")
-    if hasattr(app, "pdf_ocr_cls"):
-        app.pdf_ocr_cls.set(False)
-    if getattr(app, "_fx_pdf_ocr_lang_map", None):
-        app.pdf_ocr_language.set(next(iter(app._fx_pdf_ocr_lang_map.keys())))
-    app.run_process(str(ocr_root), "pdf")
-    ocr_dir = next((p for p in ocr_root.iterdir() if p.is_dir()), None)
-    ocr_pdf = ocr_dir / "scan.pdf" if ocr_dir else None
-    compare_report = (ocr_root / mod.RESULT_FOLDER_NAME / "_ocr_compare_reports" / "scan.ocr_compare.md")
-    ocr_text = ""
-    if ocr_pdf and wait_for(lambda: ocr_pdf.exists()):
-        ocr_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(ocr_pdf)).pages)
-    record("pdf_ocr_searchable", bool(ocr_pdf and ocr_pdf.exists() and "Hello OCR PDF" in ocr_text), ocr_pdf or "missing")
-    record("pdf_ocr_compare_report", wait_for(lambda: compare_report.exists()), compare_report)
+    original_ocr_engine_cls = pdf_ocr_task_module.FengxiPdfOcrEngine
+    original_compare_report = pdf_ocr_task_module._run_compare_report
 
-    ocr_single_root = root / "pdf_ocr_single"
-    ocr_single_root.mkdir()
-    ocr_single_pdf = ocr_single_root / "single_scan.pdf"
-    make_pdf(ocr_single_pdf, ["Hello OCR Single"])
-    app.current_task = "pdf"
-    app.pdf_mode_var.set("ocr")
-    if hasattr(app, "pdf_ocr_compare_report"):
-        app.pdf_ocr_compare_report.set(False)
-    app.run_process(str(ocr_single_pdf), "pdf")
-    ocr_single_out = ocr_single_root / mod.RESULT_FOLDER_NAME / "single_scan.pdf"
-    ocr_single_text = ""
-    if wait_for(lambda: ocr_single_out.exists()):
-        ocr_single_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(ocr_single_out)).pages)
-    record(
-        "single_file_input_pdf_ocr",
-        ocr_single_out.exists() and "Hello OCR Single" in ocr_single_text,
-        ocr_single_out,
-    )
+    class FakePdfOcrEngine:
+        backend_key = "fake_ocr"
 
-    ocr_drag_root = root / "pdf_ocr_drag"
-    ocr_drag_root.mkdir()
-    ocr_drag_pdf = ocr_drag_root / "drag_scan.pdf"
-    make_pdf(ocr_drag_pdf, ["Hello OCR Drag"])
-    app.current_task = "pdf"
-    app.pdf_mode_var.set("ocr")
-    if hasattr(app, "pdf_ocr_compare_report"):
-        app.pdf_ocr_compare_report.set(False)
-    app.accept_drag_drop([str(ocr_drag_pdf).encode("utf-8")])
-    drag_input_value = app.input_path.get()
-    app.run_process(drag_input_value, "pdf")
-    ocr_drag_out = ocr_drag_root / mod.RESULT_FOLDER_NAME / "drag_scan.pdf"
-    ocr_drag_text = ""
-    if wait_for(lambda: ocr_drag_out.exists()):
-        ocr_drag_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(ocr_drag_out)).pages)
-    record(
-        "drag_drop_single_file_pdf_ocr",
-        drag_input_value == str(ocr_drag_pdf)
-        and getattr(app, "_fx_input_pick_mode", None) == "file"
-        and ocr_drag_out.exists()
-        and "Hello OCR Drag" in ocr_drag_text,
-        ocr_drag_out,
-    )
+        def __init__(self, *args, **kwargs):
+            self.backend_key = "fake_ocr"
+            self.backend_usage = {"fake_ocr": 1}
+
+        def close(self):
+            return None
+
+        def ocr_pdf_to_searchable_pdf(
+            self,
+            src,
+            dst,
+            extraction_mode="mixed",
+            password="",
+            layered=True,
+            progress_callback=None,
+            stop_checker=None,
+        ):
+            shutil.copy2(src, dst)
+            if callable(progress_callback):
+                progress_callback(1, 1)
+            return {"backend_usage": {"fake_ocr": 1}}
+
+    def fake_compare_report(src, report_path, options):
+        Path(report_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(report_path).write_text(f"# OCR Compare\n- Source: {Path(src).name}\n- Backend: fake_ocr\n", encoding="utf-8")
+        return {"report_path": str(report_path), "backend_usage": {"fake_ocr": 1}}
+
+    pdf_ocr_task_module.FengxiPdfOcrEngine = FakePdfOcrEngine
+    pdf_ocr_task_module._run_compare_report = fake_compare_report
+    try:
+        if hasattr(app, "pdf_ocr_compare_report"):
+            app.pdf_ocr_compare_report.set(True)
+        app.pdf_ocr_mode.set("fullPage | 整页强制 OCR")
+        if hasattr(app, "pdf_ocr_cls"):
+            app.pdf_ocr_cls.set(False)
+        if getattr(app, "_fx_pdf_ocr_lang_map", None):
+            app.pdf_ocr_language.set(next(iter(app._fx_pdf_ocr_lang_map.keys())))
+        app.run_process(str(ocr_root), "pdf")
+        ocr_dir = next((p for p in ocr_root.iterdir() if p.is_dir()), None)
+        ocr_pdf = ocr_dir / "scan.pdf" if ocr_dir else None
+        compare_report = (ocr_root / mod.RESULT_FOLDER_NAME / "_ocr_compare_reports" / "scan.ocr_compare.md")
+        ocr_text = ""
+        if ocr_pdf and wait_for(lambda: ocr_pdf.exists()):
+            ocr_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(ocr_pdf)).pages)
+        record("pdf_ocr_searchable", bool(ocr_pdf and ocr_pdf.exists() and "Hello OCR PDF" in ocr_text), ocr_pdf or "missing")
+        record("pdf_ocr_compare_report", wait_for(lambda: compare_report.exists()), compare_report)
+
+        ocr_single_root = root / "pdf_ocr_single"
+        ocr_single_root.mkdir()
+        ocr_single_pdf = ocr_single_root / "single_scan.pdf"
+        make_pdf(ocr_single_pdf, ["Hello OCR Single"])
+        app.current_task = "pdf"
+        app.pdf_mode_var.set("ocr")
+        if hasattr(app, "pdf_ocr_compare_report"):
+            app.pdf_ocr_compare_report.set(False)
+        app.run_process(str(ocr_single_pdf), "pdf")
+        ocr_single_out = ocr_single_root / mod.RESULT_FOLDER_NAME / "single_scan.pdf"
+        ocr_single_text = ""
+        if wait_for(lambda: ocr_single_out.exists()):
+            ocr_single_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(ocr_single_out)).pages)
+        record(
+            "single_file_input_pdf_ocr",
+            ocr_single_out.exists() and "Hello OCR Single" in ocr_single_text,
+            ocr_single_out,
+        )
+
+        ocr_drag_root = root / "pdf_ocr_drag"
+        ocr_drag_root.mkdir()
+        ocr_drag_pdf = ocr_drag_root / "drag_scan.pdf"
+        make_pdf(ocr_drag_pdf, ["Hello OCR Drag"])
+        app.current_task = "pdf"
+        app.pdf_mode_var.set("ocr")
+        if hasattr(app, "pdf_ocr_compare_report"):
+            app.pdf_ocr_compare_report.set(False)
+        app.accept_drag_drop([str(ocr_drag_pdf).encode("utf-8")])
+        drag_input_value = app.input_path.get()
+        app.run_process(drag_input_value, "pdf")
+        ocr_drag_out = ocr_drag_root / mod.RESULT_FOLDER_NAME / "drag_scan.pdf"
+        ocr_drag_text = ""
+        if wait_for(lambda: ocr_drag_out.exists()):
+            ocr_drag_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(ocr_drag_out)).pages)
+        record(
+            "drag_drop_single_file_pdf_ocr",
+            drag_input_value == str(ocr_drag_pdf)
+            and getattr(app, "_fx_input_pick_mode", None) == "file"
+            and ocr_drag_out.exists()
+            and "Hello OCR Drag" in ocr_drag_text,
+            ocr_drag_out,
+        )
+    finally:
+        pdf_ocr_task_module.FengxiPdfOcrEngine = original_ocr_engine_cls
+        pdf_ocr_task_module._run_compare_report = original_compare_report
 
     record(
         "pdf_ocr_brand_independent",
