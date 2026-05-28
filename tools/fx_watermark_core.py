@@ -21,6 +21,11 @@ from reportlab.pdfgen import canvas
 
 WATERMARK_MARKER = "XMU_DONE"
 WATERMARK_CREATOR = "Fengxi Toolbox"
+PDF_WATERMARK_DEFAULT_RGB = (115, 115, 115)
+WORD_WATERMARK_GRAY_RGB = 0xC0C0C0
+WORD_WATERMARK_DEFAULT_RGB = (192, 192, 192)
+WORD_WATERMARK_MIN_VISIBLE_OPACITY = 0.18
+WORD_WATERMARK_MAX_VISIBLE_OPACITY = 0.85
 
 
 def _safe_float(value, default):
@@ -28,6 +33,51 @@ def _safe_float(value, default):
         return float(value)
     except Exception:
         return default
+
+
+def _word_visible_opacity(value):
+    opacity = max(0.0, min(1.0, _safe_float(value, 0.2)))
+    return max(WORD_WATERMARK_MIN_VISIBLE_OPACITY, min(WORD_WATERMARK_MAX_VISIBLE_OPACITY, opacity))
+
+
+def _coerce_color_channel(value):
+    number = _safe_float(value, 0.0)
+    if 0.0 <= number <= 1.0 and not isinstance(value, int):
+        number *= 255.0
+    return max(0, min(255, int(round(number))))
+
+
+def normalize_watermark_color(value, default=PDF_WATERMARK_DEFAULT_RGB):
+    """Return an RGB tuple from #RRGGBB, RRGGBB, or a 3-item sequence."""
+
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("#"):
+            text = text[1:]
+        if len(text) == 6:
+            try:
+                return tuple(int(text[index : index + 2], 16) for index in (0, 2, 4))
+            except Exception:
+                pass
+    elif isinstance(value, (list, tuple)) and len(value) >= 3:
+        try:
+            return tuple(_coerce_color_channel(value[index]) for index in range(3))
+        except Exception:
+            pass
+
+    if isinstance(default, (list, tuple)) and len(default) >= 3:
+        return tuple(_coerce_color_channel(default[index]) for index in range(3))
+    return PDF_WATERMARK_DEFAULT_RGB
+
+
+def watermark_color_to_hex(value, default=PDF_WATERMARK_DEFAULT_RGB):
+    red, green, blue = normalize_watermark_color(value, default=default)
+    return f"#{red:02X}{green:02X}{blue:02X}"
+
+
+def _word_rgb_value(value):
+    red, green, blue = normalize_watermark_color(value, default=WORD_WATERMARK_DEFAULT_RGB)
+    return int(red) + (int(green) << 8) + (int(blue) << 16)
 
 
 def _resolve_reportlab_font(font_name, font_path_resolver=None):
@@ -67,6 +117,7 @@ def create_watermark_packet(
     angle,
     *,
     font_path_resolver=None,
+    color=None,
 ):
     """Build a one-page PDF watermark packet."""
 
@@ -86,7 +137,8 @@ def create_watermark_packet(
     except Exception:
         pass
     pdf.setFont(resolved_font, size)
-    pdf.setFillColorRGB(0.45, 0.45, 0.45)
+    red, green, blue = normalize_watermark_color(color, default=PDF_WATERMARK_DEFAULT_RGB)
+    pdf.setFillColorRGB(red / 255.0, green / 255.0, blue / 255.0)
     pdf.translate(page_width / 2.0, page_height / 2.0)
     pdf.rotate(rotation)
     line_height = size * 1.22
@@ -276,6 +328,10 @@ def _position_word_shape(shape, section):
     except Exception:
         pass
     try:
+        shape.WrapFormat.AllowOverlap = True
+    except Exception:
+        pass
+    try:
         shape.WrapFormat.Type = 3
     except Exception:
         pass
@@ -285,7 +341,7 @@ def _position_word_shape(shape, section):
         pass
 
 
-def _add_word_header_watermark(header, section, text, font_name, font_size, opacity, angle):
+def _add_word_header_watermark(header, section, text, font_name, font_size, opacity, angle, color=None):
     shape = header.Shapes.AddTextEffect(
         0,
         str(text or ""),
@@ -305,7 +361,23 @@ def _add_word_header_watermark(header, section, text, font_name, font_size, opac
     except Exception:
         pass
     try:
-        shape.Fill.Transparency = max(0.0, min(1.0, 1.0 - _safe_float(opacity, 0.2)))
+        shape.TextEffect.NormalizedHeight = False
+    except Exception:
+        pass
+    try:
+        shape.Fill.Visible = True
+    except Exception:
+        pass
+    try:
+        shape.Fill.Solid()
+    except Exception:
+        pass
+    try:
+        shape.Fill.ForeColor.RGB = _word_rgb_value(color if color is not None else WORD_WATERMARK_DEFAULT_RGB)
+    except Exception:
+        pass
+    try:
+        shape.Fill.Transparency = 1.0 - _word_visible_opacity(opacity)
     except Exception:
         pass
     try:
@@ -330,6 +402,7 @@ def add_watermark_to_word(
     *,
     word_font_resolver=None,
     com_context_factory=None,
+    color=None,
 ):
     """Apply a header watermark to a Word document."""
 
@@ -367,7 +440,7 @@ def add_watermark_to_word(
             only_first = str(page_range or "all").lower() in {"first", "first_page", "1"}
             for header, section in _iter_word_headers(doc):
                 try:
-                    _add_word_header_watermark(header, section, text, compatible_font, font_size, opacity, angle)
+                    _add_word_header_watermark(header, section, text, compatible_font, font_size, opacity, angle, color=color)
                     added += 1
                     if only_first:
                         break

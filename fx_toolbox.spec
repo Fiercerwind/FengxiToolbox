@@ -56,10 +56,28 @@ for module_name in (
         hiddenimports.append(module_name)
 hiddenimports += collect_submodules(
     'rapidocr',
-    filter=lambda name: not name.startswith('rapidocr.inference_engine.tensorrt'),
+    filter=lambda name: not name.startswith((
+        'rapidocr.inference_engine.paddle',
+        'rapidocr.inference_engine.pytorch',
+        'rapidocr.inference_engine.tensorrt',
+    )),
     on_error='ignore',
 )
 
+
+excluded_modules = [
+    'paddle',
+    'paddleocr',
+    'paddlepaddle',
+    'rapidocr.inference_engine.paddle',
+    'rapidocr.inference_engine.pytorch',
+    'rapidocr.inference_engine.tensorrt',
+    'tensorboard',
+    'tensorflow',
+    'torch',
+    'torchaudio',
+    'torchvision',
+]
 
 a = Analysis(
     ['Fengxi_Toolbox.py'],
@@ -70,7 +88,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=excluded_modules,
     noarchive=False,
     optimize=0,
 )

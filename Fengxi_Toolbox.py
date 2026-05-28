@@ -22,6 +22,7 @@ import pypdf
 import pywinstyles
 import pythoncom
 import tkinter
+import tkinter.colorchooser
 import tkinter.filedialog
 import tkinter.font
 import tkinter.messagebox
@@ -149,6 +150,7 @@ from tools.fx_watermark_core import (
     add_watermark_to_pdf as _watermark_core_add_watermark_to_pdf,
     add_watermark_to_word as _watermark_core_add_watermark_to_word,
     create_watermark_packet as _watermark_core_create_watermark_packet,
+    watermark_color_to_hex as _watermark_core_color_to_hex,
 )
 from tools.fx_zip_core import (
     estimate_zip_progress_units,
@@ -156,6 +158,9 @@ from tools.fx_zip_core import (
     run_zip_task as _zip_core_run_zip_task,
 )
 
+
+_FX_ORIGINAL_WIN32COM_DISPATCH = win32com.client.Dispatch
+_FX_ORIGINAL_WIN32COM_DISPATCH_EX = win32com.client.DispatchEx
 
 BOOTSTRAP_STARTED_AT = time.perf_counter()
 RUNTIME_BIN = Path(__file__).with_name("fengxi_runtime.bin")
@@ -479,7 +484,7 @@ FEATURE_REGISTRY = {
         "icon": "shield",
         "page": "watermark",
         "input": {"file": True, "folder": True, "drag_drop": True},
-        "output_strategy": {"supported": False, "force_result_folder": False},
+        "output_strategy": {"supported": True, "force_result_folder": False},
         "parallel": {"mode": "safe", "hint": "批量水印可对多文件并行处理；遇到 Word/PDF 特殊链路时会自动保护。"},
         "preview_modes": {"default": "添加水印"},
         "risk_flags": ("delete_source",),
@@ -2665,6 +2670,15 @@ def _tighten_watermark_tab_layout(app, tab):
                     pass
         except Exception:
             pass
+    for child in right_children:
+        if not getattr(child, "_fx_wm_color_preview_controls", False):
+            continue
+        try:
+            child.configure(height=128)
+            child.pack_propagate(False)
+            child.pack_configure(fill="x", padx=24, pady=(0, 3))
+        except Exception:
+            pass
 
 
 def _tighten_layout(app, task_name=None):
@@ -2772,7 +2786,7 @@ for _key, _value in _ns.items():
 _debug("bootstrap:globals_loaded")
 
 
-def create_watermark_packet(content, font_name, font_size, opacity, angle):
+def create_watermark_packet(content, font_name, font_size, opacity, angle, color=None):
     return _watermark_core_create_watermark_packet(
         content,
         font_name,
@@ -2780,6 +2794,7 @@ def create_watermark_packet(content, font_name, font_size, opacity, angle):
         opacity,
         angle,
         font_path_resolver=get_font_path_by_name,
+        color=color,
     )
 
 
@@ -2805,6 +2820,7 @@ def add_watermark_to_word(
     angle,
     page_range="all",
     force_mode=False,
+    color=None,
 ):
     return _watermark_core_add_watermark_to_word(
         word_app,
@@ -2819,6 +2835,7 @@ def add_watermark_to_word(
         force_mode=force_mode,
         word_font_resolver=get_word_compatible_font_name,
         com_context_factory=_DisableWin32ComGenCache,
+        color=color,
     )
 
 
@@ -3213,9 +3230,9 @@ def _patch_convert_file_adapter():
                         word_app=values[2] if len(values) > 2 else None,
                         ppt_app=values[3] if len(values) > 3 else None,
                         skip_complex=skip_complex,
-                        convert_doc_to_pdf=convert_doc_to_pdf,
+                        convert_doc_to_pdf=lambda word_app, src_path, dst_path: _convert_doc_to_pdf_safely(word_app, src_path, dst_path),
                         convert_pdf_to_word=convert_pdf_to_word,
-                        convert_ppt_to_pdf=convert_ppt_to_pdf,
+                        convert_ppt_to_pdf=lambda ppt_app, src_path, dst_path: _convert_ppt_to_pdf_safely(ppt_app, src_path, dst_path),
                         check_pdf_complexity=check_pdf_complexity,
                         copy_file_safe=copy_file_safe,
                         log=getattr(self, "log", None),
@@ -3683,19 +3700,22 @@ def _dispatch_com_app_dynamic(progid):
         return win32com.client.dynamic.Dispatch(progid)
     except Exception as exc:
         _debug(f"com_dynamic_dispatch:fallback:{progid}:{exc}")
-        return win32com.client.DispatchEx(progid)
+        return _FX_ORIGINAL_WIN32COM_DISPATCH_EX(progid)
 
 
 class _DisableWin32ComGenCache:
     def __init__(self):
         self._original_get_class = None
+        self._original_get_module = None
 
     def __enter__(self):
         try:
             import win32com.client.gencache as gencache
 
             self._original_get_class = gencache.GetClassForCLSID
+            self._original_get_module = gencache.GetModuleForCLSID
             gencache.GetClassForCLSID = lambda *_args, **_kwargs: None
+            gencache.GetModuleForCLSID = lambda *_args, **_kwargs: None
         except Exception as exc:
             _debug(f"com_gencache:disable_error:{exc}")
         return self
@@ -3706,10 +3726,71 @@ class _DisableWin32ComGenCache:
         try:
             import win32com.client.gencache as gencache
 
-            gencache.GetClassForCLSID = self._original_get_class
+            if self._original_get_class is not None:
+                gencache.GetClassForCLSID = self._original_get_class
+            if self._original_get_module is not None:
+                gencache.GetModuleForCLSID = self._original_get_module
         except Exception as restore_exc:
             _debug(f"com_gencache:restore_error:{restore_exc}")
         return False
+
+
+def _is_win32com_gen_cache_error(exc):
+    text = str(exc or "").lower()
+    return (
+        "win32com.gen_py" in text
+        and (
+            "clsidtoclassmap" in text
+            or "clsidtopackagemap" in text
+            or "vtablestopackagemap" in text
+            or "has no attribute" in text
+        )
+    )
+
+
+def _safe_office_dispatch_ex(progid, *args, **kwargs):
+    progid_text = str(progid or "")
+    if progid_text.lower() == "word.application":
+        return _dispatch_com_app_dynamic(progid_text)
+    try:
+        return _FX_ORIGINAL_WIN32COM_DISPATCH_EX(progid, *args, **kwargs)
+    except Exception as exc:
+        if progid_text.lower() in {"word.application", "powerpoint.application"} and _is_win32com_gen_cache_error(exc):
+            _debug(f"com_dispatch_ex:gen_cache_fallback:{progid_text}:{exc}")
+            return _dispatch_com_app_dynamic(progid_text)
+        raise
+
+
+def _safe_office_dispatch(progid, *args, **kwargs):
+    progid_text = str(progid or "")
+    if progid_text.lower() == "word.application":
+        return _dispatch_com_app_dynamic(progid_text)
+    try:
+        return _FX_ORIGINAL_WIN32COM_DISPATCH(progid, *args, **kwargs)
+    except Exception as exc:
+        if progid_text.lower() in {"word.application", "powerpoint.application"} and _is_win32com_gen_cache_error(exc):
+            _debug(f"com_dispatch:gen_cache_fallback:{progid_text}:{exc}")
+            return _dispatch_com_app_dynamic(progid_text)
+        raise
+
+
+def _install_safe_office_dispatch_patch():
+    try:
+        current_dispatch = getattr(win32com.client, "Dispatch", None)
+        current_dispatch_ex = getattr(win32com.client, "DispatchEx", None)
+        dispatch_installed = getattr(current_dispatch, "__fx_safe_office_dispatch_patch__", False)
+        dispatch_ex_installed = getattr(current_dispatch_ex, "__fx_safe_office_dispatch_patch__", False)
+        if dispatch_installed and dispatch_ex_installed:
+            return
+        _safe_office_dispatch.__fx_safe_office_dispatch_patch__ = True
+        _safe_office_dispatch.__wrapped__ = _FX_ORIGINAL_WIN32COM_DISPATCH
+        _safe_office_dispatch_ex.__fx_safe_office_dispatch_patch__ = True
+        _safe_office_dispatch_ex.__wrapped__ = _FX_ORIGINAL_WIN32COM_DISPATCH_EX
+        win32com.client.Dispatch = _safe_office_dispatch
+        win32com.client.DispatchEx = _safe_office_dispatch_ex
+        _debug("com_dispatch_ex:safe_office_patch_installed")
+    except Exception as exc:
+        _debug(f"com_dispatch_ex:safe_office_patch_error:{exc}")
 
 
 def _create_hidden_word_app():
@@ -3724,6 +3805,34 @@ def _create_hidden_word_app():
     except Exception:
         pass
     return word_app
+
+
+_FX_RUNTIME_CONVERT_DOC_TO_PDF = convert_doc_to_pdf
+_FX_RUNTIME_CONVERT_PPT_TO_PDF = convert_ppt_to_pdf
+
+
+def _convert_doc_to_pdf_safely(word_app, src, dst):
+    status = ""
+    try:
+        with _DisableWin32ComGenCache():
+            status = _FX_RUNTIME_CONVERT_DOC_TO_PDF(word_app, src, dst)
+    except Exception as exc:
+        status = f"ERROR:{exc}"
+    if str(status).strip() == "SUCCESS" and os.path.exists(dst) and os.path.getsize(dst) > 0:
+        return "SUCCESS"
+
+    fallback_status = _export_word_docx_to_pdf_safely(src, dst)
+    if str(fallback_status).strip() == "SUCCESS":
+        return "SUCCESS"
+    return status or fallback_status
+
+
+def _convert_ppt_to_pdf_safely(ppt_app, src, dst):
+    with _DisableWin32ComGenCache():
+        return _FX_RUNTIME_CONVERT_PPT_TO_PDF(ppt_app, src, dst)
+
+
+_install_safe_office_dispatch_patch()
 
 
 def _export_word_docx_to_pdf_safely(docx_path, pdf_path):
@@ -3756,6 +3865,12 @@ def _export_word_docx_to_pdf_safely(docx_path, pdf_path):
                 word_app.Quit()
         except Exception:
             pass
+
+
+globals()["convert_doc_to_pdf"] = _convert_doc_to_pdf_safely
+globals()["convert_ppt_to_pdf"] = _convert_ppt_to_pdf_safely
+_ns["convert_doc_to_pdf"] = _convert_doc_to_pdf_safely
+_ns["convert_ppt_to_pdf"] = _convert_ppt_to_pdf_safely
 
 
 def _get_remove_wm_overwrite_original(app):
@@ -7628,6 +7743,716 @@ def _safe_named_widget_set(app, name, value):
         return False
 
 
+WATERMARK_DEFAULT_COLOR = "#C0C0C0"
+WATERMARK_WORD_EXTS = {".doc", ".docx"}
+WATERMARK_PPT_EXTS = {".ppt", ".pptx"}
+WATERMARK_PDF_EXTS = {".pdf"}
+
+
+def _normalize_watermark_color(value, default=WATERMARK_DEFAULT_COLOR):
+    try:
+        return _watermark_core_color_to_hex(value, default=default)
+    except Exception:
+        return str(default or WATERMARK_DEFAULT_COLOR).upper()
+
+
+def _get_watermark_color(app):
+    return _normalize_watermark_color(_safe_var_get(app, "wm_color_var", WATERMARK_DEFAULT_COLOR))
+
+
+def _set_watermark_color(app, color):
+    normalized = _normalize_watermark_color(color)
+    if str(_safe_var_get(app, "wm_color_var", "") or "").strip().upper() == normalized:
+        return normalized
+    if not _safe_var_set(app, "wm_color_var", normalized):
+        try:
+            app.wm_color_var = tkinter.StringVar(value=normalized)
+        except Exception:
+            pass
+    return normalized
+
+
+def _watermark_color_rgb_tuple(color):
+    hex_color = _normalize_watermark_color(color)
+    return tuple(int(hex_color[index : index + 2], 16) for index in (1, 3, 5))
+
+
+def _watermark_log(app, logs, message):
+    text = str(message)
+    logs.append(text)
+    try:
+        app.log(text)
+    except Exception:
+        pass
+
+
+def _watermark_status_kind(status):
+    text = str(status or "").strip()
+    if text == "SUCCESS":
+        return "success"
+    lowered = text.lower()
+    if lowered.startswith("skip"):
+        return "skipped"
+    if lowered.startswith("error") or not text:
+        return "failed"
+    return "failed"
+
+
+def _unique_watermark_path(path_value):
+    path = Path(path_value)
+    if not path.exists():
+        return str(path)
+    counter = 2
+    while True:
+        candidate = path.with_name(f"{path.stem}_{counter}{path.suffix}")
+        if not candidate.exists():
+            return str(candidate)
+        counter += 1
+
+
+def _watermark_relative_parent(src_path, input_root):
+    try:
+        rel_parent = Path(os.path.relpath(str(src_path.parent), str(input_root)))
+        if str(rel_parent) in {"", "."} or str(rel_parent).startswith(".."):
+            return Path()
+        return rel_parent
+    except Exception:
+        return Path()
+
+
+def _build_watermark_output_path(src, input_root, output_root, strategy, *, convert_to_pdf=False, single_input=False):
+    src_path = Path(src)
+    input_root_path = Path(input_root)
+    output_root_path = Path(output_root)
+    source_suffix = src_path.suffix.lower()
+    output_suffix = ".pdf" if convert_to_pdf and source_suffix in WATERMARK_WORD_EXTS | WATERMARK_PPT_EXTS else src_path.suffix
+
+    if strategy == "overwrite" and output_suffix.lower() == src_path.suffix.lower():
+        return str(src_path)
+
+    if strategy == "result_folder":
+        target_dir = output_root_path / _watermark_relative_parent(src_path, input_root_path)
+        target_name = src_path.name if output_suffix.lower() == src_path.suffix.lower() else f"{src_path.stem}{output_suffix}"
+        return str(target_dir / target_name)
+
+    target_dir = src_path.parent if single_input or strategy == "same_dir" else output_root_path
+    return _unique_watermark_path(target_dir / f"{src_path.stem}_加水印{output_suffix}")
+
+
+def _watermark_replace_original(staged_path, source_path):
+    staged = Path(staged_path)
+    source = Path(source_path)
+    if not staged.exists():
+        return False
+    os.replace(str(staged), str(source))
+    return True
+
+
+def _get_slider_value_for_preview(app, name, fallback):
+    value = _safe_named_widget_get(app, name, fallback)
+    return _safe_float(value, fallback)
+
+
+def _resolve_preview_font(app, size):
+    font_name = str(_safe_var_get(app, "selected_font", "") or "").strip()
+    font_path = ""
+    if font_name:
+        try:
+            font_path = str(get_font_path_by_name(font_name) or "")
+        except Exception:
+            font_path = ""
+    for candidate in (font_path, "C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf"):
+        try:
+            if candidate and os.path.exists(candidate):
+                return ImageFont.truetype(candidate, max(10, int(size)))
+        except Exception:
+            pass
+    try:
+        return ImageFont.truetype("arial.ttf", max(10, int(size)))
+    except Exception:
+        return ImageFont.load_default()
+
+
+def _make_watermark_preview_image(app):
+    width, height = 360, 128
+    image = PILImage.new("RGBA", (width, height), (248, 250, 252, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((10, 10, width - 10, height - 10), radius=14, fill=(255, 255, 255, 255), outline=(218, 225, 232, 255), width=2)
+    for x in range(28, width - 20, 36):
+        draw.line((x, 16, x - 72, height - 16), fill=(237, 241, 245, 255), width=1)
+
+    text = (_read_watermark_text_widget(app) or "Fengxi Watermark").strip() or "Fengxi Watermark"
+    preview_text = " / ".join(line.strip() for line in text.splitlines() if line.strip())[:42] or "Fengxi Watermark"
+    font_size = max(16.0, min(44.0, _get_slider_value_for_preview(app, "slider_size", 60) * 0.45))
+    opacity = max(0.08, min(1.0, _get_slider_value_for_preview(app, "slider_opacity", 0.18)))
+    angle = _get_slider_value_for_preview(app, "slider_angle", 45)
+    red, green, blue = _watermark_color_rgb_tuple(_get_watermark_color(app))
+    alpha = max(24, min(230, int(opacity * 255)))
+
+    font = _resolve_preview_font(app, font_size)
+    text_layer = PILImage.new("RGBA", (width, height), (0, 0, 0, 0))
+    text_draw = ImageDraw.Draw(text_layer)
+    try:
+        bbox = text_draw.textbbox((0, 0), preview_text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+    except Exception:
+        text_width = len(preview_text) * int(font_size * 0.6)
+        text_height = int(font_size)
+    text_draw.text(
+        ((width - text_width) / 2, (height - text_height) / 2 - 2),
+        preview_text,
+        font=font,
+        fill=(red, green, blue, alpha),
+    )
+    rotated = text_layer.rotate(angle, resample=PILImage.Resampling.BICUBIC, center=(width / 2, height / 2))
+    image.alpha_composite(rotated)
+
+    label = f"{_get_watermark_color(app)} | {int(round(opacity * 100))}% | {int(round(angle))}°"
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((18, height - 31, 178, height - 15), radius=7, fill=(246, 248, 250, 235))
+    draw.text((26, height - 30), label, fill=(92, 103, 115, 255), font=ImageFont.load_default())
+    return image
+
+
+def _refresh_watermark_preview(app):
+    label = getattr(app, "wm_preview_label", None)
+    if label is None:
+        return False
+    try:
+        if not bool(label.winfo_exists()):
+            return False
+    except Exception:
+        return False
+    try:
+        image = _make_watermark_preview_image(app)
+        ctk_image = customtkinter.CTkImage(light_image=image, dark_image=image, size=(360, 128))
+        app._fx_wm_preview_image = ctk_image
+        label.configure(image=ctk_image, text="")
+        swatch = getattr(app, "wm_color_swatch", None)
+        if swatch is not None:
+            swatch.configure(fg_color=_get_watermark_color(app))
+        return True
+    except Exception as exc:
+        _debug(f"watermark_preview:refresh_error:{exc}")
+        try:
+            label.configure(text="预览暂不可用")
+        except Exception:
+            pass
+        return False
+
+
+def _schedule_watermark_preview_refresh(app, delay_ms=120):
+    try:
+        after_id = getattr(app, "_fx_wm_preview_after_id", None)
+        if after_id:
+            app.after_cancel(after_id)
+    except Exception:
+        pass
+
+    def refresh_later(target=app):
+        try:
+            target._fx_wm_preview_after_id = None
+        except Exception:
+            pass
+        try:
+            if hasattr(target, "winfo_exists") and not bool(target.winfo_exists()):
+                return
+        except Exception:
+            return
+        _refresh_watermark_preview(target)
+
+    try:
+        app._fx_wm_preview_after_id = app.after(delay_ms, refresh_later)
+    except Exception:
+        refresh_later()
+
+
+def _choose_watermark_color(app):
+    current = _get_watermark_color(app)
+    try:
+        _rgb, selected = tkinter.colorchooser.askcolor(color=current, title="选择水印颜色")
+    except Exception as exc:
+        _debug(f"watermark_color:chooser_error:{exc}")
+        selected = None
+    if selected:
+        _set_watermark_color(app, selected)
+        _refresh_watermark_preview(app)
+
+
+def _install_watermark_color_preview_ui(app):
+    if getattr(app, "_fx_wm_color_preview_ready", False):
+        return
+    tab = getattr(app, "tab_wm", None)
+    if tab is None:
+        return
+
+    panels = list(tab.winfo_children())
+    right_panel = panels[1] if len(panels) >= 2 else tab
+    _set_watermark_color(app, _safe_var_get(app, "wm_color_var", WATERMARK_DEFAULT_COLOR))
+
+    frame = customtkinter.CTkFrame(right_panel, fg_color="transparent", height=128)
+    frame._fx_wm_color_preview_controls = True
+    try:
+        frame.pack_propagate(False)
+    except Exception:
+        pass
+    frame.pack(fill="x", padx=24, pady=(0, 3))
+
+    row = customtkinter.CTkFrame(frame, fg_color="transparent", height=30)
+    row.pack(fill="x", pady=(0, 4))
+    customtkinter.CTkLabel(
+        row,
+        text="水印颜色",
+        text_color=globals().get("COLOR_TEXT_SOFT"),
+        font=customtkinter.CTkFont(size=12),
+        width=62,
+        anchor="w",
+    ).pack(side="left", padx=(0, 8))
+
+    app.wm_color_swatch = customtkinter.CTkFrame(row, width=28, height=22, corner_radius=8, fg_color=_get_watermark_color(app))
+    app.wm_color_swatch.pack(side="left", padx=(0, 8))
+    try:
+        app.wm_color_swatch.pack_propagate(False)
+    except Exception:
+        pass
+
+    app.wm_color_entry = customtkinter.CTkEntry(row, width=88, height=28, textvariable=app.wm_color_var)
+    app.wm_color_entry.pack(side="left", padx=(0, 8))
+    customtkinter.CTkButton(row, text="选择", width=56, height=28, command=lambda target=app: _choose_watermark_color(target)).pack(side="left", padx=(0, 8))
+    customtkinter.CTkButton(row, text="刷新预览", width=78, height=28, command=lambda target=app: _refresh_watermark_preview(target)).pack(side="left")
+
+    app.wm_preview_label = customtkinter.CTkLabel(frame, text="", width=360, height=88, corner_radius=14)
+    app.wm_preview_label.pack(fill="x", expand=True)
+
+    def color_changed(*_args):
+        _schedule_watermark_preview_refresh(app)
+
+    try:
+        app.wm_color_var.trace_add("write", color_changed)
+    except Exception:
+        pass
+
+    def preview_changed(_event=None, target=app):
+        _schedule_watermark_preview_refresh(target)
+
+    for widget_name in ("wm_text", "slider_size", "slider_opacity", "slider_angle"):
+        widget = getattr(app, widget_name, None)
+        if widget is None:
+            continue
+        try:
+            widget.bind("<KeyRelease>", preview_changed, add="+")
+            widget.bind("<B1-Motion>", preview_changed, add="+")
+            widget.bind("<ButtonRelease-1>", preview_changed, add="+")
+        except Exception:
+            pass
+        inner_text = getattr(widget, "_textbox", None)
+        if inner_text is not None:
+            try:
+                inner_text.bind("<KeyRelease>", preview_changed, add="+")
+                inner_text.bind("<<Paste>>", preview_changed, add="+")
+            except Exception:
+                pass
+
+    app._fx_wm_color_preview_ready = True
+    _schedule_watermark_preview_refresh(app, delay_ms=450)
+
+
+def _patch_watermark_color_preview_ui():
+    try:
+        original_init_watermark_ui = FengxiToolboxApp.init_watermark_ui
+    except Exception as exc:
+        _debug(f"patch_watermark_color_preview:missing:{exc}")
+        return
+
+    if getattr(original_init_watermark_ui, "__fx_wm_color_preview_patch__", False):
+        return
+
+    def patched_init_watermark_ui(self):
+        original_init_watermark_ui(self)
+        try:
+            _install_watermark_color_preview_ui(self)
+        except Exception as exc:
+            _debug(f"patch_watermark_color_preview:init_error:{exc}")
+
+    patched_init_watermark_ui.__fx_wm_color_preview_patch__ = True
+    FengxiToolboxApp.init_watermark_ui = patched_init_watermark_ui
+    _debug("patch_watermark_color_preview:installed")
+
+
+_patch_watermark_color_preview_ui()
+
+
+def _get_watermark_settings(app):
+    text = _read_watermark_text_widget(app) or str(_safe_named_widget_get(app, "wm_text", "") or "")
+    font_name = str(_safe_var_get(app, "selected_font", "") or "").strip()
+    if not font_name:
+        try:
+            font_name = str((getattr(app, "font_list", []) or [""])[0] or "")
+        except Exception:
+            font_name = ""
+    font_size = _safe_float(_safe_named_widget_get(app, "slider_size", _safe_var_get(app, "wm_size", 60)), 60.0)
+    opacity = _safe_float(_safe_named_widget_get(app, "slider_opacity", _safe_var_get(app, "wm_opacity", 0.08)), 0.08)
+    angle = _safe_float(_safe_named_widget_get(app, "slider_angle", _safe_var_get(app, "wm_angle", 45)), 45.0)
+    page_range = str(_safe_var_get(app, "wm_range_var", "all") or "all")
+    overwrite_mode = str(_safe_var_get(app, "wm_overwrite_var", "smart") or "smart").strip().lower()
+    color = _get_watermark_color(app)
+    return {
+        "text": text,
+        "font_name": font_name,
+        "font_size": font_size,
+        "opacity": opacity,
+        "angle": angle,
+        "color": color,
+        "page_range": page_range,
+        "force_mode": overwrite_mode == "force",
+        "convert_pdf": bool(_safe_var_get(app, "wm_convert_pdf", False)),
+        "delete_source": bool(_safe_var_get(app, "wm_delete_var", False)),
+    }
+
+
+def _watermark_make_pdf_packet(settings):
+    return create_watermark_packet(
+        settings["text"],
+        settings["font_name"],
+        settings["font_size"],
+        settings["opacity"],
+        settings["angle"],
+        color=settings.get("color", WATERMARK_DEFAULT_COLOR),
+    )
+
+
+def _watermark_process_pdf(src, dst, settings):
+    packet = _watermark_make_pdf_packet(settings)
+    return add_watermark_to_pdf(
+        str(src),
+        str(dst),
+        packet,
+        page_range=settings["page_range"],
+        check_text=settings["text"],
+        force_mode=settings["force_mode"],
+    )
+
+
+def _watermark_process_word(src, dst, settings, word_app):
+    return add_watermark_to_word(
+        word_app,
+        str(src),
+        str(dst),
+        settings["text"],
+        settings["font_name"],
+        settings["font_size"],
+        settings["opacity"],
+        settings["angle"],
+        page_range=settings["page_range"],
+        force_mode=settings["force_mode"],
+        color=settings.get("color", WATERMARK_DEFAULT_COLOR),
+    )
+
+
+def _watermark_convert_doc_to_pdf(src, raw_pdf, word_app):
+    return _convert_doc_to_pdf_safely(word_app, str(src), str(raw_pdf))
+
+
+def _watermark_convert_ppt_to_pdf(src, raw_pdf, ppt_app):
+    return _convert_ppt_to_pdf_safely(ppt_app, str(src), str(raw_pdf))
+
+
+def _run_watermark_task(app, input_value):
+    normalized_input = _normalize_input_path_value(input_value)
+    is_single_input = bool(normalized_input and os.path.isfile(normalized_input))
+    input_root = os.path.dirname(normalized_input) if is_single_input else normalized_input
+    requested_strategy = _get_task_output_strategy(app, "watermark")
+    actual_strategy = requested_strategy if is_single_input else "result_folder"
+    output_root = input_root if actual_strategy in {"same_dir", "overwrite"} else os.path.join(input_root, RESULT_FOLDER_NAME)
+    settings = _get_watermark_settings(app)
+    logs = []
+
+    result = _get_last_task_result(app)
+    if result is None:
+        result = _start_task_result(app, normalized_input, "watermark")
+    _set_task_result_output_strategy(result, "watermark", actual_strategy)
+    result["output_strategy"] = actual_strategy
+    result["output_strategy_label"] = _get_output_strategy_label(actual_strategy)
+    _set_task_result_output_root(result, output_root)
+    try:
+        app._fx_last_task_logs = logs
+    except Exception:
+        pass
+
+    all_files = list(app.collect_input_files(normalized_input, "watermark"))
+    total = len(all_files)
+    if total <= 0:
+        _watermark_log(app, logs, "[批量水印] 未找到可处理文件")
+        _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=1)
+        _set_task_result_finished(result, "skipped", message="未找到可处理文件", detail="未找到可处理文件", skipped=True)
+        return result
+
+    if actual_strategy == "result_folder":
+        os.makedirs(output_root, exist_ok=True)
+
+    _watermark_log(app, logs, f"[批量水印] 将处理 {total} 个文件 | 输出策略：{_get_output_strategy_label(actual_strategy)}")
+    success_outputs = []
+    failed_items = []
+    skipped_items = []
+    processed_count = 0
+    word_app = None
+    ppt_app = None
+    pythoncom_initialized = False
+
+    def get_word_app():
+        nonlocal word_app, pythoncom_initialized
+        if word_app is None:
+            if not pythoncom_initialized:
+                pythoncom.CoInitialize()
+                pythoncom_initialized = True
+            word_app = _create_hidden_word_app()
+        return word_app
+
+    def get_ppt_app():
+        nonlocal ppt_app, pythoncom_initialized
+        if ppt_app is None:
+            if not pythoncom_initialized:
+                pythoncom.CoInitialize()
+                pythoncom_initialized = True
+            ppt_app = _safe_office_dispatch_ex("PowerPoint.Application")
+            try:
+                ppt_app.Visible = False
+            except Exception:
+                pass
+        return ppt_app
+
+    try:
+        for index, file_path in enumerate(all_files, start=1):
+            if getattr(app, "stop_event", False):
+                break
+            src = Path(_normalize_input_path_value(file_path))
+            suffix = src.suffix.lower()
+            convert_to_pdf = settings["convert_pdf"] and suffix in WATERMARK_WORD_EXTS | WATERMARK_PPT_EXTS
+            target_path = Path(
+                _build_watermark_output_path(
+                    src,
+                    input_root,
+                    output_root,
+                    actual_strategy,
+                    convert_to_pdf=convert_to_pdf,
+                    single_input=is_single_input,
+                )
+            )
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path = target_path
+            stage_dir = None
+            stage_path = target_path
+
+            if actual_strategy == "overwrite" and target_path.resolve() == src.resolve():
+                stage_dir = Path(tempfile.mkdtemp(prefix="fx_wm_stage_", dir=str(src.parent)))
+                stage_path = stage_dir / src.name
+            elif actual_strategy == "overwrite" and target_path.suffix.lower() != src.suffix.lower():
+                actual_strategy = "same_dir"
+                result["output_strategy"] = actual_strategy
+                result["output_strategy_label"] = _get_output_strategy_label(actual_strategy)
+                output_root = input_root
+                _set_task_result_output_root(result, output_root)
+                target_path = Path(
+                    _build_watermark_output_path(
+                        src,
+                        input_root,
+                        output_root,
+                        "same_dir",
+                        convert_to_pdf=convert_to_pdf,
+                        single_input=True,
+                    )
+                )
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path = target_path
+                stage_path = target_path
+                _watermark_log(app, logs, f"[批量水印] {src.name} 转 PDF 后扩展名变化，已改为同目录新文件输出")
+
+            _set_progress_status(
+                app,
+                current_file=str(src),
+                stage="添加水印",
+                completed=index - 1,
+                total=total,
+                fraction=(index - 1) / max(1, total),
+            )
+            try:
+                if suffix in WATERMARK_PDF_EXTS:
+                    status = _watermark_process_pdf(src, stage_path, settings)
+                elif suffix in WATERMARK_WORD_EXTS:
+                    if convert_to_pdf:
+                        raw_fd, raw_pdf_name = tempfile.mkstemp(
+                            prefix="fx_wm_raw_",
+                            suffix=".pdf",
+                            dir=str(target_path.parent),
+                        )
+                        os.close(raw_fd)
+                        raw_pdf = Path(raw_pdf_name)
+                        try:
+                            convert_status = _watermark_convert_doc_to_pdf(src, raw_pdf, get_word_app())
+                            if str(convert_status).strip() != "SUCCESS" or not raw_pdf.exists():
+                                status = f"ERROR:Word 转 PDF 失败: {convert_status}"
+                            else:
+                                status = _watermark_process_pdf(raw_pdf, stage_path, settings)
+                        finally:
+                            try:
+                                if raw_pdf.exists():
+                                    raw_pdf.unlink()
+                            except Exception:
+                                pass
+                    else:
+                        status = _watermark_process_word(src, stage_path, settings, get_word_app())
+                elif suffix in WATERMARK_PPT_EXTS:
+                    raw_fd, raw_pdf_name = tempfile.mkstemp(
+                        prefix="fx_wm_raw_",
+                        suffix=".pdf",
+                        dir=str(target_path.parent),
+                    )
+                    os.close(raw_fd)
+                    raw_pdf = Path(raw_pdf_name)
+                    try:
+                        convert_status = _watermark_convert_ppt_to_pdf(src, raw_pdf, get_ppt_app())
+                        if str(convert_status).strip() != "SUCCESS" or not raw_pdf.exists():
+                            status = f"ERROR:PPT 转 PDF 失败: {convert_status}"
+                        else:
+                            status = _watermark_process_pdf(raw_pdf, stage_path, settings)
+                    finally:
+                        try:
+                            if raw_pdf.exists():
+                                raw_pdf.unlink()
+                        except Exception:
+                            pass
+                else:
+                    status = f"SKIP:unsupported file type: {src.suffix}"
+
+                kind = _watermark_status_kind(status)
+                if kind == "success":
+                    if stage_dir is not None:
+                        _watermark_replace_original(stage_path, src)
+                        output_path = src
+                    if settings["delete_source"] and output_path.resolve() != src.resolve():
+                        try:
+                            src.unlink()
+                        except Exception as delete_exc:
+                            _watermark_log(app, logs, f"[批量水印] 删除源文件失败: {src.name} | {delete_exc}")
+                    success_outputs.append(str(output_path))
+                    _add_task_result_output(result, str(output_path))
+                    _watermark_log(app, logs, f"[批量水印] 成功: {src.name} -> {output_path}")
+                elif kind == "skipped":
+                    skipped_items.append(str(src))
+                    _watermark_log(app, logs, f"[批量水印] 跳过: {src.name} | {status}")
+                else:
+                    failed_items.append(str(src))
+                    _watermark_log(app, logs, f"[批量水印] 失败: {src.name} | {status}")
+            except Exception as exc:
+                failed_items.append(str(src))
+                _watermark_log(app, logs, f"[批量水印] 失败: {src.name} | {exc}")
+            finally:
+                processed_count += 1
+                if stage_dir is not None:
+                    try:
+                        shutil.rmtree(stage_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+                _set_progress_status(
+                    app,
+                    current_file=str(src),
+                    stage="添加水印",
+                    completed=processed_count,
+                    total=total,
+                    fraction=processed_count / max(1, total),
+                )
+
+        if failed_items:
+            report_root = Path(output_root if actual_strategy == "result_folder" else input_root)
+            report_root.mkdir(parents=True, exist_ok=True)
+            report_path = report_root / "!失败文件清单.txt"
+            lines = ["以下文件处理失败："]
+            for item in failed_items:
+                try:
+                    lines.append(os.path.relpath(item, input_root))
+                except Exception:
+                    lines.append(str(item))
+            report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            _add_task_result_output(result, str(report_path))
+
+        result["failed_items"] = list(failed_items)
+        _set_task_result_counts(
+            result,
+            processed=processed_count,
+            success=len(success_outputs),
+            failed=len(failed_items),
+            skipped=len(skipped_items),
+        )
+        if getattr(app, "stop_event", False):
+            _set_task_result_finished(result, "stopped", message="用户停止批量水印任务", detail="用户停止批量水印任务", stopped=True)
+        elif failed_items:
+            _set_task_result_finished(
+                result,
+                "failed",
+                message=f"批量水印失败 {len(failed_items)} 个文件",
+                detail=f"批量水印失败 {len(failed_items)} 个文件",
+                error=f"failed_items={len(failed_items)}",
+            )
+        elif success_outputs:
+            _set_task_result_finished(result, "success", message="批量水印完成", detail="批量水印完成")
+        else:
+            _set_task_result_finished(result, "skipped", message="没有生成新的水印文件", detail="没有生成新的水印文件", skipped=True)
+        return result
+    finally:
+        try:
+            if word_app is not None:
+                word_app.Quit()
+        except Exception:
+            pass
+        try:
+            if ppt_app is not None:
+                ppt_app.Quit()
+        except Exception:
+            pass
+        if pythoncom_initialized:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+
+
+def _patch_watermark_task():
+    try:
+        original_run_process = FengxiToolboxApp.run_process
+    except Exception as exc:
+        _debug(f"patch_watermark_task:missing:{exc}")
+        return
+    if getattr(original_run_process, "__fx_watermark_task_patch__", False):
+        return
+
+    def patched_run_process(self, input_folder, task_type):
+        if task_type == "watermark":
+            try:
+                return _run_watermark_task(self, input_folder)
+            except Exception as exc:
+                try:
+                    self.log(f"[批量水印] 严重错误: {exc}")
+                except Exception:
+                    pass
+                _finalize_current_task_result(self, "failed", message=str(exc), detail=str(exc), error=str(exc))
+            finally:
+                try:
+                    self.reset_ui()
+                except Exception:
+                    pass
+            return None
+        return original_run_process(self, input_folder, task_type)
+
+    patched_run_process.__fx_watermark_task_patch__ = True
+    patched_run_process.__wrapped__ = original_run_process
+    FengxiToolboxApp.run_process = patched_run_process
+    _debug("patch_watermark_task:installed")
+
+
+_patch_watermark_task()
+
+
 def _get_parallel_detail_key(app, task_type=None):
     task_type = str(task_type or getattr(app, "current_task", "") or "")
     detail = ""
@@ -7820,6 +8645,7 @@ def _capture_preset_settings(app, category=None):
                 "wm_skip_hyphen_var": bool(_safe_var_get(app, "wm_skip_hyphen_var", False)),
                 "wm_skip_name_position_var": _safe_var_get(app, "wm_skip_name_position_var", "结尾"),
                 "wm_skip_name_text_var": _safe_var_get(app, "wm_skip_name_text_var", "-"),
+                "wm_color_var": _get_watermark_color(app),
                 "slider_size": _safe_named_widget_get(app, "slider_size", 60),
                 "slider_opacity": _safe_named_widget_get(app, "slider_opacity", 0.08),
                 "slider_angle": _safe_named_widget_get(app, "slider_angle", 45),
@@ -7938,12 +8764,18 @@ def _apply_preset_settings(app, preset, switch_task=True):
         for name in ("selected_font", "wm_range_var", "wm_overwrite_var", "wm_skip_name_position_var", "wm_skip_name_text_var"):
             if name in settings:
                 _safe_var_set(app, name, settings.get(name))
+        if "wm_color_var" in settings:
+            _set_watermark_color(app, settings.get("wm_color_var"))
         for name in ("allow_simsun", "wm_delete_var", "wm_convert_pdf", "wm_skip_hyphen_var"):
             if name in settings:
                 _safe_var_set(app, name, bool(settings.get(name)))
         for name in ("slider_size", "slider_opacity", "slider_angle"):
             if name in settings:
                 _safe_named_widget_set(app, name, settings.get(name))
+        try:
+            _refresh_watermark_preview(app)
+        except Exception:
+            pass
         try:
             _flush_watermark_text_persistence(app)
             _flush_watermark_filename_rule_persistence(app)
@@ -10203,6 +11035,16 @@ def _ensure_lazy_tab_initialized(app, task_name):
         return False
     if lazy_state.get(task_name):
         return True
+    lazy_initializing = _get_internal_attr(app, "_fx_lazy_tabs_initializing", None)
+    if lazy_initializing is None:
+        lazy_initializing = set()
+        try:
+            app._fx_lazy_tabs_initializing = lazy_initializing
+        except Exception:
+            pass
+    if task_name in lazy_initializing:
+        _debug(f"lazy_tab:init:{task_name}:reentrant_skip")
+        return False
 
     initializers = _get_internal_attr(app, "_fx_lazy_tab_initializers", {})
     initializer = initializers.get(task_name)
@@ -10213,11 +11055,13 @@ def _ensure_lazy_tab_initialized(app, task_name):
 
     started_at = time.perf_counter()
     _debug(f"lazy_tab:init:{task_name}:start")
+    lazy_initializing.add(task_name)
     try:
         initializer()
         lazy_state[task_name] = True
         try:
-            _tighten_layout(app, task_name=task_name)
+            if not _get_internal_attr(app, "_fx_startup_visible_pending", False):
+                _tighten_layout(app, task_name=task_name)
         except Exception as exc:
             _debug(f"lazy_tab:layout_refresh_error:{task_name}:{exc}")
         try:
@@ -10236,6 +11080,11 @@ def _ensure_lazy_tab_initialized(app, task_name):
             details={"status": "error"},
         )
         raise
+    finally:
+        try:
+            lazy_initializing.discard(task_name)
+        except Exception:
+            pass
     _record_performance(
         "lazy_tab_init",
         started_at=started_at,
@@ -10256,15 +11105,55 @@ def _show_ready_window(app):
     try:
         app.deiconify()
         app.lift()
+        try:
+            app._fx_startup_visible_pending = False
+        except Exception:
+            pass
         _debug("startup:window_shown")
     except Exception as exc:
         _debug(f"startup:window_show_error:{exc}")
+    try:
+        app.after(160, lambda target=app: _run_startup_layout_refresh(target))
+    except Exception:
+        _run_startup_layout_refresh(app)
     _record_performance("startup_show_ready", started_at=started_at)
     _record_performance(
         "startup_total",
         started_at=BOOTSTRAP_STARTED_AT,
         details={"default_tab": DEFAULT_STARTUP_TAB},
     )
+
+
+def _run_startup_layout_refresh(app):
+    if getattr(app, "_fx_startup_layout_refreshed", False):
+        return
+    try:
+        app._fx_startup_layout_refreshed = True
+    except Exception:
+        pass
+    started_at = time.perf_counter()
+    try:
+        _tighten_layout(app)
+        task_name = getattr(app, "current_task", DEFAULT_STARTUP_TAB)
+        if task_name in TAB_LAYOUT_ATTRS:
+            _refresh_visible_tab_layout(app, task_name)
+        try:
+            app.update_idletasks()
+        except Exception:
+            pass
+        _debug("startup:layout_refreshed")
+        _record_performance(
+            "startup_layout_refresh",
+            started_at=started_at,
+            details={"status": "success"},
+        )
+    except Exception as exc:
+        _debug(f"startup:layout_refresh_error:{exc}")
+        _record_performance(
+            "startup_layout_refresh",
+            started_at=started_at,
+            details={"status": "error"},
+        )
 
 
 def _request_fast_close(app):
@@ -10348,6 +11237,36 @@ def _install_fast_close_protocol(app):
         _debug(f"fast_close:protocol_error:{exc}")
 
 
+_FX_SINGLE_INSTANCE_MUTEX_HANDLE = None
+
+
+def _acquire_single_instance_lock():
+    global _FX_SINGLE_INSTANCE_MUTEX_HANDLE
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.GetLastError.argtypes = ()
+        kernel32.GetLastError.restype = ctypes.c_ulong
+        handle = kernel32.CreateMutexW(None, True, "Local\\FengxiToolboxSingleInstance")
+        last_error = kernel32.GetLastError()
+        if not handle:
+            _debug(f"single_instance:create_mutex_failed:{last_error}")
+            return True
+        if last_error == 183:
+            _debug("single_instance:already_running")
+            return False
+        _FX_SINGLE_INSTANCE_MUTEX_HANDLE = handle
+        return True
+    except Exception as exc:
+        _debug(f"single_instance:error:{exc}")
+        return True
+
+
 def _patch_startup_performance():
     return install_startup_performance_patch(
         StartupPatchContext(
@@ -10419,6 +11338,8 @@ if __name__ == "__main__":
 
         run_packaged_ocr_diagnostics(diag_path)
         raise SystemExit(0)
+    if not _acquire_single_instance_lock():
+        raise SystemExit(0)
     _debug("main:create_app")
     _record_performance("main_enter", started_at=BOOTSTRAP_STARTED_AT)
     main_step_started_at = time.perf_counter()
@@ -10433,9 +11354,6 @@ if __name__ == "__main__":
     _apply_release_identity(app)
     _record_performance("main_release_identity", started_at=main_step_started_at)
     _debug("main:release_identity_applied")
-    main_step_started_at = time.perf_counter()
-    _tighten_layout(app)
-    _record_performance("main_layout_tighten", started_at=main_step_started_at)
-    _debug("main:layout_tightened")
+    _debug("main:layout_tighten_deferred")
     _show_ready_window(app)
     app.mainloop()

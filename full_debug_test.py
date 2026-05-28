@@ -1,3 +1,4 @@
+import io
 import importlib.util
 import json
 import shutil
@@ -152,6 +153,28 @@ def make_pdf(path, lines):
         if index != len(lines) - 1:
             pdf.showPage()
     pdf.save()
+
+
+def rendered_pdf_nonwhite_pixels(path):
+    import fitz
+
+    with fitz.open(str(path)) as document:
+        pixmap = document[0].get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+    image = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
+    width, height = image.size
+    crop = image.crop((int(width * 0.05), int(height * 0.15), int(width * 0.95), int(height * 0.9)))
+    return sum(1 for red, green, blue in crop.getdata() if min(red, green, blue) < 245)
+
+
+def rendered_pdf_redish_pixels(path):
+    import fitz
+
+    with fitz.open(str(path)) as document:
+        pixmap = document[0].get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+    image = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
+    width, height = image.size
+    crop = image.crop((int(width * 0.05), int(height * 0.15), int(width * 0.95), int(height * 0.9)))
+    return sum(1 for red, green, blue in crop.getdata() if red > green + 20 and red > blue + 20 and red > 120)
 
 
 def wait_for(condition, timeout=15, interval=0.2):
@@ -506,6 +529,13 @@ def main():
     fake_window = FakeCtk()
     fake_startup_app = FakeStartupApp()
     setup_main_result = fake_startup_app.setup_main_area()
+    fake_startup_app._fx_lazy_tabs_initializing.add("pdf")
+    try:
+        getattr(fake_startup_app, "pdf_probe")
+        reentrant_getattr_blocked = False
+    except AttributeError:
+        reentrant_getattr_blocked = True
+    fake_startup_app._fx_lazy_tabs_initializing.clear()
     switch_result = fake_startup_app.switch_tab("pdf", None)
     help_result = fake_startup_app.show_readme()
     donate_result = fake_startup_app.show_donate_window()
@@ -516,7 +546,9 @@ def main():
         and getattr(fake_window, "_fx_start_hidden", False)
         and setup_main_result == "main_ready"
         and fake_startup_app.pdf_init_count == 0
+        and fake_startup_app._fx_lazy_tabs_initializing == set()
         and fake_startup_app._fx_lazy_tabs_state == {"watermark": True, "pdf": False}
+        and reentrant_getattr_blocked
         and switch_result == "switched"
         and startup_patch_lazy == ["pdf"]
         and startup_patch_perf[-1][0] == "switch_tab"
@@ -528,6 +560,7 @@ def main():
             "window_hidden": getattr(fake_window, "_fx_start_hidden", False),
             "setup": setup_main_result,
             "pdf_init_count": fake_startup_app.pdf_init_count,
+            "reentrant_getattr_blocked": reentrant_getattr_blocked,
             "lazy": startup_patch_lazy,
             "perf": startup_patch_perf[-1:] if startup_patch_perf else [],
             "refresh": startup_patch_refresh,
@@ -998,6 +1031,7 @@ def main():
     app.wm_skip_hyphen_var.set(True)
     app.wm_skip_name_position_var.set("开头")
     app.wm_skip_name_text_var.set("FX")
+    app.wm_color_var.set("#2A7FFF")
     mod._safe_named_widget_set(app, "slider_size", 72)
     mod._safe_named_widget_set(app, "slider_opacity", 0.22)
     mod._safe_named_widget_set(app, "slider_angle", 30)
@@ -1006,6 +1040,7 @@ def main():
     mod._safe_named_widget_set(app, "wm_text", "changed")
     app.wm_range_var.set("all")
     app.wm_skip_name_text_var.set("ZZ")
+    app.wm_color_var.set("#C0C0C0")
     mod._safe_named_widget_set(app, "slider_size", 20)
     apply_ok, apply_message = mod._restore_last_settings_category(app, "watermark")
     loaded_last = mod._load_last_settings().get("watermark")
@@ -1016,6 +1051,7 @@ def main():
         and mod._read_watermark_text_widget(app) == "Preset Watermark\nCONFIDENTIAL"
         and app.wm_range_var.get() == "first"
         and app.wm_skip_name_text_var.get() == "FX"
+        and app.wm_color_var.get() == "#2A7FFF"
         and abs(float(app.slider_size.get()) - saved_slider_size) < 0.01,
         {
             "message": apply_message,
@@ -1023,6 +1059,15 @@ def main():
             "slider_size": app.slider_size.get(),
             "saved_slider_size": saved_slider_size,
         },
+    )
+
+    record(
+        "watermark_color_preview_ui",
+        hasattr(app, "wm_color_var")
+        and hasattr(app, "wm_preview_label")
+        and mod._refresh_watermark_preview(app)
+        and app.wm_color_var.get() == "#2A7FFF",
+        getattr(app, "wm_color_var", None).get() if hasattr(app, "wm_color_var") else None,
     )
 
     mod._ensure_lazy_tab_initialized(app, "pdf")
@@ -1667,6 +1712,15 @@ def main():
     status = mod.add_watermark_to_pdf(str(pdf_src), str(pdf_out), pkt, page_range="all", check_text="CONFIDENTIAL")
     watermark_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(pdf_out)).pages)
     record("pdf_watermark", status == "SUCCESS" and "CONFIDENTIAL" in watermark_text, status)
+    red_pdf_out = root / "sample_wm_red.pdf"
+    red_pkt = mod.create_watermark_packet("RED WATERMARK", "SmileySans-Oblique", 46, 0.55, 35, color="#FF2020")
+    red_status = mod.add_watermark_to_pdf(str(pdf_src), str(red_pdf_out), red_pkt, page_range="all", check_text="RED WATERMARK", force_mode=True)
+    red_pixels = rendered_pdf_redish_pixels(red_pdf_out)
+    record(
+        "pdf_watermark_custom_color",
+        red_status == "SUCCESS" and red_pixels > 1000,
+        {"status": red_status, "red_pixels": red_pixels},
+    )
     record(
         "watermark_core_module_exports",
         callable(create_watermark_packet_module)
@@ -2249,6 +2303,22 @@ def main():
         "pdf2word",
         complex_context,
     )
+    missing_word_logs = []
+    missing_word_result = process_convert_file_module(
+        convert_file_root / "doc.docx",
+        convert_file_root,
+        convert_file_out / "missing_word",
+        "word2pdf",
+        ConvertFileContext(log=lambda message: missing_word_logs.append(str(message))),
+    )
+    missing_ppt_logs = []
+    missing_ppt_result = process_convert_file_module(
+        convert_file_root / "slides.pptx",
+        convert_file_root,
+        convert_file_out / "missing_ppt",
+        "ppt2pdf",
+        ConvertFileContext(log=lambda message: missing_ppt_logs.append(str(message))),
+    )
     record(
         "convert_file_adapter_module_exports",
         callable(process_convert_file_module)
@@ -2272,6 +2342,23 @@ def main():
             "calls": convert_file_calls,
             "copies": convert_file_copies,
             "logs": convert_file_logs,
+        },
+    )
+    record(
+        "convert_file_missing_office_fails_instead_of_copying",
+        not missing_word_result.get("ok")
+        and not missing_ppt_result.get("ok")
+        and missing_word_result.get("status") == "failed"
+        and missing_ppt_result.get("status") == "failed"
+        and not (convert_file_out / "missing_word" / "doc.docx").exists()
+        and not (convert_file_out / "missing_ppt" / "slides.pptx").exists()
+        and any("Word COM" in item for item in missing_word_logs)
+        and any("PowerPoint COM" in item for item in missing_ppt_logs),
+        {
+            "word": missing_word_result,
+            "ppt": missing_ppt_result,
+            "word_logs": missing_word_logs,
+            "ppt_logs": missing_ppt_logs,
         },
     )
 
@@ -2859,6 +2946,21 @@ def main():
     if word_available:
         pythoncom.CoInitialize()
         try:
+            dispatch_probe = None
+            try:
+                dispatch_probe = mod.win32com.client.DispatchEx("Word.Application")
+                record(
+                    "word_dispatchex_gen_py_safe_patch",
+                    bool(getattr(dispatch_probe, "Version", None)),
+                    str(getattr(dispatch_probe, "Version", "")),
+                )
+            finally:
+                try:
+                    if dispatch_probe is not None:
+                        dispatch_probe.Quit()
+                except Exception:
+                    pass
+
             word = mod._create_hidden_word_app()
             word.Visible = False
             with mod._DisableWin32ComGenCache():
@@ -2873,8 +2975,35 @@ def main():
                 record("word_to_pdf", status == "SUCCESS" and pdf_out.exists(), status)
 
                 wm_docx = root / "office_word_wm.docx"
-                status = mod.add_watermark_to_word(word, str(docx_src.resolve()), str(wm_docx.resolve()), "XMU TEST", "SmileySans-Oblique", 24, 0.2, 45)
+                status = mod.add_watermark_to_word(word, str(docx_src.resolve()), str(wm_docx.resolve()), "XMU TEST", "SmileySans-Oblique", 60, 0.08, 45)
                 record("word_watermark", status == "SUCCESS" and wm_docx.exists(), status)
+
+                wm_color_docx = root / "office_word_wm_color.docx"
+                status = mod.add_watermark_to_word(word, str(docx_src.resolve()), str(wm_color_docx.resolve()), "COLOR TEST", "SmileySans-Oblique", 60, 0.3, 45, color="#3366CC")
+                color_opened = word.Documents.Open(str(wm_color_docx.resolve()))
+                try:
+                    color_shape = color_opened.Sections(1).Headers(1).Shapes(1)
+                    word_color_value = int(color_shape.Fill.ForeColor.RGB)
+                finally:
+                    color_opened.Close(False)
+                record(
+                    "word_watermark_custom_color",
+                    status == "SUCCESS" and wm_color_docx.exists() and word_color_value == 0xCC6633,
+                    {"status": status, "rgb": word_color_value},
+                )
+
+                wm_visible_pdf = root / "office_word_wm_visible.pdf"
+                wm_visible_doc = word.Documents.Open(str(wm_docx.resolve()))
+                try:
+                    wm_visible_doc.ExportAsFixedFormat(str(wm_visible_pdf.resolve()), 17)
+                finally:
+                    wm_visible_doc.Close(False)
+                wm_visible_pixels = rendered_pdf_nonwhite_pixels(wm_visible_pdf)
+                record(
+                    "word_watermark_visible_when_exported",
+                    wm_visible_pdf.exists() and wm_visible_pixels > 8000,
+                    {"pixels": wm_visible_pixels, "pdf": str(wm_visible_pdf)},
+                )
 
                 cleaned_docx = root / "office_word_clean.docx"
                 status = mod.remove_watermark_from_word(word, str(wm_docx.resolve()), str(cleaned_docx.resolve()), preserve_mine=False)
@@ -2942,11 +3071,136 @@ def main():
                 status = mod.modify_office_meta(word, str(docx_src.resolve()), str(meta_docx.resolve()), "AgentTester", app_type="word")
                 record("word_meta_author", status == "SUCCESS" and meta_docx.exists(), status)
 
+                batch_docx = root / "office_batch_watermark.docx"
+                doc = word.Documents.Add()
+                doc.Content.Text = "batch watermark workflow"
+                doc.SaveAs2(str(batch_docx.resolve()), FileFormat=16)
+                doc.Close(False)
+                mod._safe_named_widget_set(app, "wm_text", "BATCH WATERMARK")
+                mod._safe_var_set(app, "output_strategy_var", mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["same_dir"])
+                mod._safe_var_set(app, "wm_delete_var", False)
+                mod._safe_var_set(app, "wm_convert_pdf", False)
+                mod._safe_var_set(app, "wm_skip_hyphen_var", False)
+                mod._safe_var_set(app, "wm_range_var", "all")
+                mod._safe_var_set(app, "wm_overwrite_var", "force")
+                app.run_process(str(batch_docx.resolve()), "watermark")
+                batch_result = mod._get_last_task_result(app)
+                batch_outputs = [Path(path) for path in batch_result.get("outputs", [])]
+                batch_output_candidates = batch_outputs + [
+                    path
+                    for path in batch_docx.parent.rglob(f"{batch_docx.stem}*.docx")
+                    if path.resolve() != batch_docx.resolve()
+                ]
+                batch_output_exists = any(path.exists() and path.suffix.lower() == ".docx" for path in batch_output_candidates)
+                batch_logs = list(getattr(app, "_fx_last_task_logs", []) or [])
+                record(
+                    "watermark_docx_run_process_safe_word_dispatch",
+                    batch_result.get("status") == "success"
+                    and batch_result.get("failed_count") == 0
+                    and batch_output_exists
+                    and not any("Word COM 初始化失败" in str(item) for item in batch_logs),
+                    {"result": batch_result, "outputs": [str(path) for path in batch_output_candidates], "logs": batch_logs[-8:]},
+                )
+
+                batch_docx_outputs = [path for path in batch_output_candidates if path.exists() and path.suffix.lower() == ".docx"]
+                batch_docx_has_marker = False
+                batch_docx_has_text = False
+                if batch_docx_outputs:
+                    with zipfile.ZipFile(batch_docx_outputs[0]) as archive:
+                        for name in archive.namelist():
+                            if not name.endswith(".xml"):
+                                continue
+                            xml_text = archive.read(name).decode("utf-8", errors="replace")
+                            batch_docx_has_marker = batch_docx_has_marker or "XMU_DONE" in xml_text
+                            batch_docx_has_text = batch_docx_has_text or "BATCH WATERMARK" in xml_text
+                record(
+                    "watermark_docx_single_same_dir_output_model",
+                    batch_result.get("status") == "success"
+                    and batch_result.get("success_count") == 1
+                    and batch_result.get("failed_count") == 0
+                    and bool(batch_result.get("outputs"))
+                    and batch_docx_outputs
+                    and batch_docx_outputs[0].parent == batch_docx.parent
+                    and batch_docx_has_marker
+                    and batch_docx_has_text,
+                    {
+                        "result": batch_result,
+                        "outputs": [str(path) for path in batch_docx_outputs],
+                        "marker": batch_docx_has_marker,
+                        "text": batch_docx_has_text,
+                    },
+                )
+
+                batch_visible_pdf = root / "office_batch_watermark_visible.pdf"
+                batch_visible_pixels = 0
+                if batch_docx_outputs:
+                    batch_visible_doc = word.Documents.Open(str(batch_docx_outputs[0].resolve()))
+                    try:
+                        batch_visible_doc.ExportAsFixedFormat(str(batch_visible_pdf.resolve()), 17)
+                    finally:
+                        batch_visible_doc.Close(False)
+                    batch_visible_pixels = rendered_pdf_nonwhite_pixels(batch_visible_pdf)
+                record(
+                    "watermark_docx_direct_visible_when_exported",
+                    batch_result.get("status") == "success"
+                    and batch_visible_pdf.exists()
+                    and batch_visible_pixels > 8000,
+                    {
+                        "result": batch_result,
+                        "pixels": batch_visible_pixels,
+                        "pdf": str(batch_visible_pdf),
+                    },
+                )
+
+                batch_pdf_docx = root / "office_batch_watermark_pdf.docx"
+                doc = word.Documents.Add()
+                doc.Content.Text = "batch watermark pdf workflow"
+                doc.SaveAs2(str(batch_pdf_docx.resolve()), FileFormat=16)
+                doc.Close(False)
+                mod._safe_named_widget_set(app, "wm_text", "BATCH PDF WATERMARK")
+                mod._safe_var_set(app, "output_strategy_var", mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["same_dir"])
+                mod._safe_var_set(app, "wm_delete_var", False)
+                mod._safe_var_set(app, "wm_convert_pdf", True)
+                mod._safe_var_set(app, "wm_skip_hyphen_var", False)
+                mod._safe_var_set(app, "wm_range_var", "all")
+                mod._safe_var_set(app, "wm_overwrite_var", "force")
+                original_runtime_doc_to_pdf = mod._FX_RUNTIME_CONVERT_DOC_TO_PDF
+                mod._FX_RUNTIME_CONVERT_DOC_TO_PDF = lambda *_args, **_kwargs: "ERROR:forced regression fallback"
+                try:
+                    app.run_process(str(batch_pdf_docx.resolve()), "watermark")
+                finally:
+                    mod._FX_RUNTIME_CONVERT_DOC_TO_PDF = original_runtime_doc_to_pdf
+                batch_pdf_result = mod._get_last_task_result(app)
+                batch_pdf_outputs = [Path(path) for path in batch_pdf_result.get("outputs", [])]
+                batch_pdf_candidates = batch_pdf_outputs + [
+                    path
+                    for path in batch_pdf_docx.parent.rglob(f"{batch_pdf_docx.stem}*.pdf")
+                    if path.exists()
+                ]
+                batch_pdf_output = next((path for path in batch_pdf_candidates if path.exists() and path.suffix.lower() == ".pdf"), None)
+                batch_pdf_has_text = False
+                if batch_pdf_output is not None:
+                    reader = PdfReader(str(batch_pdf_output))
+                    batch_pdf_has_text = any("BATCH PDF WATERMARK" in (page.extract_text() or "") for page in reader.pages)
+                record(
+                    "watermark_docx_convert_pdf_safe_fallback",
+                    batch_pdf_result.get("status") == "success"
+                    and batch_pdf_result.get("success_count") == 1
+                    and batch_pdf_result.get("failed_count") == 0
+                    and batch_pdf_output is not None
+                    and batch_pdf_has_text,
+                    {
+                        "result": batch_pdf_result,
+                        "outputs": [str(path) for path in batch_pdf_candidates],
+                        "has_text": batch_pdf_has_text,
+                    },
+                )
+
             word.Quit()
         finally:
             pythoncom.CoUninitialize()
     else:
-        for name in ["word_to_pdf", "word_watermark", "word_remove_wm", "word_remove_wm_header_inline_image", "word_remove_wm_preserve_header_assets", "word_meta_author"]:
+        for name in ["word_dispatchex_gen_py_safe_patch", "word_to_pdf", "word_watermark", "word_watermark_visible_when_exported", "word_remove_wm", "word_remove_wm_header_inline_image", "word_remove_wm_preserve_header_assets", "word_meta_author", "watermark_docx_run_process_safe_word_dispatch", "watermark_docx_single_same_dir_output_model", "watermark_docx_direct_visible_when_exported", "watermark_docx_convert_pdf_safe_fallback"]:
             record(name, True, "skipped_no_word_com", skipped=True)
 
     ppt_available, _ = office_available("PowerPoint.Application", mod=mod)

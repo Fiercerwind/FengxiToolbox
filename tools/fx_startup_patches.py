@@ -70,7 +70,9 @@ def install_startup_performance_patch(context):
     def patched_setup_main_area(self):
         self._fx_lazy_tabs_state = {name: False for name in context.lazy_tab_specs}
         self._fx_lazy_tab_initializers = {}
+        self._fx_lazy_tabs_initializing = set()
         self._fx_lazy_startup_in_progress = True
+        self._fx_startup_visible_pending = True
         try:
             for task_name, spec in context.lazy_tab_specs.items():
                 init_name = spec["init"]
@@ -140,6 +142,9 @@ def install_startup_performance_patch(context):
     def patched_getattr(self, name):
         task_name = _call(context.guess_lazy_tab_for_attr, name)
         if task_name is not None:
+            lazy_initializing = _call(context.get_internal_attr, self, "_fx_lazy_tabs_initializing", None) or set()
+            if task_name in lazy_initializing:
+                raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
             try:
                 _call(context.ensure_lazy_tab_initialized, self, task_name)
                 return object.__getattribute__(self, name)

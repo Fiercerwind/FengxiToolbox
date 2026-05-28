@@ -67,3 +67,16 @@
   关联文件：Fengxi_Toolbox.py, full_debug_test.py, memory\architecture.md, memory\debug-status.md, memory/architecture.md, memory/categories/watermark-and-remove.md, memory/categories/convert-audio-image.md, memory/debug-status.md
 - [ui] 摘要：inline donate page
   关联文件：Fengxi_Toolbox.py, full_debug_test.py, memory\architecture.md, memory\debug-status.md
+
+## 自动蒸馏 2026-05-28 15:50:46
+- 覆盖变更：第 95 到第 124 条
+- [convert] 摘要：convert imgs2pdf task adapter modularization；convert single-file adapter seam；Office COM gen_py safe dispatch
+  关联文件：Fengxi_Toolbox.py, full_debug_test.py, tools/fx_convert_core.py, tools/fx_convert_task.py, memory/architecture.md, memory/categories/convert-audio-image.md, memory/debug-status.md, memory/recent-changes.md, memory.md, Fengxi_Toolbox.py,tools\fx_convert_task.py,full_debug_test.py,memory\architecture.md,memory\categories\convert-audio-image.md,memory\debug-status.md
+- [image] 摘要：image pdf task modularization
+  关联文件：Fengxi_Toolbox.py, tools/fx_image_pdf_task.py, full_debug_test.py, memory.md, memory/architecture.md, memory/categories/convert-audio-image.md, memory/debug-status.md, memory/recent-changes.md
+- [pdf_file] 摘要：OCR 图像增强与质量回退；pdf compress core modularization；pdf ocr task modularization；meta core modularization
+  关联文件：Fengxi_Toolbox.py, tools\fx_pdf_ocr.py, full_debug_test.py, memory\categories\pdf-file-meta-zip.md, memory\debug-status.md, tools/fx_pdf_compress_core.py, memory/architecture.md, memory/categories/pdf-file-meta-zip.md, memory/debug-status.md, tools/fx_pdf_ocr_task.py, memory.md, tools/fx_meta_core.py, memory/recent-changes.md
+- [runtime] 摘要：开始前任务预览确认；任务历史一键诊断包；功能注册表一期；启动性能 profiling 与补丁模块拆分一期；启动补丁安装器模块化；任务历史导出与诊断包模块化；队列历史纯逻辑模块化；stable core modularization；stable core exception guardrail；packaged and opened release build；文件管家重命名核心模块化；file dedup core run_process route；file dedup task adapter modularization；audio module cleanup and OCR test stabilization；packaged and opened convert modularization build；user prefs storage modularization；last settings storage seam；legacy presets storage seam；packaged and opened latest build after prefs modularization
+  关联文件：Fengxi_Toolbox.py, full_debug_test.py, memory\architecture.md, memory\debug-status.md, memory\recent-changes.md, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md, memory/categories/pdf-file-meta-zip.md, tools/fx_performance.py, tools/fx_runtime_patches.py, tools/fx_startup_patches.py, tools\fx_task_history_exports.py, tools\fx_queue_history.py, tools/fx_watermark_core.py, tools/fx_zip_core.py, memory/categories/watermark-and-remove.md, agent.md, memory/constraints.md, memory/changes.jsonl, package.bat, VERSION, dist_release_ascii/fx_toolbox/fx_toolbox.exe, tools/fx_file_manager_core.py, memory.md, tools/fx_file_manager_task.py, tools/fx_audio_task.py, memory/categories/convert-audio-image.md, tools/fx_user_prefs.py, dist_release_ascii\fx_toolbox\fx_toolbox.exe,tools\fx_user_prefs.py,Fengxi_Toolbox.py,memory\recent-changes.md,memory\changes.jsonl
+- [ui] 摘要：remove parallel status hint and restore queue actions；使用教程内嵌示例流程；bottom progress status moved out of action row
+  关联文件：Fengxi_Toolbox.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/recent-changes.md, memory.md, memory/categories/pdf-file-meta-zip.md

@@ -63,8 +63,12 @@ def process_convert_file(src, input_root, output_folder, mode, context: ConvertF
     if normalized_mode == "imgs2pdf":
         return {"src": str(source), "output": "", "status": "skipped", "ok": True, "message": "imgs2pdf handled by task adapter"}
 
-    if normalized_mode == "word2pdf" and suffix in {".doc", ".docx"} and context.word_app is not None:
+    if normalized_mode == "word2pdf" and suffix in {".doc", ".docx"}:
         produced_path = plan_convert_output_path(str(source), input_root, output_folder, normalized_mode)
+        if context.word_app is None:
+            message = "Word COM unavailable"
+            _context_log(context, f"[依赖异常] Word COM 不可用，无法转换: {source.name}")
+            return {"src": str(source), "output": produced_path, "status": "failed", "ok": False, "message": message}
         if not callable(context.convert_doc_to_pdf):
             return {"src": str(source), "output": produced_path, "status": "failed", "ok": False, "message": "convert_doc_to_pdf callback is required"}
         status = context.convert_doc_to_pdf(context.word_app, str(source), produced_path)
@@ -90,8 +94,12 @@ def process_convert_file(src, input_root, output_folder, mode, context: ConvertF
         status = context.convert_pdf_to_word(str(source), produced_path)
         return {"src": str(source), "output": produced_path, "status": status, "ok": status == "SUCCESS", "message": status}
 
-    if normalized_mode == "ppt2pdf" and suffix in {".ppt", ".pptx"} and context.ppt_app is not None:
+    if normalized_mode == "ppt2pdf" and suffix in {".ppt", ".pptx"}:
         produced_path = plan_convert_output_path(str(source), input_root, output_folder, normalized_mode)
+        if context.ppt_app is None:
+            message = "PowerPoint COM unavailable"
+            _context_log(context, f"[依赖异常] PowerPoint COM 不可用，无法转换: {source.name}")
+            return {"src": str(source), "output": produced_path, "status": "failed", "ok": False, "message": message}
         if not callable(context.convert_ppt_to_pdf):
             return {"src": str(source), "output": produced_path, "status": "failed", "ok": False, "message": "convert_ppt_to_pdf callback is required"}
         status = context.convert_ppt_to_pdf(context.ppt_app, str(source), produced_path)

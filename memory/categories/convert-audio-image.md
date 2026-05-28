@@ -82,3 +82,11 @@
 - `to_pdf` 继续保持“每张图片生成一份 PDF”的语义；`merge_pdf` 继续保持“按文件名顺序合并成一份 PDF”的语义。
 - 输出命名会在同名冲突时自动递增后缀，测试已专门覆盖这一点，避免误把唯一命名当成回归。
 - `Fengxi_Toolbox.py` 只作为适配层，不改变图片 PDF 的可见行为。
+
+## 2026-05-28 Office COM gen_py cache fallback
+- User log showed Word COM init failure with `win32com.gen_py ... has no attribute CLSIDToPackageMap`; local repro showed the same family as `CLSIDToClassMap`. Root cause is damaged pywin32 generated COM cache, not broken Word itself.
+- `Fengxi_Toolbox.py` now preserves the original `win32com.client.DispatchEx` and installs `_safe_office_dispatch_ex(...)`; `Word.Application` goes through `_dispatch_com_app_dynamic(...)` using `pythoncom.CoCreateInstance + win32com.client.dynamic.Dispatch` to bypass bad gen_py.
+- `_DisableWin32ComGenCache` now disables both `GetClassForCLSID` and `GetModuleForCLSID`, so Word child-object access does not re-enter damaged generated modules.
+- `word2pdf` / `ppt2pdf` now call `_convert_doc_to_pdf_safely(...)` / `_convert_ppt_to_pdf_safely(...)`, keeping gen cache disabled during conversion.
+- `tools/fx_convert_task.py` now marks Word/PPT COM unavailable as `failed` for matching Office inputs instead of copying the source and letting the run end as a false success.
+- Regression coverage: `convert_file_missing_office_fails_instead_of_copying` and `word_dispatchex_gen_py_safe_patch`; validation passed with py_compile, smoke_test 14/14, full_debug_test 151/151.

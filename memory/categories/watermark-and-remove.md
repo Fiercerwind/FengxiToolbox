@@ -158,3 +158,58 @@
 - 重要约束：凡是访问 Word 子对象（`Documents`、`Sections`、`Headers`、`InlineShapes` 等）时都要包在 `_DisableWin32ComGenCache()` 内，不只是在创建 Word 实例时包一次。
 - 回归覆盖：`pdf_remove_wm_workflow`、`pdf_remove_wm_single_file_output`、`pdf_remove_wm_single_file_overwrite`、`word_to_pdf`、`word_watermark`、`word_remove_wm`、`word_remove_wm_header_inline_image`、`word_remove_wm_preserve_header_assets`、`word_meta_author`。
 - 边界：本次仍只改 `Fengxi_Toolbox.py` 加载层与 `full_debug_test.py`，未修改 `fengxi_runtime.bin`，未触碰稳定区的批量压缩和添加水印核心逻辑。
+## 2026-05-28 Batch watermark Word COM Dispatch guard
+- User report: batch add-watermark on a single `.docx` still logged `Word COM 初始化失败` with pywin32 `win32com.gen_py ... CLSIDToClassMap/CLSIDToPackageMap`, then misleadingly printed a perfect completion message.
+- Root cause: the embedded runtime batch-watermark branch creates Word through `win32com.client.Dispatch("Word.Application")`, while the first Office COM cache fix only patched `DispatchEx`.
+- Fix boundary: keep add-watermark business logic unchanged; install a loader-layer guard for both `win32com.client.Dispatch` and `DispatchEx`, routing Word creation through `_dispatch_com_app_dynamic("Word.Application")` when pywin32 gen_py cache is damaged.
+- Regression: `watermark_docx_run_process_safe_word_dispatch` runs the real `app.run_process(..., "watermark")` workflow on a generated `.docx`, verifies an output `.docx` exists, and rejects logs containing `Word COM 初始化失败`.
+- Validation: `python -m py_compile Fengxi_Toolbox.py full_debug_test.py`; direct Word dispatch probe; `python smoke_test.py` 14/14; `python full_debug_test.py` 152/152.
+
+## 2026-05-28 Batch watermark real task runner
+- User confirmed both direct Word watermark and "convert to PDF then watermark" failed in real use; this was explicitly authorized as a necessary exception to the stable add-watermark protection.
+- Root causes:
+  - runtime `convert_doc_to_pdf(...)` could return `ERROR` or fail to write a PDF under damaged Word COM cache, then the old branch copied/preserved the source and still ended as a false success
+  - single-file watermark output/result modeling was not aligned with the unified task result model, so outputs/counts could be empty even when a file was written
+- Fix:
+  - `watermark` now supports the shared output strategy UI (`same_dir`, `overwrite`, `result_folder` semantics)
+  - loader-layer `_run_watermark_task(...)` owns collection, output planning, direct PDF watermark, direct Word watermark, Word/PPT to PDF then PDF watermark, delete-source option, failure report, progress updates, and structured result counts
+  - `_convert_doc_to_pdf_safely(...)` first tries the runtime converter and then falls back to `_export_word_docx_to_pdf_safely(...)` if no valid PDF lands
+  - Word direct mode now creates same-directory `*_加水印.docx` for single-file default output; convert-to-PDF mode creates `*_加水印.pdf`
+  - real failures now produce `status=failed` with failed item details instead of a fake perfect completion
+- Regression:
+  - `watermark_docx_single_same_dir_output_model`
+  - `watermark_docx_convert_pdf_safe_fallback`
+- Real-user probe passed on `《习近平经济思想概论》复习纲要2026B_答案.docx`:
+  - direct Word output had `XMU_DONE` marker and watermark text
+  - convert-to-PDF output had 25 pages and contained the watermark text
+- Validation: `python -m py_compile Fengxi_Toolbox.py full_debug_test.py`; real document direct/convert probes; `python smoke_test.py` 14/14; `python full_debug_test.py` 154/154.
+
+## 2026-05-28 Word direct watermark visibility fix
+- User verified "convert to PDF first" watermark works, but direct Word watermark still only looked successful and was not visible in Word.
+- Reproduction:
+  - A minimal direct Word watermark output contained `XMU_DONE` shapes and watermark text in the `.docx`, but exporting that `.docx` through Word to PDF showed only body text and no visible watermark.
+  - The old regression was insufficient because it only checked XML/text existence, not rendered visibility.
+- Root cause:
+  - WordArt watermark shapes were inserted into headers, but their fill attributes were not explicit enough for stable Word rendering.
+  - Default UI opacity `0.08` mapped to Word `Fill.Transparency ~= 0.92`, which can be effectively invisible in Word direct mode.
+- Fix:
+  - `tools/fx_watermark_core.py` now explicitly sets WordArt fill visible, solid, gray (`0xC0C0C0`), no line, and allow-overlap wrapping.
+  - Word direct mode clamps visible opacity to a minimum `0.18`, preserving a light gray watermark while avoiding "written but invisible" output.
+  - PDF watermark behavior is unchanged; the minimum visibility clamp is only inside the Word watermark helper.
+- Regression:
+  - `word_watermark_visible_when_exported` verifies helper output is visible after Word exports it to PDF.
+  - `watermark_docx_direct_visible_when_exported` verifies the real `app.run_process(..., "watermark")` direct Word path is visible after export.
+- Validation: `python -m py_compile Fengxi_Toolbox.py tools/fx_watermark_core.py full_debug_test.py`; targeted Word visibility probe; `python smoke_test.py` 14/14; `python full_debug_test.py` 156/156.
+
+## 2026-05-28 Watermark color picker and preview
+- Batch watermark now supports a selectable watermark color for both PDF and direct Word output.
+- `tools/fx_watermark_core.py` keeps backward-compatible default gray behavior, and only changes color when the loader passes an explicit `#RRGGBB` value.
+- `Fengxi_Toolbox.py` adds a loader-layer color row on the watermark page: color swatch, hex entry, system color chooser, and lightweight PIL preview. The preview does not invoke Office/PDF rendering, so it should stay fast.
+- The selected color participates in last-settings memory through `wm_color_var`, so the next session restores the previous watermark color.
+- Regression coverage added:
+  - `pdf_watermark_custom_color`
+  - `word_watermark_custom_color`
+  - `watermark_color_preview_ui`
+  - existing `last_settings_watermark_save_restore` now checks color restore.
+- Validation: `python -m py_compile Fengxi_Toolbox.py tools\fx_watermark_core.py full_debug_test.py`; `python smoke_test.py` 14/14; `python full_debug_test.py` 159/159.
+- Boundaries: no changes to `fengxi_runtime.bin`; batch-compress untouched; add-watermark core changed only to accept optional color while preserving default behavior.

@@ -1044,3 +1044,55 @@
 - `Fengxi_Toolbox.py` 现在只保留 UI 参数解析、输出策略适配、进度回调、失败报告和历史结果写回，旧辅助函数继续保留为兼容薄封装。
 - 图片转 PDF 的唯一命名规则保持不变：同名时自动后缀递增，避免覆盖已存在输出。
 - 验证：`python -m py_compile Fengxi_Toolbox.py tools/fx_image_pdf_task.py full_debug_test.py smoke_test.py`、`python smoke_test.py` 14/14、`python full_debug_test.py` 135/135。
+
+## 2026-05-28 Office COM dispatch guard
+- Added `_safe_office_dispatch_ex(...)` in `Fengxi_Toolbox.py` to route Word COM creation around damaged pywin32 `gen_py` caches. This is a loader-layer patch over runtime behavior; `fengxi_runtime.bin` is unchanged.
+- Convert task semantics were tightened in `tools/fx_convert_task.py`: matching Word/PPT inputs fail when the required COM app is unavailable, instead of silently copying the source file and allowing a false success summary.
+- The fix is scoped to Office conversion / COM bootstrap and does not touch stable batch-compress or add-watermark core logic.
+## 2026-05-28 Office COM Dispatch/DispatchEx safe patch
+- The Office COM cache guard is now installed at loader import time for both `win32com.client.Dispatch` and `win32com.client.DispatchEx`.
+- Reason: different runtime branches use different COM constructors. Conversion and some helpers use `DispatchEx`, but embedded batch-watermark uses plain `Dispatch("Word.Application")`; both must be guarded against damaged `win32com.gen_py` cache packages.
+- Implementation shape:
+  - `_FX_ORIGINAL_WIN32COM_DISPATCH` and `_FX_ORIGINAL_WIN32COM_DISPATCH_EX` keep the original pywin32 callables.
+  - `_safe_office_dispatch(...)` and `_safe_office_dispatch_ex(...)` route Word through `_dispatch_com_app_dynamic("Word.Application")`.
+  - `_install_safe_office_dispatch_patch()` marks the patched functions with `__fx_safe_office_dispatch_patch__` and avoids duplicate installation.
+  - `_DisableWin32ComGenCache()` now suppresses both `GetClassForCLSID` and `GetModuleForCLSID`, because child-object wrapping can trigger either path.
+- Scope: this is a loader-layer compatibility patch. Do not move it into `fengxi_runtime.bin`; keep future Office COM fixes near these helpers unless a dedicated Office adapter module is created.
+
+## 2026-05-28 Batch watermark task adapter
+- `watermark` now has a loader-layer task adapter `_run_watermark_task(app, input_value)` installed through `_patch_watermark_task()`.
+- The adapter exists because the embedded runtime branch could not reliably express modern behavior: unified task result counts/outputs, single-file output strategies, safe overwrite staging, real failure status, and Word-to-PDF fallback.
+- Responsibilities now owned by the adapter:
+  - collect supported PDF/Word/PPT inputs via `app.collect_input_files(...)`
+  - read UI settings with `_get_watermark_settings(...)`
+  - plan output with `_build_watermark_output_path(...)`
+  - call existing watermark core helpers (`create_watermark_packet`, `add_watermark_to_pdf`, `add_watermark_to_word`) rather than reimplementing watermark drawing
+  - convert Word/PPT to temporary PDF when requested, then apply the PDF watermark
+  - update `_set_progress_status(...)`, task outputs/counts, failed item report, and history-compatible result fields
+- Conversion seam:
+  - `_FX_RUNTIME_CONVERT_DOC_TO_PDF` preserves the embedded runtime converter
+  - `_convert_doc_to_pdf_safely(...)` uses the runtime converter first and falls back to `_export_word_docx_to_pdf_safely(...)` if no valid PDF appears
+  - global and runtime namespace `convert_doc_to_pdf`/`convert_ppt_to_pdf` are patched to the safe wrappers for downstream callers
+- Keep this adapter as the preferred future maintenance point for batch watermark workflow bugs. Do not edit `fengxi_runtime.bin` for this path unless there is no loader-layer seam left.
+
+## 2026-05-28 Word watermark rendering contract
+- Direct Word watermark correctness must mean "visible when Word opens/renders the document", not merely "the `.docx` XML contains watermark text".
+- `tools/fx_watermark_core.py` owns WordArt rendering details:
+  - `WORD_WATERMARK_GRAY_RGB = 0xC0C0C0`
+  - `WORD_WATERMARK_MIN_VISIBLE_OPACITY = 0.18`
+  - `_word_visible_opacity(...)` clamps Word direct visible strength before converting to Word `Fill.Transparency`
+  - `_add_word_header_watermark(...)` must keep `Fill.Visible = True`, `Fill.Solid()`, `Fill.ForeColor.RGB`, `Line.Visible = False`, and overlap-friendly wrapping
+- Future Word watermark tests should include rendered validation:
+  - helper-level `word_watermark_visible_when_exported`
+  - task-level `watermark_docx_direct_visible_when_exported`
+- Do not replace rendered validation with XML-only checks; XML-only checks allowed the "success but invisible" regression.
+
+## 2026-05-28 Watermark color and preview seam
+- The watermark color feature is split across the same loader/core seam as the rest of add-watermark:
+  - `tools/fx_watermark_core.py` normalizes optional color input and applies it to ReportLab PDF drawing and WordArt fill.
+  - `Fengxi_Toolbox.py` owns the UI (`wm_color_var`, swatch, hex entry, color chooser, preview) and passes the selected color through `_get_watermark_settings(...)`.
+- Defaults are intentionally conservative:
+  - PDF default remains the historical dark gray when no color is passed.
+  - Word default remains the visible light gray used by the Word rendering fix.
+- The preview is intentionally approximate and fast: PIL draws a mock page with rotated text. It should not call Office, PyMuPDF, or pypdf during UI interaction.
+- Last-settings/preset capture now includes `wm_color_var`; queue snapshots may also contain the current watermark color.
