@@ -90,3 +90,43 @@
 - `word2pdf` / `ppt2pdf` now call `_convert_doc_to_pdf_safely(...)` / `_convert_ppt_to_pdf_safely(...)`, keeping gen cache disabled during conversion.
 - `tools/fx_convert_task.py` now marks Word/PPT COM unavailable as `failed` for matching Office inputs instead of copying the source and letting the run end as a false success.
 - Regression coverage: `convert_file_missing_office_fails_instead_of_copying` and `word_dispatchex_gen_py_safe_patch`; validation passed with py_compile, smoke_test 14/14, full_debug_test 151/151.
+
+## 2026-05-29 Audio/video speech-to-text
+- Added Fengxi-owned speech-to-text workflow under the existing `audio` task instead of reusing a separate video/audio temp project.
+- New module: `tools/fx_speech_to_text.py`; it lazily imports `faster_whisper` only when transcription runs.
+- Supported inputs follow audio/video collection rules: audio files and video files can be selected or dragged just like existing audio conversion.
+- UI mode: `audio_mode_var == "transcribe"` with controls for model (`tiny/base/small/medium`), language (`auto/zh/en/ja/ko` via Chinese labels), and output format (`txt/srt/txt+srt`).
+- Output rule: transcript files are written under the normal task output folder, preserving relative paths and using the source stem with `.txt` and/or `.srt`.
+- Last-settings memory now includes audio mode, target format, bitrate, delete-source flag, speech model, speech language, and transcript format.
+- Model cache root defaults to `%LOCALAPPDATA%/FengxiToolbox/models/faster-whisper` via `_get_user_pref_root()`, not inside other projects.
+- Packaging adds optional PyInstaller coverage for `faster_whisper`, `ctranslate2`, `huggingface_hub`, `tokenizers`, and `av`; no model files are bundled.
+- First real use may need to download the selected Whisper model; this is expected and should be surfaced to users if startup/transcription seems slow.
+
+## 2026-05-29 Speech-to-text model hint
+- The audio speech-to-text page now explains the model tradeoff inline:
+  - `base`: default recommendation.
+  - `tiny`: fastest, but more recognition mistakes.
+  - `small`: steadier accuracy.
+  - `medium`: highest accuracy, but slower and more resource-heavy.
+- Regression coverage: `audio_transcribe_model_hint` checks the inline hint remains visible after lazy audio-tab initialization.
+
+## 2026-05-29 Speech-to-text realtime preview
+- Added a scrollable realtime preview box on the audio speech-to-text page.
+- `tools/fx_speech_to_text.py` now accepts an optional `progress_callback` and emits stage, segment, write-output, and done events while iterating Faster-Whisper segments.
+- `tools/fx_audio_task.py` passes per-file transcript progress through `AudioTaskCallbacks.on_transcript_progress`, preserving source file context even in batch mode.
+- `Fengxi_Toolbox.py` appends recognized segments to the preview via `app.after(0, ...)`, so Tk UI updates stay on the main thread.
+- Preview behavior:
+  - task start clears the previous transcript preview;
+  - each segment is appended with timestamps like `[00:00:02.000 -> 00:00:03.500] text`;
+  - if the user has scrolled upward to read earlier text, new segments do not force-scroll to the bottom unless the view was already at the bottom;
+  - a small "clear" button lets the user reset the preview manually.
+- Regression coverage: `speech_to_text_realtime_progress_callback`, `audio_transcribe_task_realtime_progress`, and `audio_transcribe_realtime_preview_ui`.
+
+## 2026-05-29 Speech-to-text preview compact layout
+- User reported the lower part of the audio speech-to-text page was not visible after adding realtime preview.
+- Fix:
+  - moved the realtime preview frame before the model hint so the live transcript area stays visible first;
+  - reduced preview box height from 150 to 96 and tightened header/padding;
+  - shortened the model hint while preserving the tested key phrases: `base 为默认推荐`, `tiny 最快`, `medium 准确率最高`.
+- Regression coverage: `audio_transcribe_preview_compact_layout` checks preview height stays <= 110 and preview appears before the model hint.
+- Validation: `py_compile` passed, targeted UI probe passed, `smoke_test.py` passed 14/14, `full_debug_test.py` passed 169/169.

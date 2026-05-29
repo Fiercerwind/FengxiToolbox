@@ -38,6 +38,10 @@ datas = [('fengxi_runtime.bin', '.')]
 datas += collect_data_files('customtkinter')
 datas += collect_data_files('rapidocr')
 binaries = collect_dynamic_libs('onnxruntime')
+if _module_exists('ctranslate2'):
+    binaries += collect_dynamic_libs('ctranslate2')
+if _module_exists('av'):
+    binaries += collect_dynamic_libs('av')
 hiddenimports = [
     'PyInstaller.archive.readers', 'customtkinter', 'pdf2docx', 'PIL', 'imageio',
     'imageio_ffmpeg', 'pypdf', 'pythoncom',
@@ -51,9 +55,17 @@ for module_name in (
     'moviepy.editor',
     'moviepy.audio.io.AudioFileClip',
     'moviepy.video.io.VideoFileClip',
+    'faster_whisper',
+    'ctranslate2',
+    'huggingface_hub',
+    'tokenizers',
+    'av',
 ):
     if _module_exists(module_name):
         hiddenimports.append(module_name)
+for module_name in ('faster_whisper', 'ctranslate2', 'huggingface_hub', 'tokenizers', 'av'):
+    if _module_exists(module_name):
+        hiddenimports += collect_submodules(module_name, on_error='ignore')
 hiddenimports += collect_submodules(
     'rapidocr',
     filter=lambda name: not name.startswith((

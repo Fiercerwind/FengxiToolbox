@@ -1397,3 +1397,105 @@
   - `python smoke_test.py` passed: 14/14
   - `python full_debug_test.py` passed: 159/159
 - Note: full debug printed a few non-failing Tkinter callback noise lines while destroying UI test widgets, but all cases passed.
+## 2026-05-28 22:25:45 Startup recursion crash fix
+- User-facing symptom: packaged EXE opened slowly and could crash with RecursionError inside customtkinter scrollbar drawing (ctk_scrollbar.py / draw_engine.py) near pp.mainloop().
+- Cause confirmed by loader log pattern: startup/lazy UI could re-enter page initialization while the hidden startup window was still doing layout refreshes, especially around watermark wm_* attribute access; repeated double-clicks could spawn multiple packaged processes and amplify the issue.
+- Fix: lazy tab reentrancy guard, deferred post-show layout refresh, delayed watermark preview refresh, and single-instance mutex before app creation.
+- Packaging speed fix: excluded unused RapidOCR PyTorch/Paddle/TensorRT engines and heavy optional ML packages from PyInstaller while preserving ONNXRuntime OCR.
+- Validation passed: python -m py_compile Fengxi_Toolbox.py tools\fx_startup_patches.py fx_toolbox.spec full_debug_test.py; python smoke_test.py 14/14; python full_debug_test.py 159/159; package.bat; packaged EXE launch and duplicate-launch guard.
+
+## 2026-05-28 Default package-and-open workflow
+- User explicitly requested future work to automatically package and open the app.
+- Standard closeout for implementation/debug tasks is now: source validation as appropriate -> stop only this repo's packaged EXE process -> run `package.bat` -> launch `dist_release_ascii\fx_toolbox\fx_toolbox.exe`.
+- If the user says "do not package", "do not open", or asks for analysis only, skip this default.
+## 2026-05-28 23:33:16 Watermark color preview visibility fix
+- Symptom: color picker/preview feature existed but was not visible in the packaged app at the user's current window size.
+- Cause: the UI patch inserted the color preview after the right parameter controls; existing switches, font selector, and sliders consumed the visible height.
+- Result: moved color controls to the left watermark-content panel and made the preview compact. Packaged app opened successfully after the change.
+
+## 2026-05-29 Watermark color preview real visibility repair
+- Symptom: the color picker/preview still did not appear after moving it out of the right parameter panel.
+- Reproduction loop:
+  - Instantiated `FengxiToolboxApp`, inspected `tab_wm` hierarchy, and found the preview frame under an old left panel while the real `app.wm_text` belonged to a newer left panel.
+  - Targeted probe before fix showed `preview_master_is_text_panel=False` and `preview_count=2`.
+- Fix:
+  - Added helpers to resolve the true watermark text panel from `app.wm_text` instead of using `tab_wm.winfo_children()[0]`.
+  - Destroy stale marked preview frames and repack the live preview before the real textbox.
+  - Added an after-main-area repair pass so startup duplicate/overlap creation cannot leave the preview in the wrong panel.
+- Validation:
+  - Targeted probe after fix: `preview_master_is_text_panel=True`, `preview_count=1`, pack order title -> preview -> textbox.
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - `python full_debug_test.py` passed: 159/159.
+  - `python smoke_test.py` passed: 14/14.
+
+## 2026-05-29 Watermark parameter auto memory
+- User-facing request: the batch-watermark right-side parameter panel should remember its settings.
+- Existing state: `_capture_preset_settings(..., "watermark")` already included most fields, but persistence mainly happened on start/close, so casual parameter changes did not feel reliably remembered.
+- Fix:
+  - Added `_install_watermark_last_settings_memory(...)` to trace watermark parameter variables and wrap/bind the three sliders.
+  - Added `_schedule_watermark_last_settings_persistence(...)` with debounce to avoid excessive JSON writes while dragging.
+  - Installed the binding after main-area setup, after startup last-settings restore, so restored values are not immediately overwritten.
+- Covered fields:
+  - font, page range, smart/force mode, filename skip rule, Word/Simsun compatibility, delete source, convert-to-PDF first, color, size, opacity, angle, output strategy.
+- Validation:
+  - Targeted probe confirmed changed values were saved into `last_settings.watermark`.
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - `python full_debug_test.py` passed: 160/160.
+  - `python smoke_test.py` passed: 14/14.
+
+## 2026-05-29 Audio/video speech-to-text
+- Status: added and validated Fengxi Toolbox native speech-to-text in the audio module.
+- Scope:
+  - `tools/fx_speech_to_text.py` provides transcript path planning, SRT timestamp formatting, transcript writers, and lazy `faster_whisper` execution.
+  - `tools/fx_audio_task.py` supports `mode == "transcribe"` in the same task-result model used by audio conversion.
+  - `Fengxi_Toolbox.py` adds the audio UI controls, start-preview detail, model cache path, and automatic last-settings memory for audio transcription options.
+  - `fx_toolbox.spec` and `requirements.txt` include optional packaging/dependency coverage for the Whisper stack.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_audio_task.py tools\fx_speech_to_text.py full_debug_test.py smoke_test.py` passed.
+  - Targeted transcript helper probe produced `.txt` and `.srt` outputs.
+  - `python smoke_test.py` passed: 14/14.
+  - `python full_debug_test.py` passed: 164/164, including `speech_to_text_core_outputs`, `audio_transcribe_task_module`, `audio_transcribe_workflow`, and `last_settings_audio_transcribe_save_restore`.
+- Notes:
+  - No new pip install was performed during this feature pass; existing packages in `D:\Python\Lib\site-packages` were used.
+  - First real transcription can be slow because selected Faster-Whisper models are downloaded/cached on demand.
+  - Batch compression and add-watermark core logic were not changed for this feature.
+
+## 2026-05-29 Speech-to-text model hint
+- Status: added inline model explanation under the audio speech-to-text controls.
+- User-facing wording explains `base` as the default recommendation, `tiny` as fastest but less accurate, `small` as steadier, and `medium` as most accurate but slower/resource-heavy.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - Targeted UI probe confirmed the hint text contains the `base`/`tiny`/`medium` tradeoff wording.
+  - `python smoke_test.py` passed: 14/14.
+  - `python full_debug_test.py` passed: 165/165.
+
+## 2026-05-29 Speech-to-text realtime preview
+- Status: added scrollable realtime transcript preview for audio/video speech-to-text.
+- Implementation:
+  - `transcribe_media_file(...)` emits optional progress events while segments stream from Faster-Whisper.
+  - `run_audio_task_core(...)` wraps those events per source file and sends them through `AudioTaskCallbacks.on_transcript_progress`.
+  - `Fengxi_Toolbox.py` owns the visible preview box and updates it via `after(0, ...)` for Tk safety.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_audio_task.py tools\fx_speech_to_text.py full_debug_test.py` passed.
+  - Targeted UI probe confirmed preview insertion with timestamped text.
+  - `python smoke_test.py` passed: 14/14.
+  - `python full_debug_test.py` passed: 168/168.
+- Boundaries:
+  - No changes to `fengxi_runtime.bin`.
+  - No changes to stable batch-compress or add-watermark core logic.
+
+## 2026-05-29 Speech-to-text preview compact layout
+- Symptom: after adding realtime preview, the lower part of the audio speech-to-text page was clipped at the user's current window size.
+- Cause: the model hint plus a 150px preview box consumed too much vertical space, and the preview was inserted after the hint.
+- Fix:
+  - Reordered the audio transcription UI so the realtime preview appears before the model hint.
+  - Reduced preview box height to 96px and tightened header/padding.
+  - Kept model-hint key phrases stable for regression coverage.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - Targeted UI probe: `height=96`, `preview_before_hint=True`, `hint_ok=True`.
+  - `python smoke_test.py` passed: 14/14.
+  - `python full_debug_test.py` passed: 169/169.
+- Boundaries:
+  - No changes to `fengxi_runtime.bin`.
+  - No changes to stable batch-compress or add-watermark core logic.

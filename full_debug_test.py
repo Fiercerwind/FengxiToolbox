@@ -77,9 +77,14 @@ from tools.fx_audio_task import (
     AudioTaskCallbacks as AudioTaskCallbacksModule,
     build_audio_output_path as build_audio_output_path_module,
     collect_audio_files as collect_audio_files_module,
+    get_audio_transcribe_args as get_audio_transcribe_args_module,
     get_audio_task_args as get_audio_task_args_module,
     process_one_audio_file as process_one_audio_file_module,
     run_audio_task_core as run_audio_task_core_module,
+)
+from tools.fx_speech_to_text import (
+    build_transcript_output_paths as build_transcript_output_paths_module,
+    transcribe_media_file as transcribe_media_file_module,
 )
 from tools.fx_convert_core import (
     CONVERT_MODE_SPECS as CONVERT_MODE_SPECS_MODULE,
@@ -1024,6 +1029,45 @@ def main():
         inline_mode_checks,
     )
 
+    mod._install_watermark_last_settings_memory(app)
+    app.selected_font.set("AutoMemoryFont")
+    app.wm_range_var.set("first")
+    app.wm_overwrite_var.set("force")
+    app.allow_simsun.set(True)
+    app.wm_delete_var.set(True)
+    app.wm_convert_pdf.set(True)
+    app.wm_skip_hyphen_var.set(True)
+    app.wm_skip_name_position_var.set("开头")
+    app.wm_skip_name_text_var.set("AUTO")
+    app.wm_color_var.set("#336699")
+    for slider_name, slider_value in (("slider_size", 66), ("slider_opacity", 0.31), ("slider_angle", 27)):
+        mod._safe_named_widget_set(app, slider_name, slider_value)
+        slider = getattr(app, slider_name, None)
+        command = getattr(slider, "_command", None)
+        if callable(command):
+            command(slider.get())
+    app.update()
+    time.sleep(0.45)
+    app.update()
+    auto_watermark_settings = (mod._load_last_settings().get("watermark") or {}).get("settings", {})
+    record(
+        "watermark_parameters_auto_memory",
+        auto_watermark_settings.get("selected_font") == "AutoMemoryFont"
+        and auto_watermark_settings.get("wm_range_var") == "first"
+        and auto_watermark_settings.get("wm_overwrite_var") == "force"
+        and auto_watermark_settings.get("allow_simsun") is True
+        and auto_watermark_settings.get("wm_delete_var") is True
+        and auto_watermark_settings.get("wm_convert_pdf") is True
+        and auto_watermark_settings.get("wm_skip_hyphen_var") is True
+        and auto_watermark_settings.get("wm_skip_name_position_var") == "开头"
+        and auto_watermark_settings.get("wm_skip_name_text_var") == "AUTO"
+        and auto_watermark_settings.get("wm_color_var") == "#336699"
+        and abs(float(auto_watermark_settings.get("slider_size", 0)) - float(app.slider_size.get())) < 0.01
+        and abs(float(auto_watermark_settings.get("slider_opacity", 0)) - float(app.slider_opacity.get())) < 0.01
+        and abs(float(auto_watermark_settings.get("slider_angle", 0)) - float(app.slider_angle.get())) < 0.01,
+        auto_watermark_settings,
+    )
+
     mod._safe_named_widget_set(app, "wm_text", "Preset Watermark\nCONFIDENTIAL")
     app.selected_font.set("SmileySans-Oblique")
     app.wm_range_var.set("first")
@@ -1061,13 +1105,58 @@ def main():
         },
     )
 
+    wm_preview_frame = getattr(app, "_fx_wm_color_preview_frame", None)
+    wm_text_widget = getattr(app, "wm_text", None)
+    try:
+        app.update_idletasks()
+    except Exception:
+        pass
+    wm_text_panel = getattr(wm_text_widget, "master", None)
+    try:
+        wm_left_children = list(wm_text_panel.pack_slaves()) if wm_text_panel is not None else []
+    except Exception:
+        wm_left_children = list(wm_text_panel.winfo_children()) if wm_text_panel is not None else []
+    try:
+        preview_index = wm_left_children.index(wm_preview_frame)
+    except Exception:
+        preview_index = -1
+    try:
+        text_index = wm_left_children.index(wm_text_widget)
+    except Exception:
+        text_index = -1
+    preview_before_text = preview_index >= 0 and text_index >= 0 and preview_index < text_index
+    preview_frames = []
+    try:
+        stack = list(app.tab_wm.winfo_children())
+        while stack:
+            widget = stack.pop()
+            if getattr(widget, "_fx_wm_color_preview_controls", False):
+                preview_frames.append(widget)
+            stack.extend(widget.winfo_children())
+    except Exception:
+        preview_frames = []
     record(
         "watermark_color_preview_ui",
         hasattr(app, "wm_color_var")
         and hasattr(app, "wm_preview_label")
+        and wm_preview_frame is not None
+        and wm_preview_frame.master == wm_text_panel
+        and wm_preview_frame.winfo_manager() == "pack"
+        and preview_before_text
+        and len(preview_frames) == 1
         and mod._refresh_watermark_preview(app)
         and app.wm_color_var.get() == "#2A7FFF",
-        getattr(app, "wm_color_var", None).get() if hasattr(app, "wm_color_var") else None,
+        {
+            "color": getattr(app, "wm_color_var", None).get() if hasattr(app, "wm_color_var") else None,
+            "parent_is_text_panel": wm_preview_frame.master == wm_text_panel
+            if wm_preview_frame is not None
+            else False,
+            "manager": wm_preview_frame.winfo_manager() if wm_preview_frame is not None else None,
+            "preview_index": preview_index,
+            "text_index": text_index,
+            "preview_before_text": preview_before_text,
+            "preview_count": len(preview_frames),
+        },
     )
 
     mod._ensure_lazy_tab_initialized(app, "pdf")
@@ -2468,6 +2557,123 @@ def main():
         },
     )
 
+    transcript_paths = build_transcript_output_paths_module(
+        str(audio_module_root / "one.wav"),
+        str(audio_module_root),
+        str(audio_module_root / "transcripts"),
+        "txt+srt",
+    )
+
+    class FakeSegment:
+        def __init__(self, start, end, text):
+            self.start = start
+            self.end = end
+            self.text = text
+
+    class FakeInfo:
+        language = "zh"
+
+    class FakeWhisperModel:
+        def transcribe(self, *_args, **_kwargs):
+            return [FakeSegment(0.0, 1.25, "风兮语音转文字测试")], FakeInfo()
+
+    transcript_progress = []
+    transcript_result = transcribe_media_file_module(
+        str(audio_module_root / "one.wav"),
+        str(audio_module_root),
+        str(audio_module_root / "transcripts"),
+        model_name="base",
+        language="中文",
+        output_format="txt+srt",
+        model_factory=lambda _model_name: FakeWhisperModel(),
+        progress_callback=transcript_progress.append,
+    )
+    transcript_txt = Path(transcript_paths[0])
+    transcript_srt = Path(transcript_paths[1])
+    record(
+        "speech_to_text_core_outputs",
+        transcript_result.get("status") == "success"
+        and transcript_txt.exists()
+        and transcript_srt.exists()
+        and "风兮语音转文字测试" in transcript_txt.read_text(encoding="utf-8")
+        and "00:00:00,000 --> 00:00:01,250" in transcript_srt.read_text(encoding="utf-8"),
+        {"result": transcript_result, "paths": transcript_paths},
+    )
+    record(
+        "speech_to_text_realtime_progress_callback",
+        any(item.get("type") == "segment" and item.get("segment", {}).get("text") == "风兮语音转文字测试" for item in transcript_progress)
+        and transcript_progress[-1].get("type") == "done",
+        transcript_progress,
+    )
+
+    transcribe_module_calls = []
+    transcribe_module_progress = []
+
+    def fake_module_transcribe(src, input_root, output_folder, **kwargs):
+        transcribe_module_calls.append((Path(src).name, kwargs))
+        outputs = build_transcript_output_paths_module(src, input_root, output_folder, kwargs.get("output_format", "txt"))
+        progress_callback = kwargs.get("progress_callback")
+        if callable(progress_callback):
+            progress_callback(
+                {
+                    "type": "segment",
+                    "src": src,
+                    "index": 1,
+                    "segment": {"start": 0.0, "end": 1.0, "text": "module live transcript"},
+                }
+            )
+        for output in outputs:
+            Path(output).parent.mkdir(parents=True, exist_ok=True)
+            Path(output).write_text("module transcript\n", encoding="utf-8")
+        return {"src": src, "outputs": outputs, "output": outputs[0], "status": "success", "ok": True, "message": "SUCCESS"}
+
+    audio_transcribe_result = run_audio_task_core_module(
+        object(),
+        str(audio_module_root),
+        normalized_input=str(audio_module_root),
+        input_root=str(audio_module_root),
+        output_folder=str(audio_module_root / "transcribe_task"),
+        audio_files=[str(audio_module_root / "one.wav")],
+        result={"outputs": [], "failed_items": []},
+        tracker=MiniAudioTracker(),
+        is_parallel_enabled=lambda *_args, **_kwargs: False,
+        get_parallel_worker_count=lambda total: 1,
+        convert_audio_format=fake_module_convert,
+        copy_file_safe=fake_module_copy,
+        set_task_result_counts=set_audio_module_counts,
+        set_task_result_finished=lambda result, status, **kwargs: result.update({"status": status, **kwargs}) or result,
+        set_task_result_output_root=lambda result, value: result.update({"output_root": value}),
+        add_task_result_output=lambda result, value: result.setdefault("outputs", []).append(str(value)),
+        write_failed_report=lambda *_args, **_kwargs: "",
+        log=lambda *_args, **_kwargs: None,
+        progress_bar=type("Bar", (), {"set": lambda self, value: None})(),
+        stop_requested=lambda: False,
+        executor_factory=mod.concurrent.futures.ThreadPoolExecutor,
+        get_audio_task_args=lambda _app: ("transcribe", "txt", "192k", False),
+        get_audio_transcribe_args=lambda _app: {"model_name": "base", "language": "中文", "output_format": "txt"},
+        transcribe_media_file=fake_module_transcribe,
+        callbacks=AudioTaskCallbacksModule(
+            log=lambda *_args, **_kwargs: None,
+            stop_requested=lambda: False,
+            on_transcript_progress=lambda src, payload: transcribe_module_progress.append((Path(src).name, payload)),
+        ),
+    )
+    record(
+        "audio_transcribe_task_module",
+        audio_transcribe_result.get("status") == "success"
+        and audio_transcribe_result.get("success_count") == 1
+        and transcribe_module_calls
+        and Path(audio_transcribe_result["outputs"][0]).exists(),
+        {"result": audio_transcribe_result, "calls": transcribe_module_calls},
+    )
+    record(
+        "audio_transcribe_task_realtime_progress",
+        transcribe_module_progress
+        and transcribe_module_progress[0][0] == "one.wav"
+        and transcribe_module_progress[0][1].get("segment", {}).get("text") == "module live transcript",
+        transcribe_module_progress,
+    )
+
     audio_parallel_root = root / "audio_parallel"
     audio_parallel_root.mkdir()
     (audio_parallel_root / "a.wav").write_bytes(b"fake-audio-a")
@@ -2517,6 +2723,127 @@ def main():
             "workers": audio_executor_workers,
             "converted": converted_audio,
             "result": audio_parallel_result,
+        },
+    )
+
+    audio_transcribe_root = root / "audio_transcribe_workflow"
+    audio_transcribe_root.mkdir()
+    (audio_transcribe_root / "speech.wav").write_bytes(b"fake-speech")
+    app.current_task = "audio"
+    mod._ensure_lazy_tab_initialized(app, "audio")
+    audio_model_hint = ""
+    try:
+        audio_model_hint = app._fx_audio_transcribe_model_hint.cget("text")
+    except Exception:
+        audio_model_hint = ""
+    record(
+        "audio_transcribe_model_hint",
+        "base 为默认推荐" in audio_model_hint
+        and "tiny 最快" in audio_model_hint
+        and "medium 准确率最高" in audio_model_hint,
+        audio_model_hint,
+    )
+    audio_preview_height = 999
+    audio_preview_before_hint = False
+    try:
+        preview_frame = app._fx_audio_transcribe_preview_frame
+        preview_box = app._fx_audio_transcribe_preview_box
+        hint_widget = app._fx_audio_transcribe_model_hint
+        audio_preview_height = int(preview_box.cget("height"))
+        audio_siblings = list(preview_frame.master.pack_slaves())
+        audio_preview_before_hint = audio_siblings.index(preview_frame) < audio_siblings.index(hint_widget)
+    except Exception:
+        audio_preview_height = 999
+        audio_preview_before_hint = False
+    record(
+        "audio_transcribe_preview_compact_layout",
+        audio_preview_height <= 110 and audio_preview_before_hint,
+        {"height": audio_preview_height, "preview_before_hint": audio_preview_before_hint},
+    )
+    app.audio_mode_var.set("transcribe")
+    app.audio_transcribe_model.set("tiny")
+    app.audio_transcribe_language.set("中文")
+    app.audio_transcribe_format.set("txt+srt")
+    app.audio_delete_var.set(False)
+    transcribe_workflow_calls = []
+    original_speech_transcribe = mod._speech_transcribe_media_file
+
+    def fake_workflow_transcribe(src, input_root, output_folder, **kwargs):
+        transcribe_workflow_calls.append((Path(src).name, kwargs))
+        outputs = build_transcript_output_paths_module(src, input_root, output_folder, kwargs.get("output_format", "txt"))
+        progress_callback = kwargs.get("progress_callback")
+        if callable(progress_callback):
+            progress_callback(
+                {
+                    "type": "stage",
+                    "stage": "transcribe",
+                    "src": src,
+                }
+            )
+            progress_callback(
+                {
+                    "type": "segment",
+                    "src": src,
+                    "index": 1,
+                    "segment": {"start": 2.0, "end": 3.5, "text": "workflow live preview"},
+                }
+            )
+        for output in outputs:
+            Path(output).parent.mkdir(parents=True, exist_ok=True)
+            Path(output).write_text("workflow transcript\n", encoding="utf-8")
+        return {"src": src, "outputs": outputs, "output": outputs[0], "status": "success", "ok": True, "message": "SUCCESS"}
+
+    mod._speech_transcribe_media_file = fake_workflow_transcribe
+    try:
+        app.run_process(str(audio_transcribe_root), "audio")
+        audio_transcribe_workflow_result = dict(getattr(app, "_fx_last_task_result", {}) or {})
+    finally:
+        mod._speech_transcribe_media_file = original_speech_transcribe
+    try:
+        app.update()
+    except Exception:
+        pass
+    try:
+        audio_preview_text = app._fx_audio_transcribe_preview_box.get("1.0", "end")
+    except Exception:
+        audio_preview_text = ""
+    audio_transcribe_out = audio_transcribe_root / mod.RESULT_FOLDER_NAME
+    record(
+        "audio_transcribe_workflow",
+        audio_transcribe_workflow_result.get("status") == "success"
+        and (audio_transcribe_out / "speech.txt").exists()
+        and (audio_transcribe_out / "speech.srt").exists()
+        and transcribe_workflow_calls
+        and transcribe_workflow_calls[0][1].get("model_name") == "tiny",
+        {"result": audio_transcribe_workflow_result, "calls": transcribe_workflow_calls},
+    )
+    record(
+        "audio_transcribe_realtime_preview_ui",
+        "workflow live preview" in audio_preview_text
+        and "00:00:02.000 -> 00:00:03.500" in audio_preview_text,
+        audio_preview_text,
+    )
+
+    audio_last_settings = mod._save_last_settings_category(app, "audio")
+    app.audio_mode_var.set("video2mp3")
+    app.audio_transcribe_model.set("base")
+    app.audio_transcribe_language.set("自动识别")
+    app.audio_transcribe_format.set("txt")
+    apply_audio_ok, _apply_audio_message = mod._restore_last_settings_category(app, "audio")
+    record(
+        "last_settings_audio_transcribe_save_restore",
+        apply_audio_ok
+        and isinstance(audio_last_settings, dict)
+        and app.audio_mode_var.get() == "transcribe"
+        and app.audio_transcribe_model.get() == "tiny"
+        and app.audio_transcribe_language.get() == "中文"
+        and app.audio_transcribe_format.get() == "txt+srt",
+        {
+            "saved": audio_last_settings,
+            "mode": app.audio_mode_var.get(),
+            "model": app.audio_transcribe_model.get(),
+            "language": app.audio_transcribe_language.get(),
+            "format": app.audio_transcribe_format.get(),
         },
     )
 

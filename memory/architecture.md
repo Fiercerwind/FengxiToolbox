@@ -1096,3 +1096,14 @@
   - Word default remains the visible light gray used by the Word rendering fix.
 - The preview is intentionally approximate and fast: PIL draws a mock page with rotated text. It should not call Office, PyMuPDF, or pypdf during UI interaction.
 - Last-settings/preset capture now includes `wm_color_var`; queue snapshots may also contain the current watermark color.
+## 2026-05-28 22:25:45 Startup recursion and packaged startup speed
+- Startup lazy-tab initialization now uses _fx_lazy_tabs_initializing in both 	ools/fx_startup_patches.py and Fengxi_Toolbox.py; if a wm_* or other lazy attribute is accessed while its own page is still initializing, __getattr__ raises AttributeError instead of recursively initializing the same tab.
+- Packaged startup no longer runs global _tighten_layout(...) while the CTk window is hidden. __main__ defers layout work, and _show_ready_window(...) schedules _run_startup_layout_refresh(...) after deiconify/lift, reducing CustomTkinter scrollbar redraw recursion risk.
+- A Windows local mutex (Local\\FengxiToolboxSingleInstance) is acquired before app creation. Repeated double-clicks now exit the second process cleanly and keep the existing app as the single running instance.
+- x_toolbox.spec excludes RapidOCR optional PyTorch/Paddle/TensorRT hidden-import paths plus 	orch, 	orchvision, 	orchaudio, paddle*, 	ensorflow, and 	ensorboard; default RapidOCR/ONNXRuntime OCR remains packaged.
+- Packaged validation: dist_release_ascii\fx_toolbox\fx_toolbox.exe launched successfully, _internal no longer contains torch/paddle/tensorflow/tensorboard directories, and duplicate launch logged single_instance:already_running.
+
+## 2026-05-28 Default package-and-open workflow
+- User preference: after completing implementation or bug fixes, package the release build and open `dist_release_ascii\fx_toolbox\fx_toolbox.exe` automatically unless the user explicitly says not to.
+- Packaging pre-step remains scoped: only stop the existing packaged EXE process whose executable path is this repository's `dist_release_ascii\fx_toolbox\fx_toolbox.exe`; do not touch project-external files or unrelated processes.
+- Keep source validation first when code changed, then run `package.bat`, then open the packaged EXE for manual testing.

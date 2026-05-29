@@ -46,3 +46,8 @@
 - 未经用户明确授权，以后不得删除任何项目外文件。
 - 即使为清理缓存、临时文件、旧版本、打包产物或第三方目录，也只能处理本项目目录内文件。
 - 如需删除项目外任何文件，必须先停下并取得用户明确同意。
+
+## Default Packaging Behavior
+- After completing implementation or bug fixes, default to running the release package flow and opening `dist_release_ascii\fx_toolbox\fx_toolbox.exe` for the user.
+- Skip automatic packaging/opening only when the user explicitly says not to package, not to open, or asks for analysis only.
+- Before packaging, stop only the existing project-packaged `fx_toolbox.exe` process from this repository's `dist_release_ascii\fx_toolbox` path so the build output is not locked.

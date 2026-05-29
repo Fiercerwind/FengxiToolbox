@@ -12,3 +12,4 @@ pywinstyles==1.8
 rapidocr==3.8.1
 onnxruntime==1.24.4
 PyInstaller==6.17.0
+faster-whisper==1.2.1

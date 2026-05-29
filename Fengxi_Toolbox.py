@@ -43,8 +43,16 @@ from tools.fx_audio_task import (
     build_audio_output_path as _audio_task_build_output_path,
     collect_audio_files as _audio_task_collect_files,
     get_audio_task_args as _audio_task_get_args,
+    get_audio_transcribe_args as _audio_task_get_transcribe_args,
     process_one_audio_file as _audio_task_process_one_file,
     run_audio_task_core,
+)
+from tools.fx_speech_to_text import (
+    SPEECH_LANGUAGE_OPTIONS,
+    SPEECH_MODEL_OPTIONS,
+    SPEECH_OUTPUT_FORMATS,
+    format_srt_timestamp as _speech_format_timestamp,
+    transcribe_media_file as _speech_transcribe_media_file,
 )
 from tools.fx_convert_core import (
     CONVERT_IMAGE_EXTS,
@@ -458,12 +466,14 @@ PRESET_CATEGORY_LABELS = {
     "watermark": "批量水印",
     "ocr": "OCR 搜索版 PDF",
     "pdf_compress": "PDF 压缩",
+    "audio": "音频工具",
     "rename": "命名规则",
 }
 PRESET_CATEGORY_TO_TASK = {
     "watermark": "watermark",
     "ocr": "pdf",
     "pdf_compress": "pdf",
+    "audio": "audio",
     "rename": "file",
 }
 PRESET_LABEL_TO_CATEGORY = {label: key for key, label in PRESET_CATEGORY_LABELS.items()}
@@ -524,8 +534,12 @@ FEATURE_REGISTRY = {
         "page": "audio",
         "input": {"file": True, "folder": True, "drag_drop": True},
         "output_strategy": {"supported": False, "force_result_folder": False},
-        "parallel": {"mode": "safe", "hint": "音视频逐文件转换可并行处理，实际速度也受 ffmpeg 与磁盘限制。"},
-        "preview_modes": {},
+        "parallel": {"mode": "safe", "hint": "音视频逐文件转换可并行处理；语音转文字也可逐文件并行，但会占用较多 CPU/内存。"},
+        "preview_modes": {
+            "video2mp3": "视频提取音频",
+            "convert": "音频格式互转",
+            "transcribe": "语音转文字",
+        },
         "risk_flags": ("delete_source",),
     },
     "zip": {
@@ -2545,6 +2559,55 @@ def _refresh_visible_tab_layout(app, task_name):
     _apply_inline_title_icons(app, tab)
 
 
+def _widget_direct_child_under(root_widget, target_widget):
+    if root_widget is None or target_widget is None:
+        return None
+    current = target_widget
+    previous = None
+    while current is not None and current is not root_widget:
+        previous = current
+        current = getattr(current, "master", None)
+    return previous if current is root_widget else None
+
+
+def _find_watermark_text_panel(app, tab):
+    text_widget = getattr(app, "wm_text", None)
+    direct_child = _widget_direct_child_under(tab, text_widget)
+    if direct_child is not None:
+        return direct_child
+    for child in list(tab.winfo_children()):
+        stack = list(child.winfo_children())
+        while stack:
+            widget = stack.pop()
+            if widget is text_widget:
+                return child
+            try:
+                stack.extend(widget.winfo_children())
+            except Exception:
+                pass
+    children = list(tab.winfo_children())
+    return children[0] if children else tab
+
+
+def _find_watermark_settings_panel(app, tab, left_panel):
+    for attr_name in ("slider_size", "slider_opacity", "slider_angle", "wm_font_combo", "wm_font_dropdown"):
+        widget = getattr(app, attr_name, None)
+        direct_child = _widget_direct_child_under(tab, widget)
+        if direct_child is not None and direct_child is not left_panel:
+            return direct_child
+    for child in list(tab.winfo_children()):
+        try:
+            grid_info = child.grid_info()
+        except Exception:
+            grid_info = {}
+        if child is not left_panel and str(grid_info.get("column", "")) == "1":
+            return child
+    for child in list(tab.winfo_children()):
+        if child is not left_panel:
+            return child
+    return None
+
+
 def _tighten_watermark_tab_layout(app, tab):
     try:
         tab.grid_rowconfigure(0, weight=1, minsize=0)
@@ -2553,11 +2616,11 @@ def _tighten_watermark_tab_layout(app, tab):
     except Exception:
         pass
 
-    panels = list(tab.winfo_children())
-    if len(panels) < 2:
+    left_panel = _find_watermark_text_panel(app, tab)
+    right_panel = _find_watermark_settings_panel(app, tab, left_panel)
+    if left_panel is None or right_panel is None:
         return
 
-    left_panel, right_panel = panels[0], panels[1]
     try:
         left_panel.grid_configure(row=0, column=0, padx=(0, 14), pady=0, sticky="nsew")
         right_panel.grid_configure(row=0, column=1, padx=0, pady=0, sticky="nsew")
@@ -2570,14 +2633,31 @@ def _tighten_watermark_tab_layout(app, tab):
         pass
 
     left_children = list(left_panel.winfo_children())
-    if len(left_children) >= 2:
+    preview_frame = next((child for child in left_children if getattr(child, "_fx_wm_color_preview_controls", False)), None)
+    text_area = next(
+        (
+            child
+            for child in left_children[1:]
+            if child is not preview_frame and not getattr(child, "_fx_wm_color_preview_controls", False)
+        ),
+        None,
+    )
+    if left_children:
         try:
             left_children[0].pack_configure(anchor="w", padx=24, pady=(18, 8))
         except Exception:
             pass
+    if preview_frame is not None:
         try:
-            left_children[1].configure(height=390)
-            left_children[1].pack_configure(fill="both", expand=True, padx=24, pady=(0, 18))
+            preview_frame.configure(height=132)
+            preview_frame.pack_propagate(False)
+            preview_frame.pack_configure(fill="x", padx=24, pady=(0, 8))
+        except Exception:
+            pass
+    if text_area is not None:
+        try:
+            text_area.configure(height=292 if preview_frame is not None else 390)
+            text_area.pack_configure(fill="both", expand=True, padx=24, pady=(0, 18))
         except Exception:
             pass
 
@@ -2668,15 +2748,6 @@ def _tighten_watermark_tab_layout(app, tab):
                     child.configure(height=30)
                 except Exception:
                     pass
-        except Exception:
-            pass
-    for child in right_children:
-        if not getattr(child, "_fx_wm_color_preview_controls", False):
-            continue
-        try:
-            child.configure(height=128)
-            child.pack_propagate(False)
-            child.pack_configure(fill="x", padx=24, pady=(0, 3))
         except Exception:
             pass
 
@@ -6506,12 +6577,88 @@ def _get_audio_task_args(app):
     return _audio_task_get_args(app)
 
 
+def _get_audio_transcribe_cache_dir():
+    return str(_get_user_pref_root() / "models" / "faster-whisper")
+
+
+def _get_audio_transcribe_args(app):
+    args = _audio_task_get_transcribe_args(app)
+    if not str(args.get("cache_dir") or "").strip():
+        args["cache_dir"] = _get_audio_transcribe_cache_dir()
+    return args
+
+
 def _build_audio_output_path(src, input_root, output_folder, target_fmt):
     return _audio_task_build_output_path(src, input_root, output_folder, target_fmt)
 
 
 def _process_one_audio_file(job):
-    return _audio_task_process_one_file(job, convert_audio_format, copy_file_safe)
+    return _audio_task_process_one_file(job, convert_audio_format, copy_file_safe, _speech_transcribe_media_file)
+
+
+def _set_audio_transcribe_preview_text(app, text, *, clear=False, force_bottom=False):
+    box = getattr(app, "_fx_audio_transcribe_preview_box", None)
+    if box is None:
+        return False
+
+    def update():
+        try:
+            should_follow = True
+            if not clear and not force_bottom:
+                try:
+                    should_follow = float(box.yview()[1]) >= 0.98
+                except Exception:
+                    should_follow = True
+            box.configure(state="normal")
+            if clear:
+                box.delete("1.0", "end")
+            box.insert("end", str(text or ""))
+            box.configure(state="disabled")
+            if clear or force_bottom or should_follow:
+                box.see("end")
+            return True
+        except Exception as exc:
+            _debug(f"audio_transcribe:preview_update_error:{exc}")
+            return False
+
+    try:
+        app.after(0, update)
+        return True
+    except Exception:
+        return bool(update())
+
+
+def _clear_audio_transcribe_preview(app, message=None):
+    text = message or "实时预览：开始识别后，这里会滚动显示已经识别出来的内容。\n"
+    return _set_audio_transcribe_preview_text(app, text, clear=True, force_bottom=True)
+
+
+def _append_audio_transcribe_progress(app, src, payload):
+    payload = payload if isinstance(payload, dict) else {}
+    event_type = str(payload.get("type") or "")
+    basename = os.path.basename(str(src or payload.get("src") or ""))
+    lines = []
+    if event_type == "stage":
+        stage = str(payload.get("stage") or "")
+        if stage == "load_model":
+            lines.append(f"\n[{basename}] 加载识别模型...\n")
+        elif stage == "transcribe":
+            lines.append(f"[{basename}] 开始识别，片段会实时显示在下方。\n")
+        elif stage == "write_outputs":
+            lines.append(f"[{basename}] 正在写出转写文件...\n")
+    elif event_type == "segment":
+        segment = payload.get("segment") if isinstance(payload.get("segment"), dict) else {}
+        text = str(segment.get("text", "")).strip()
+        if text:
+            start = _speech_format_timestamp(segment.get("start", 0)).replace(",", ".")
+            end = _speech_format_timestamp(segment.get("end", 0)).replace(",", ".")
+            lines.append(f"[{start} -> {end}] {text}\n")
+    elif event_type == "done":
+        count = int(payload.get("segments") or 0)
+        lines.append(f"[{basename}] 识别完成，共 {count} 段。\n")
+    if not lines:
+        return False
+    return _set_audio_transcribe_preview_text(app, "".join(lines))
 
 
 def _run_audio_task(app, input_folder):
@@ -6520,9 +6667,16 @@ def _run_audio_task(app, input_folder):
     result = _get_last_task_result(app)
     if result is None:
         result = _start_task_result(app, input_folder, "audio")
+    try:
+        mode, _target_fmt, _bitrate, _delete_source = _get_audio_task_args(app)
+    except Exception:
+        mode = ""
+    if mode == "transcribe":
+        _clear_audio_transcribe_preview(app, "实时预览：正在准备语音转文字任务...\n")
     callbacks = AudioTaskCallbacks(
         log=getattr(app, "log", None),
         stop_requested=lambda: bool(getattr(app, "stop_event", False)),
+        on_transcript_progress=lambda src, payload: _append_audio_transcribe_progress(app, src, payload),
     )
     return run_audio_task_core(
         app,
@@ -6547,6 +6701,8 @@ def _run_audio_task(app, input_folder):
         stop_requested=lambda: bool(getattr(app, "stop_event", False)),
         executor_factory=concurrent.futures.ThreadPoolExecutor,
         get_audio_task_args=_get_audio_task_args,
+        get_audio_transcribe_args=_get_audio_transcribe_args,
+        transcribe_media_file=_speech_transcribe_media_file,
         callbacks=callbacks,
     )
 
@@ -6578,6 +6734,213 @@ def _patch_audio_parallel_task():
 
 
 _patch_audio_parallel_task()
+
+
+def _find_audio_settings_frame(app):
+    tab = getattr(app, "tab_audio", None)
+    if tab is None:
+        return None
+    stack = list(tab.winfo_children())
+    while stack:
+        widget = stack.pop(0)
+        try:
+            children = list(widget.winfo_children())
+        except Exception:
+            children = []
+        texts = []
+        for child in children:
+            try:
+                texts.append(str(child.cget("text")))
+            except Exception:
+                pass
+        if any("视频提取音频" in text for text in texts) and any("音频格式互转" in text for text in texts):
+            return widget
+        stack.extend(children)
+    return None
+
+
+def _install_audio_transcribe_ui(app):
+    if getattr(app, "_fx_audio_transcribe_ui_ready", False):
+        return
+    frame = _find_audio_settings_frame(app)
+    if frame is None:
+        return
+
+    try:
+        app.audio_transcribe_model = tkinter.StringVar(master=app, value="base")
+        app.audio_transcribe_language = tkinter.StringVar(master=app, value="自动识别")
+        app.audio_transcribe_format = tkinter.StringVar(master=app, value="txt")
+        app.audio_transcribe_cache_dir = tkinter.StringVar(master=app, value=_get_audio_transcribe_cache_dir())
+    except Exception as exc:
+        _debug(f"audio_transcribe:variables_error:{exc}")
+        return
+
+    try:
+        customtkinter.CTkRadioButton(
+            frame,
+            text="语音转文字 (音频/视频生成文本)",
+            variable=app.audio_mode_var,
+            value="transcribe",
+        ).pack(anchor="w", pady=8)
+    except Exception as exc:
+        _debug(f"audio_transcribe:radio_error:{exc}")
+
+    controls = customtkinter.CTkFrame(frame, fg_color="transparent")
+    controls.pack(fill="x", pady=(4, 8))
+    try:
+        customtkinter.CTkLabel(controls, text="识别模型:").pack(side="left", padx=(0, 8))
+        customtkinter.CTkComboBox(
+            controls,
+            variable=app.audio_transcribe_model,
+            values=list(SPEECH_MODEL_OPTIONS),
+            width=86,
+        ).pack(side="left", padx=(0, 12))
+        customtkinter.CTkLabel(controls, text="语言:").pack(side="left", padx=(0, 8))
+        customtkinter.CTkComboBox(
+            controls,
+            variable=app.audio_transcribe_language,
+            values=list(SPEECH_LANGUAGE_OPTIONS.keys()),
+            width=92,
+        ).pack(side="left", padx=(0, 12))
+        customtkinter.CTkLabel(controls, text="输出:").pack(side="left", padx=(0, 8))
+        customtkinter.CTkComboBox(
+            controls,
+            variable=app.audio_transcribe_format,
+            values=list(SPEECH_OUTPUT_FORMATS),
+            width=86,
+        ).pack(side="left")
+    except Exception as exc:
+        _debug(f"audio_transcribe:controls_error:{exc}")
+
+    preview_frame = customtkinter.CTkFrame(frame, fg_color="transparent")
+    preview_frame.pack(fill="x", pady=(2, 4))
+    app._fx_audio_transcribe_preview_frame = preview_frame
+    preview_header = customtkinter.CTkFrame(preview_frame, fg_color="transparent")
+    preview_header.pack(fill="x", pady=(0, 2))
+    customtkinter.CTkLabel(
+        preview_header,
+        text="实时识别预览",
+        text_color=globals().get("COLOR_TEXT_MAIN", "#E8EEF2"),
+        font=customtkinter.CTkFont(size=12, weight="bold"),
+        anchor="w",
+    ).pack(side="left")
+    customtkinter.CTkButton(
+        preview_header,
+        text="清空",
+        width=54,
+        height=24,
+        command=lambda target=app: _clear_audio_transcribe_preview(target),
+    ).pack(side="right")
+    preview_box = customtkinter.CTkTextbox(
+        preview_frame,
+        height=96,
+        wrap="word",
+        font=customtkinter.CTkFont(size=12),
+    )
+    preview_box.pack(fill="x")
+    app._fx_audio_transcribe_preview_box = preview_box
+    _clear_audio_transcribe_preview(app)
+
+    hint = customtkinter.CTkLabel(
+        frame,
+        text=(
+            "模型说明：base 为默认推荐；tiny 最快但错字更多；small 更稳；"
+            "medium 准确率最高但更慢。首次使用会缓存模型到风兮本地目录。"
+        ),
+        text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+        font=customtkinter.CTkFont(size=11),
+        justify="left",
+        anchor="w",
+        wraplength=620,
+    )
+    hint.pack(fill="x", pady=(2, 4))
+    app._fx_audio_transcribe_model_hint = hint
+
+    app._fx_audio_transcribe_controls = controls
+    app._fx_audio_transcribe_ui_ready = True
+    try:
+        _install_audio_last_settings_memory(app)
+    except Exception as exc:
+        _debug(f"audio_transcribe:last_settings_install_error:{exc}")
+
+
+def _schedule_audio_last_settings_persistence(app, delay_ms=350):
+    if getattr(app, "_fx_last_settings_loading", False):
+        return
+    after_id = getattr(app, "_fx_audio_last_settings_after_id", None)
+    if after_id:
+        try:
+            app.after_cancel(after_id)
+        except Exception:
+            pass
+
+    def persist(target=app):
+        try:
+            target._fx_audio_last_settings_after_id = None
+        except Exception:
+            pass
+        try:
+            if _last_settings_category_ready(target, "audio"):
+                _save_last_settings_category(target, "audio", update_active=(getattr(target, "current_task", "") == "audio"))
+        except Exception as exc:
+            _debug(f"last_settings:audio_auto_save_error:{exc}")
+
+    try:
+        app._fx_audio_last_settings_after_id = app.after(delay_ms, persist)
+    except Exception:
+        persist()
+
+
+def _install_audio_last_settings_memory(app):
+    if getattr(app, "_fx_audio_last_settings_memory_ready", False):
+        return
+
+    def changed(*_args, target=app):
+        _schedule_audio_last_settings_persistence(target)
+
+    trace_ids = []
+    for name in (
+        "audio_mode_var",
+        "audio_target_fmt",
+        "audio_bitrate",
+        "audio_delete_var",
+        "audio_transcribe_model",
+        "audio_transcribe_language",
+        "audio_transcribe_format",
+    ):
+        var = getattr(app, name, None)
+        if not isinstance(var, tkinter.Variable):
+            continue
+        try:
+            trace_ids.append((name, var.trace_add("write", changed)))
+        except Exception:
+            pass
+    app._fx_audio_last_settings_trace_ids = trace_ids
+    app._fx_audio_last_settings_memory_ready = True
+
+
+def _patch_audio_transcribe_ui():
+    try:
+        original_init_audio_ui = FengxiToolboxApp.init_audio_ui
+    except Exception as exc:
+        _debug(f"audio_transcribe:patch_missing:{exc}")
+        return
+    if getattr(original_init_audio_ui, "__fx_audio_transcribe_ui_patch__", False):
+        return
+
+    def patched_init_audio_ui(self):
+        original_init_audio_ui(self)
+        try:
+            _install_audio_transcribe_ui(self)
+        except Exception as exc:
+            _debug(f"audio_transcribe:init_error:{exc}")
+
+    patched_init_audio_ui.__fx_audio_transcribe_ui_patch__ = True
+    FengxiToolboxApp.init_audio_ui = patched_init_audio_ui
+    _debug("audio_transcribe:ui_patch_installed")
+
+
+_patch_audio_transcribe_ui()
 
 
 def _patch_zip_core_task():
@@ -6717,6 +7080,14 @@ def _get_preview_mode_detail(app, task_type):
             return _get_feature_preview_mode_label(task_type, mode, _get_remove_wm_mode_label(mode))
         if task_type == "audio":
             mode, target_fmt, bitrate, _delete_source = _get_audio_task_args(app)
+            if mode == "transcribe":
+                args = _get_audio_transcribe_args(app)
+                return (
+                    "语音转文字 "
+                    f"{args.get('model_name', 'base')} / "
+                    f"{args.get('language', '自动识别')} / "
+                    f"{args.get('output_format', 'txt')}"
+                )
             return f"{mode} -> {target_fmt} ({bitrate})"
         if task_type == "watermark":
             return _get_feature_preview_mode_label(task_type, "default", "添加水印")
@@ -7874,7 +8245,7 @@ def _resolve_preview_font(app, size):
 
 
 def _make_watermark_preview_image(app):
-    width, height = 360, 128
+    width, height = 360, 92
     image = PILImage.new("RGBA", (width, height), (248, 250, 252, 255))
     draw = ImageDraw.Draw(image)
     draw.rounded_rectangle((10, 10, width - 10, height - 10), radius=14, fill=(255, 255, 255, 255), outline=(218, 225, 232, 255), width=2)
@@ -7926,7 +8297,7 @@ def _refresh_watermark_preview(app):
         return False
     try:
         image = _make_watermark_preview_image(app)
-        ctk_image = customtkinter.CTkImage(light_image=image, dark_image=image, size=(360, 128))
+        ctk_image = customtkinter.CTkImage(light_image=image, dark_image=image, size=(360, 92))
         app._fx_wm_preview_image = ctk_image
         label.configure(image=ctk_image, text="")
         swatch = getattr(app, "wm_color_swatch", None)
@@ -7980,24 +8351,82 @@ def _choose_watermark_color(app):
         _refresh_watermark_preview(app)
 
 
+def _iter_watermark_preview_frames(tab):
+    stack = list(tab.winfo_children()) if tab is not None else []
+    while stack:
+        widget = stack.pop()
+        if getattr(widget, "_fx_wm_color_preview_controls", False):
+            yield widget
+        try:
+            stack.extend(widget.winfo_children())
+        except Exception:
+            pass
+
+
+def _destroy_stale_watermark_preview_frames(app, tab, keep_frame=None):
+    for frame in list(_iter_watermark_preview_frames(tab)):
+        if frame is keep_frame:
+            continue
+        try:
+            frame.destroy()
+        except Exception:
+            pass
+    if keep_frame is None and getattr(app, "_fx_wm_color_preview_frame", None) is not None:
+        try:
+            if not app._fx_wm_color_preview_frame.winfo_exists():
+                app._fx_wm_color_preview_frame = None
+        except Exception:
+            app._fx_wm_color_preview_frame = None
+
+
+def _pack_watermark_color_preview_frame(app, frame, left_panel):
+    text_widget = getattr(app, "wm_text", None)
+    before_widget = text_widget if getattr(text_widget, "master", None) is left_panel else None
+    try:
+        if frame.winfo_manager():
+            frame.pack_forget()
+    except Exception:
+        pass
+    try:
+        if before_widget is not None:
+            frame.pack(fill="x", padx=24, pady=(0, 8), before=before_widget)
+        else:
+            frame.pack(fill="x", padx=24, pady=(0, 8))
+    except Exception:
+        frame.pack(fill="x", padx=24, pady=(0, 8))
+
+
 def _install_watermark_color_preview_ui(app):
-    if getattr(app, "_fx_wm_color_preview_ready", False):
-        return
     tab = getattr(app, "tab_wm", None)
     if tab is None:
         return
 
-    panels = list(tab.winfo_children())
-    right_panel = panels[1] if len(panels) >= 2 else tab
+    left_panel = _find_watermark_text_panel(app, tab)
+    existing_frame = getattr(app, "_fx_wm_color_preview_frame", None)
+    if getattr(app, "_fx_wm_color_preview_ready", False):
+        try:
+            existing_ok = existing_frame is not None and existing_frame.winfo_exists() and existing_frame.master is left_panel
+        except Exception:
+            existing_ok = False
+        if existing_ok:
+            _destroy_stale_watermark_preview_frames(app, tab, keep_frame=existing_frame)
+            _pack_watermark_color_preview_frame(app, existing_frame, left_panel)
+            _tighten_watermark_tab_layout(app, tab)
+            _schedule_watermark_preview_refresh(app, delay_ms=120)
+            return
+        app._fx_wm_color_preview_ready = False
+
+    _destroy_stale_watermark_preview_frames(app, tab)
     _set_watermark_color(app, _safe_var_get(app, "wm_color_var", WATERMARK_DEFAULT_COLOR))
 
-    frame = customtkinter.CTkFrame(right_panel, fg_color="transparent", height=128)
+    frame = customtkinter.CTkFrame(left_panel, fg_color="transparent", height=132)
     frame._fx_wm_color_preview_controls = True
+    app._fx_wm_color_preview_frame = frame
     try:
         frame.pack_propagate(False)
     except Exception:
         pass
-    frame.pack(fill="x", padx=24, pady=(0, 3))
+    _pack_watermark_color_preview_frame(app, frame, left_panel)
 
     row = customtkinter.CTkFrame(frame, fg_color="transparent", height=30)
     row.pack(fill="x", pady=(0, 4))
@@ -8022,7 +8451,7 @@ def _install_watermark_color_preview_ui(app):
     customtkinter.CTkButton(row, text="选择", width=56, height=28, command=lambda target=app: _choose_watermark_color(target)).pack(side="left", padx=(0, 8))
     customtkinter.CTkButton(row, text="刷新预览", width=78, height=28, command=lambda target=app: _refresh_watermark_preview(target)).pack(side="left")
 
-    app.wm_preview_label = customtkinter.CTkLabel(frame, text="", width=360, height=88, corner_radius=14)
+    app.wm_preview_label = customtkinter.CTkLabel(frame, text="", width=360, height=92, corner_radius=14)
     app.wm_preview_label.pack(fill="x", expand=True)
 
     def color_changed(*_args):
@@ -8055,6 +8484,7 @@ def _install_watermark_color_preview_ui(app):
                 pass
 
     app._fx_wm_color_preview_ready = True
+    _tighten_watermark_tab_layout(app, tab)
     _schedule_watermark_preview_refresh(app, delay_ms=450)
 
 
@@ -8684,6 +9114,19 @@ def _capture_preset_settings(app, category=None):
                 "pdf_image_compress_level_var": _safe_var_get(app, "pdf_image_compress_level_var", "标准"),
             }
         )
+    elif category == "audio":
+        transcribe_args = _get_audio_transcribe_args(app)
+        settings.update(
+            {
+                "audio_mode_var": _safe_var_get(app, "audio_mode_var", "video2mp3"),
+                "audio_target_fmt": _safe_var_get(app, "audio_target_fmt", "mp3"),
+                "audio_bitrate": _safe_var_get(app, "audio_bitrate", "192k"),
+                "audio_delete_var": bool(_safe_var_get(app, "audio_delete_var", False)),
+                "audio_transcribe_model": transcribe_args.get("model_name", "base"),
+                "audio_transcribe_language": transcribe_args.get("language", "自动识别"),
+                "audio_transcribe_format": transcribe_args.get("output_format", "txt"),
+            }
+        )
     elif category == "rename":
         settings.update(
             {
@@ -8830,6 +9273,19 @@ def _apply_preset_settings(app, preset, switch_task=True):
         _safe_var_set(app, "pdf_delete_var", bool(settings.get("pdf_delete_var", False)))
         _safe_var_set(app, "pdf_compress_level_var", settings.get("pdf_compress_level_var", "标准"))
         _safe_var_set(app, "pdf_image_compress_level_var", settings.get("pdf_image_compress_level_var", "标准"))
+    elif category == "audio":
+        for name in (
+            "audio_mode_var",
+            "audio_target_fmt",
+            "audio_bitrate",
+            "audio_transcribe_model",
+            "audio_transcribe_language",
+            "audio_transcribe_format",
+        ):
+            if name in settings:
+                _safe_var_set(app, name, settings.get(name))
+        if "audio_delete_var" in settings:
+            _safe_var_set(app, "audio_delete_var", bool(settings.get("audio_delete_var", False)))
     elif category == "rename":
         _safe_var_set(app, "file_mode_var", "rename")
         _safe_var_set(app, "rename_type_var", settings.get("rename_type_var", "add"))
@@ -8860,6 +9316,8 @@ def _last_settings_category_ready(app, category):
         return getattr(app, "wm_text", None) is not None and getattr(app, "selected_font", None) is not None
     if category in {"ocr", "pdf_compress"}:
         return getattr(app, "pdf_mode_var", None) is not None
+    if category == "audio":
+        return getattr(app, "audio_mode_var", None) is not None
     if category == "rename":
         return getattr(app, "rename_type_var", None) is not None and getattr(app, "rename_prefix", None) is not None
     return False
@@ -8880,6 +9338,8 @@ def _get_current_last_settings_category(app):
         mode = str(_safe_var_get(app, "file_mode_var", "rename") or "")
         if mode == "rename":
             return "rename"
+    if task_type == "audio":
+        return "audio"
     return None
 
 
@@ -8901,10 +9361,103 @@ def _save_current_last_settings(app):
     return _save_last_settings_category(app, category)
 
 
+def _flush_watermark_last_settings_persistence(app):
+    if getattr(app, "_fx_last_settings_loading", False):
+        return None
+    if not _last_settings_category_ready(app, "watermark"):
+        return None
+    return _save_last_settings_category(app, "watermark", update_active=True)
+
+
+def _schedule_watermark_last_settings_persistence(app, delay_ms=350):
+    if getattr(app, "_fx_last_settings_loading", False):
+        return
+    after_id = getattr(app, "_fx_wm_last_settings_after_id", None)
+    if after_id:
+        try:
+            app.after_cancel(after_id)
+        except Exception:
+            pass
+
+    def persist(target=app):
+        try:
+            target._fx_wm_last_settings_after_id = None
+        except Exception:
+            pass
+        try:
+            _flush_watermark_last_settings_persistence(target)
+        except Exception as exc:
+            _debug(f"last_settings:watermark_auto_save_error:{exc}")
+
+    try:
+        app._fx_wm_last_settings_after_id = app.after(delay_ms, persist)
+    except Exception:
+        persist()
+
+
+def _install_watermark_last_settings_memory(app):
+    if getattr(app, "_fx_wm_last_settings_memory_ready", False):
+        return
+
+    def changed(*_args, target=app):
+        _schedule_watermark_last_settings_persistence(target)
+
+    variable_names = (
+        "selected_font",
+        "wm_range_var",
+        "wm_overwrite_var",
+        "allow_simsun",
+        "wm_delete_var",
+        "wm_convert_pdf",
+        "wm_skip_hyphen_var",
+        "wm_skip_name_position_var",
+        "wm_skip_name_text_var",
+        "wm_color_var",
+        "output_strategy_var",
+    )
+    trace_ids = []
+    for name in variable_names:
+        var = getattr(app, name, None)
+        if not isinstance(var, tkinter.Variable):
+            continue
+        try:
+            trace_ids.append((name, var.trace_add("write", changed)))
+        except Exception:
+            pass
+    app._fx_wm_last_settings_trace_ids = trace_ids
+
+    for name in ("slider_size", "slider_opacity", "slider_angle"):
+        widget = getattr(app, name, None)
+        if widget is None:
+            continue
+        try:
+            original_command = getattr(widget, "_command", None)
+            if not getattr(original_command, "__fx_wm_last_settings_slider_command__", False):
+                def slider_command(value=None, target=app, original=original_command):
+                    if callable(original):
+                        try:
+                            original(value)
+                        except TypeError:
+                            original()
+                    _schedule_watermark_last_settings_persistence(target)
+
+                slider_command.__fx_wm_last_settings_slider_command__ = True
+                widget.configure(command=slider_command)
+        except Exception:
+            pass
+        for event_name in ("<ButtonRelease-1>", "<B1-Motion>"):
+            try:
+                widget.bind(event_name, lambda _event=None, target=app: _schedule_watermark_last_settings_persistence(target), add="+")
+            except Exception:
+                pass
+
+    app._fx_wm_last_settings_memory_ready = True
+
+
 def _save_initialized_last_settings(app):
     saved = {}
     current_category = _get_current_last_settings_category(app)
-    for category in ("watermark", "ocr", "pdf_compress", "rename"):
+    for category in ("watermark", "ocr", "pdf_compress", "audio", "rename"):
         try:
             if _last_settings_category_ready(app, category):
                 entry = _save_last_settings_category(app, category, update_active=(category == current_category))
@@ -10917,6 +11470,14 @@ def _patch_task_queue_history():
             _restore_last_settings_for_task(self, DEFAULT_STARTUP_TAB)
         except Exception as exc:
             _debug(f"last_settings:restore_startup_error:{exc}")
+        try:
+            _install_watermark_color_preview_ui(self)
+        except Exception as exc:
+            _debug(f"watermark_color:repair_after_main_area_error:{exc}")
+        try:
+            _install_watermark_last_settings_memory(self)
+        except Exception as exc:
+            _debug(f"last_settings:watermark_memory_after_main_area_error:{exc}")
         return result
 
     def patched_on_start_click(self):

@@ -93,6 +93,23 @@
 - 该能力只改加载器层 UI/偏好，不改 `create_watermark_packet`、`add_watermark_to_pdf`、`add_watermark_to_word`。
 - 回归：`last_settings_watermark_save_restore`。
 
+## 2026-05-29 批量水印参数配置即时记忆
+- 用户要求右侧“参数配置”区域也能记忆。
+- 已在加载器层给批量水印参数加防抖自动保存，不再只依赖开始任务或关闭软件时保存。
+- 当前即时记忆范围：
+  - 字体
+  - 每一页/仅第一页
+  - 智能防重/强制添加
+  - 跳过文件名规则开关、位置、字符
+  - 兼容模式（Word/宋体）
+  - 成功后删除源文件
+  - 先转 PDF 再加水印
+  - 水印颜色
+  - 字号、透明度、旋转角度
+  - 当前输出策略
+- 实现边界：只改 `Fengxi_Toolbox.py` 的 UI/偏好保存绑定，不改 `tools/fx_watermark_core.py` 和水印处理核心逻辑。
+- 回归：`watermark_parameters_auto_memory` 覆盖截图参数的自动写入；`last_settings_watermark_save_restore` 继续覆盖恢复。
+
 ## 去水印
 - 任务类型：`remove_wm`
 - Word 去水印通过扫描页眉中的艺术字 / 图片水印处理
@@ -213,3 +230,15 @@
   - existing `last_settings_watermark_save_restore` now checks color restore.
 - Validation: `python -m py_compile Fengxi_Toolbox.py tools\fx_watermark_core.py full_debug_test.py`; `python smoke_test.py` 14/14; `python full_debug_test.py` 159/159.
 - Boundaries: no changes to `fengxi_runtime.bin`; batch-compress untouched; add-watermark core changed only to accept optional color while preserving default behavior.
+## 2026-05-28 23:33:16 Watermark color preview visibility fix
+- User screenshot showed the color picker and preview were not visible on the batch-watermark page because the controls were appended at the bottom of the right-side parameter panel, below the visible area.
+- Fix: move _fx_wm_color_preview_controls to the left-side watermark-content panel, below the watermark text editor; shrink the editor height when the preview exists and use a compact 360x92 preview card.
+- Regression strengthened: watermark_color_preview_ui now asserts the preview frame is packed under the left panel and refreshes successfully.
+- Validation: python -m py_compile Fengxi_Toolbox.py full_debug_test.py; python full_debug_test.py 159/159; package.bat; packaged EXE launched.
+
+## 2026-05-29 Watermark color preview real visibility repair
+- User still could not see the color picker/preview after the first move.
+- Cause: the runtime can build overlapping watermark panel pairs during startup; the first visibility patch placed preview controls into an old panel, while the real `app.wm_text` textbox lived in a newer panel.
+- Fix: locate the target panel by walking up from the actual `app.wm_text`, remove stale `_fx_wm_color_preview_controls` frames, and run a repair pass after main-area setup plus last-settings restore.
+- Regression: `watermark_color_preview_ui` now checks the preview frame is under the actual text panel, is packed before the textbox via `pack_slaves()`, refreshes successfully, and has no duplicate stale preview frames.
+- Validation: `python -m py_compile Fengxi_Toolbox.py full_debug_test.py`; targeted UI hierarchy probe; `python full_debug_test.py` 159/159; `python smoke_test.py` 14/14.
