@@ -1202,6 +1202,121 @@ def main():
         },
     )
 
+    pdf_nav_debug = {}
+    try:
+        app.deiconify()
+        app.geometry("1180x760+80+80")
+        app.update_idletasks()
+        app.update()
+        app.switch_tab("pdf", getattr(app, "btn_nav_pdf", None))
+        for _ in range(6):
+            app.update_idletasks()
+            app.update()
+            time.sleep(0.05)
+
+        expected_pdf_modes = [
+            "合并成一个 PDF (Merge)",
+            "拆分为单页 PDF (Split)",
+            "PDF 加密 (Encrypt)",
+            "PDF 压缩",
+            "OCR 搜索版 PDF",
+        ]
+        pdf_mode_buttons = {}
+
+        def collect_pdf_mode_buttons(widget):
+            for child in widget.winfo_children():
+                try:
+                    text = str(child.cget("text"))
+                except Exception:
+                    text = ""
+                text_lines = text.splitlines()
+                label = text_lines[0].strip() if text_lines else ""
+                if child.__class__.__name__ == "CTkButton" and label in expected_pdf_modes:
+                    pdf_mode_buttons[label] = child
+                collect_pdf_mode_buttons(child)
+
+        collect_pdf_mode_buttons(app)
+        parents = {button.master for button in pdf_mode_buttons.values()}
+        if len(parents) == 1:
+            parent_height = int(next(iter(parents)).winfo_height())
+        else:
+            parent_height = -1
+        pdf_nav_debug = {
+            label: {
+                "found": label in pdf_mode_buttons,
+                "mapped": bool(pdf_mode_buttons[label].winfo_ismapped()) if label in pdf_mode_buttons else False,
+                "y": int(pdf_mode_buttons[label].winfo_y()) if label in pdf_mode_buttons else None,
+                "height": int(pdf_mode_buttons[label].winfo_height()) if label in pdf_mode_buttons else None,
+                "bottom": int(pdf_mode_buttons[label].winfo_y() + pdf_mode_buttons[label].winfo_height())
+                if label in pdf_mode_buttons
+                else None,
+            }
+            for label in expected_pdf_modes
+        }
+        pdf_nav_debug["parent_height"] = parent_height
+        pdf_nav_debug["same_parent"] = len(parents) == 1
+        pdf_nav_visible_ok = (
+            set(pdf_mode_buttons) == set(expected_pdf_modes)
+            and len(parents) == 1
+            and all(button.winfo_ismapped() for button in pdf_mode_buttons.values())
+            and all(button.winfo_height() >= 30 for button in pdf_mode_buttons.values())
+            and all(button.winfo_y() + button.winfo_height() <= parent_height for button in pdf_mode_buttons.values())
+        )
+    except Exception as exc:
+        pdf_nav_visible_ok = False
+        pdf_nav_debug = {"error": str(exc)}
+    finally:
+        try:
+            app.withdraw()
+        except Exception:
+            pass
+    record("pdf_ocr_nav_button_visible", pdf_nav_visible_ok, pdf_nav_debug)
+
+    encrypt_pwd_debug = {}
+    try:
+        app.deiconify()
+        app.geometry("1180x760+80+80")
+        app.switch_tab("pdf", getattr(app, "btn_nav_pdf", None))
+        if callable(getattr(app, "_fx_select_pdf_mode", None)):
+            app._fx_select_pdf_mode("encrypt")
+        else:
+            app.pdf_mode_var.set("encrypt")
+        for _ in range(4):
+            app.update_idletasks()
+            app.update()
+            time.sleep(0.05)
+        encrypt_entry = getattr(app, "_fx_pdf_encrypt_pwd_entry", None)
+        shared_entry = getattr(app, "_fx_pdf_shared_pwd_entry", None)
+        if encrypt_entry is not None:
+            encrypt_entry.delete(0, "end")
+            encrypt_entry.insert(0, "visible-pass")
+        encrypt_pwd_debug = {
+            "mode": app.pdf_mode_var.get(),
+            "encrypt_exists": encrypt_entry is not None,
+            "encrypt_mapped": bool(encrypt_entry.winfo_ismapped()) if encrypt_entry is not None else False,
+            "encrypt_value": encrypt_entry.get() if encrypt_entry is not None else "",
+            "shared_value": shared_entry.get() if shared_entry is not None else "",
+            "active_value": app.pdf_pwd_entry.get() if getattr(app, "pdf_pwd_entry", None) is not None else "",
+        }
+        encrypt_pwd_visible_ok = (
+            app.pdf_mode_var.get() == "encrypt"
+            and encrypt_entry is not None
+            and bool(encrypt_entry.winfo_ismapped())
+            and encrypt_entry.get() == "visible-pass"
+            and shared_entry is not None
+            and shared_entry.get() == "visible-pass"
+            and app.pdf_pwd_entry is encrypt_entry
+        )
+    except Exception as exc:
+        encrypt_pwd_visible_ok = False
+        encrypt_pwd_debug = {"error": str(exc)}
+    finally:
+        try:
+            app.withdraw()
+        except Exception:
+            pass
+    record("pdf_encrypt_password_entry_visible", encrypt_pwd_visible_ok, encrypt_pwd_debug)
+
     app.pdf_compress_level_var.set("强力")
     app.pdf_image_compress_level_var.set("轻度")
     compress_last = mod._save_last_settings_category(app, "pdf_compress")
@@ -1844,6 +1959,7 @@ def main():
         "pdf_ocr_task_module_exports",
         PdfOcrTaskOptions(model_root=root, profile_key="general", backend_key="auto").extraction_mode == "mixed"
         and isinstance(PdfOcrTaskCallbacks(), PdfOcrTaskCallbacks)
+        and hasattr(PdfOcrTaskCallbacks(), "on_page_preview")
         and callable(run_pdf_ocr_task_core)
         and Path(ocr_task_output) == ocr_task_out_root / "nested" / "scan.pdf"
         and Path(ocr_task_report) == ocr_task_out_root / "_ocr_compare_reports" / "scan.ocr_compare.md",
@@ -2731,6 +2847,18 @@ def main():
     (audio_transcribe_root / "speech.wav").write_bytes(b"fake-speech")
     app.current_task = "audio"
     mod._ensure_lazy_tab_initialized(app, "audio")
+    mod._tighten_layout(app, "audio")
+    try:
+        audio_tab_name = next(
+            name
+            for name, frame in (getattr(app.main_panel, "_tab_dict", {}) or {}).items()
+            if frame is app.tab_audio
+        )
+        app.main_panel.set(audio_tab_name)
+        app.update_idletasks()
+        mod._tighten_layout(app, "audio")
+    except Exception:
+        pass
     audio_model_hint = ""
     try:
         audio_model_hint = app._fx_audio_transcribe_model_hint.cget("text")
@@ -2745,6 +2873,12 @@ def main():
     )
     audio_preview_height = 999
     audio_preview_before_hint = False
+    audio_card_top_pady = 999
+    audio_title_top_pady = 999
+    audio_settings_top_pady = 999
+    audio_tab_row = 999
+    audio_tab_top_pady = 999
+    main_tab_button_manager = "unknown"
     try:
         preview_frame = app._fx_audio_transcribe_preview_frame
         preview_box = app._fx_audio_transcribe_preview_box
@@ -2752,13 +2886,50 @@ def main():
         audio_preview_height = int(preview_box.cget("height"))
         audio_siblings = list(preview_frame.master.pack_slaves())
         audio_preview_before_hint = audio_siblings.index(preview_frame) < audio_siblings.index(hint_widget)
+        audio_settings_frame = preview_frame.master
+        audio_card = audio_settings_frame.master
+        audio_title = audio_card.winfo_children()[0]
+        card_pady = audio_card.pack_info().get("pady", 999)
+        title_pady = audio_title.pack_info().get("pady", 999)
+        settings_pady = audio_settings_frame.pack_info().get("pady", 999)
+        audio_card_top_pady = int(card_pady[0] if isinstance(card_pady, tuple) else card_pady)
+        audio_title_top_pady = int(title_pady[0] if isinstance(title_pady, tuple) else title_pady)
+        audio_settings_top_pady = int(settings_pady[0] if isinstance(settings_pady, tuple) else settings_pady)
+        audio_tab_grid = app.tab_audio.grid_info()
+        audio_tab_row = int(audio_tab_grid.get("row", 999))
+        tab_pady = audio_tab_grid.get("pady", 999)
+        audio_tab_top_pady = int(tab_pady[0] if isinstance(tab_pady, tuple) else tab_pady)
+        segmented_button = getattr(app.main_panel, "_segmented_button", None)
+        main_tab_button_manager = segmented_button.winfo_manager() if segmented_button is not None else ""
     except Exception:
         audio_preview_height = 999
         audio_preview_before_hint = False
+        audio_card_top_pady = 999
+        audio_title_top_pady = 999
+        audio_settings_top_pady = 999
+        audio_tab_row = 999
+        audio_tab_top_pady = 999
+        main_tab_button_manager = "error"
     record(
-        "audio_transcribe_preview_compact_layout",
-        audio_preview_height <= 110 and audio_preview_before_hint,
-        {"height": audio_preview_height, "preview_before_hint": audio_preview_before_hint},
+        "audio_transcribe_preview_roomy_layout",
+        145 <= audio_preview_height <= 180
+        and audio_preview_before_hint
+        and audio_card_top_pady <= 2
+        and audio_title_top_pady <= 2
+        and audio_settings_top_pady <= 2
+        and audio_tab_row == 0
+        and audio_tab_top_pady <= 2
+        and main_tab_button_manager != "grid",
+        {
+            "height": audio_preview_height,
+            "preview_before_hint": audio_preview_before_hint,
+            "card_top_pady": audio_card_top_pady,
+            "title_top_pady": audio_title_top_pady,
+            "settings_top_pady": audio_settings_top_pady,
+            "tab_row": audio_tab_row,
+            "tab_top_pady": audio_tab_top_pady,
+            "tab_button_manager": main_tab_button_manager,
+        },
     )
     app.audio_mode_var.set("transcribe")
     app.audio_transcribe_model.set("tiny")
@@ -3093,6 +3264,17 @@ def main():
             shutil.copy2(src, dst)
             if callable(progress_callback):
                 progress_callback(1, 1)
+                progress_callback(
+                    1,
+                    1,
+                    {
+                        "page_number": 1,
+                        "total_pages": 1,
+                        "text_count": 1,
+                        "ocr_count": 1,
+                        "lines": ["OCR: Hello OCR PDF", "text: Hello source text"],
+                    },
+                )
             return {"backend_usage": {"fake_ocr": 1}}
 
     def fake_compare_report(src, report_path, options):
@@ -3119,6 +3301,20 @@ def main():
             ocr_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(ocr_pdf)).pages)
         record("pdf_ocr_searchable", bool(ocr_pdf and ocr_pdf.exists() and "Hello OCR PDF" in ocr_text), ocr_pdf or "missing")
         record("pdf_ocr_compare_report", wait_for(lambda: compare_report.exists()), compare_report)
+        try:
+            app.update()
+        except Exception:
+            pass
+        preview_text = ""
+        try:
+            preview_text = app._fx_pdf_ocr_preview_box.get("1.0", "end")
+        except Exception:
+            preview_text = ""
+        record(
+            "pdf_ocr_realtime_preview_ui",
+            "scan.pdf" in preview_text and "Hello OCR PDF" in preview_text,
+            preview_text,
+        )
 
         ocr_single_root = root / "pdf_ocr_single"
         ocr_single_root.mkdir()

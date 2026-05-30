@@ -1499,3 +1499,107 @@
 - Boundaries:
   - No changes to `fengxi_runtime.bin`.
   - No changes to stable batch-compress or add-watermark core logic.
+
+## 2026-05-29 Speech-to-text preview roomy layout
+- Symptom: after the compact fix, the audio page still had excessive blank space above the audio card content, and the realtime preview box felt too short.
+- Cause: the base card/title layout kept large audio-page padding (`title pady=(45, 30)`, settings-frame `pady=15`) while the preview box was capped at 96px.
+- Fix:
+  - Added `_tighten_audio_tab_layout(...)` and called it from `_tighten_single_tab_layout(..., "audio")`.
+  - Audio card/title/settings now use tighter vertical spacing.
+  - Realtime transcript preview height is now 150px.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - Targeted UI probe: `height=150`, `preview_before_hint=True`, `title_pady=(22, 14)`, `settings_pady=(0, 12)`.
+  - `python smoke_test.py` passed: 14/14.
+  - `python full_debug_test.py` passed: 169/169.
+- Boundaries:
+  - No changes to `fengxi_runtime.bin`.
+  - No changes to stable batch-compress or add-watermark core logic.
+
+## 2026-05-29 Speech-to-text near-zero top spacing
+- Symptom: user still could not see the lower part of the speech-to-text page and pointed to the remaining upper blank band as the area to shrink.
+- Cause: the audio-specific layout was improved but still left nonzero card/title top spacing above the input content.
+- Fix:
+  - Audio card top padding is now effectively zero: `pady=(0, 8)`.
+  - Audio title top padding is now effectively zero: `pady=(0, 10)`.
+  - Audio settings-frame top padding remains effectively zero: `pady=(0, 12)`.
+  - Realtime preview stays at `height=150` and remains before the model hint.
+- Validation:
+  - Targeted UI probe: `card_pady=(0, 8)`, `title_pady=(0, 10)`, `settings_pady=(0, 12)`, `preview_height=150`.
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed: 14/14.
+  - `python full_debug_test.py` passed: 169/169.
+- Boundaries:
+  - No changes to `fengxi_runtime.bin`.
+  - No changes to stable batch-compress or add-watermark core logic.
+
+## 2026-05-29 Speech-to-text outer tab gap removal
+- Symptom: user screenshot showed a large purple-circled blank strip between the top file/output controls and the audio/video content card.
+- Cause: not audio-card padding. The remaining height came from `CTkTabview` reserving rows for its segmented tab buttons inside `main_panel`, even though Fengxi Toolbox uses sidebar navigation.
+- Fix:
+  - Added `_compact_main_tabview_header(app)`.
+  - It hides the internal segmented button, zeros the tabview's top reserved rows, keeps the canvas covering the full panel, and patches tab switching so the selected tab is always gridded at `row=0`, `pady=0`.
+  - Audio preview remains `height=150`.
+- Validation:
+  - Targeted UI probe: `tab_grid row=0`, `pady=0`, segmented manager empty, preview height `150`.
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed: 14/14.
+  - `python full_debug_test.py` passed: 169/169.
+- Boundaries:
+  - No changes to `fengxi_runtime.bin`.
+  - No changes to stable batch-compress or add-watermark core logic.
+## 2026-05-30 OCR realtime preview
+- Request: OCR 搜索版 PDF should have a realtime preview like the audio/video speech-to-text page.
+- Implementation:
+  - Added page-level preview payloads in `tools/fx_pdf_ocr.py` after each page is processed.
+  - Added `PdfOcrTaskCallbacks.on_page_preview` in `tools/fx_pdf_ocr_task.py`.
+  - Added `实时 OCR 预览` textbox and clear button to the PDF OCR panel.
+  - UI updates use `app.after(0, ...)` so OCR worker callbacks do not write Tk widgets directly.
+- Validation:
+  - Targeted probe: task core emitted 2 page-preview events and the last line was `OCR: page two`.
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_pdf_ocr.py tools\fx_pdf_ocr_task.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed: 14/14.
+  - `python full_debug_test.py` passed: 170/170, including `pdf_ocr_realtime_preview_ui`.
+- Boundaries:
+  - No changes to `fengxi_runtime.bin`.
+  - No changes to stable batch-compress or add-watermark core logic.
+
+## 2026-05-30 PDF OCR nav visibility fix
+- Request: user reported the OCR function disappeared from the PDF page.
+- Reproduction:
+  - Runtime UI probe showed the OCR button still existed but was outside the visible PDF left nav before the fix: OCR was below the parent panel and not mapped.
+  - After compaction, all five PDF nav buttons are visible; OCR button measured `y=222`, `height=42`, `bottom=264`, with parent height >= 300.
+- Fix:
+  - PDF mode buttons are single-line compact buttons.
+  - PDF left-nav layout tightening now uses smaller button height and padding.
+- Regression:
+  - Added `pdf_ocr_nav_button_visible` to `full_debug_test.py`.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed: 14/14.
+  - `python full_debug_test.py` passed: 171/171.
+- Boundaries:
+  - No changes to OCR backend logic.
+  - No changes to `fengxi_runtime.bin`.
+  - No changes to stable batch-compress or add-watermark core logic.
+
+## 2026-05-30 PDF encrypt password entry visibility fix
+- Request: user reported the PDF encrypt page did not show a password box.
+- Reproduction:
+  - Screenshot showed `PDF 加密 (Encrypt)` selected and the right panel only contained descriptive text.
+  - Code inspection confirmed the password entry was only in the left shared panel.
+- Fix:
+  - Added `_fx_pdf_encrypt_pwd_entry` inside the `PDF 加密` detail panel.
+  - Introduced `pdf_pwd_var` shared by both the left shared password entry and the right encrypt password entry.
+  - Kept `pdf_pwd_entry` as the active entry used by execution/history code, now pointing at the right encrypt entry.
+- Regression:
+  - Added `pdf_encrypt_password_entry_visible`.
+- Validation:
+  - Targeted UI probe passed: right encrypt entry visible and shared password value synchronized.
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed: 14/14.
+  - `python full_debug_test.py` passed: 172/172.
+- Boundaries:
+  - No changes to PDF encryption processing logic.
+  - No changes to `fengxi_runtime.bin`.
+  - No changes to stable batch-compress or add-watermark core logic.

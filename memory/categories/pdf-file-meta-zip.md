@@ -253,3 +253,49 @@
   - 先看 `tmp_ocr_diag\*.json`
   - 再看 `dist_release_ascii\fx_toolbox\_internal` 是否重新带入上述 DLL
   - 最后才回头怀疑 `tools/fx_pdf_ocr.py` 的后端选择逻辑
+## 2026-05-30 OCR realtime preview
+- Added an OCR realtime preview similar to the audio/video speech-to-text preview.
+- UI:
+  - PDF -> OCR panel now has `实时 OCR 预览` with a scrollable textbox and `清空` button.
+  - Task start clears the previous preview and shows a preparation message.
+  - Each processed page appends the source filename, page number, and up to 12 preview lines.
+- Engine/task flow:
+  - `tools/fx_pdf_ocr.py` builds page preview lines from extracted original text blocks and OCR image blocks.
+  - `ocr_pdf_to_searchable_pdf(...)` keeps the old two-argument progress callback and also emits a third payload argument after each page is processed.
+  - `tools/fx_pdf_ocr_task.py` adds `PdfOcrTaskCallbacks.on_page_preview` and forwards the page payload without moving OCR backend logic into the UI loader.
+  - `Fengxi_Toolbox.py` updates the textbox through `app.after(0, ...)` for Tk thread safety and preserves user scroll position unless already at the bottom.
+- Regression coverage:
+  - `pdf_ocr_task_module_exports` checks the new callback field exists.
+  - `pdf_ocr_realtime_preview_ui` verifies `scan.pdf`, page number, and recognized text appear in the OCR preview.
+- Validation: targeted callback probe passed, `py_compile` passed, `smoke_test.py` passed 14/14, `full_debug_test.py` passed 170/170.
+
+## 2026-05-30 PDF OCR nav visibility fix
+- Symptom: after adding OCR realtime preview, the PDF page left feature list only showed Merge/Split/Encrypt/PDF Compress; `OCR 搜索版 PDF` still existed in code but was clipped below the visible left panel.
+- Cause: the PDF mode buttons used two-line labels plus large vertical padding, so five buttons exceeded the left panel height.
+- Fix:
+  - PDF mode buttons are now compact single-line entries.
+  - `_tighten_pdf_tab_layout(...)` uses smaller button height and tighter padding for the PDF left nav.
+  - OCR backend/task logic was not changed.
+- Regression coverage:
+  - Added `pdf_ocr_nav_button_visible`, which opens the PDF tab at runtime size and asserts all five PDF mode buttons are found, mapped, at least 30px high, and inside the parent visible height.
+- Validation:
+  - Targeted UI probe: 5 buttons visible; OCR button `y=222`, `height=42`, `bottom=264`, parent height >= 300.
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 171/171.
+
+## 2026-05-30 PDF encrypt password entry visibility fix
+- Symptom: after selecting `PDF 加密 (Encrypt)`, the right detail panel only showed explanatory text and no password input field.
+- Cause: the password input remained only in the left shared PDF controls; after the PDF nav compaction, users could miss it or see it clipped depending on window height and selected mode.
+- Fix:
+  - Added a password input directly inside the `PDF 加密` right detail panel.
+  - Left shared password entry and right encrypt password entry now share `self.pdf_pwd_var`, so either visible entry writes the same password.
+  - `self.pdf_pwd_entry` points to the right encrypt entry, preserving existing task execution and queue/history snapshot code paths.
+  - PDF encryption, compression, and OCR backend/task logic were not changed.
+- Regression coverage:
+  - Added `pdf_encrypt_password_entry_visible`, which selects PDF encrypt mode, checks the right password entry is mapped, writes a probe password, and verifies the shared/active entries stay synchronized.
+- Validation:
+  - Targeted UI probe passed: right encrypt entry mapped, shared entry value synchronized, active password entry points to the visible encrypt entry.
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 172/172.

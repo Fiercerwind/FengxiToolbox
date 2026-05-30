@@ -1569,6 +1569,20 @@ class FengxiPdfOcrEngine:
                 )
         return results
 
+    @staticmethod
+    def _build_page_preview_lines(blocks, limit=12):
+        lines = []
+        for block in blocks or []:
+            text = str(block.get("text") or "").strip()
+            if not text:
+                continue
+            source = str(block.get("from") or "ocr")
+            prefix = "原文" if source == "text" else "OCR"
+            lines.append(f"{prefix}: {text}")
+            if len(lines) >= limit:
+                break
+        return lines
+
     def ocr_pdf_to_searchable_pdf(
         self,
         src,
@@ -1601,7 +1615,21 @@ class FengxiPdfOcrEngine:
                 page = source_doc[page_index]
                 images, text_blocks = self._extract_page_blocks(page, extraction_mode)
                 ocr_blocks = self._ocr_images(images) if images else []
-                builder.add_page(page_index, text_blocks + ocr_blocks)
+                page_blocks = text_blocks + ocr_blocks
+                builder.add_page(page_index, page_blocks)
+                if callable(progress_callback):
+                    progress_callback(
+                        page_index + 1,
+                        total_pages,
+                        {
+                            "page_index": page_index,
+                            "page_number": page_index + 1,
+                            "total_pages": total_pages,
+                            "text_count": len(text_blocks),
+                            "ocr_count": len(ocr_blocks),
+                            "lines": self._build_page_preview_lines(page_blocks),
+                        },
+                    )
             builder.finish()
         finally:
             source_doc.close()

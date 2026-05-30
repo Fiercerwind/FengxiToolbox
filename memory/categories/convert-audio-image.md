@@ -130,3 +130,32 @@
   - shortened the model hint while preserving the tested key phrases: `base 为默认推荐`, `tiny 最快`, `medium 准确率最高`.
 - Regression coverage: `audio_transcribe_preview_compact_layout` checks preview height stays <= 110 and preview appears before the model hint.
 - Validation: `py_compile` passed, targeted UI probe passed, `smoke_test.py` passed 14/14, `full_debug_test.py` passed 169/169.
+
+## 2026-05-29 Speech-to-text preview roomy layout
+- User reported the audio page still had too much blank space above the content and wanted the realtime preview box longer.
+- Fix:
+  - added audio-specific layout tightening in `Fengxi_Toolbox.py`;
+  - reduced the audio card title top padding from 45 to 22 and settings-frame top padding from 15 to 0;
+  - increased the realtime preview box height from 96 to 150 while keeping it before the model hint.
+- Regression coverage: `audio_transcribe_preview_roomy_layout` checks preview height stays 145-180, preview appears before the hint, and the audio title/settings top padding remain compact.
+- Validation: `py_compile` passed, targeted UI probe passed, `smoke_test.py` passed 14/14, `full_debug_test.py` passed 169/169.
+
+## 2026-05-29 Speech-to-text near-zero top spacing
+- User clarified that the blank area above the audio transcription content should be compressed to almost zero so the full lower UI fits.
+- Fix:
+  - audio card top padding is now `pady=(0, 8)`;
+  - audio card title top padding is now `pady=(0, 10)`;
+  - audio settings-frame top padding remains `pady=(0, 12)`;
+  - realtime transcript preview remains visible first and stays at `height=150`.
+- Regression coverage: `audio_transcribe_preview_roomy_layout` now also asserts `card_top_pady <= 2`, `title_top_pady <= 2`, and `settings_top_pady <= 2`.
+- Validation: targeted UI probe passed with `card_pady=(0, 8)`, `title_pady=(0, 10)`, `settings_pady=(0, 12)`, `preview_height=150`; `py_compile` passed; `smoke_test.py` passed 14/14; `full_debug_test.py` passed 169/169.
+
+## 2026-05-29 Speech-to-text outer tab gap removal
+- User screenshot showed the remaining purple-circled blank band between the top path/output bar and the audio/video card.
+- Cause: `main_panel` is a `CTkTabview`; even though navigation uses the sidebar, CustomTkinter still reserved its top segmented-button rows above the selected tab.
+- Fix:
+  - added `_compact_main_tabview_header(app)` in `Fengxi_Toolbox.py`;
+  - hides the tabview segmented button, clears the top row minsize, stretches the background canvas from row 0, and forces the selected tab to `row=0` with `pady=0`;
+  - the existing audio card/preview layout remains unchanged: preview height stays `150`.
+- Regression coverage: `audio_transcribe_preview_roomy_layout` now asserts the selected audio tab is `row=0`, `tab_top_pady <= 2`, and the tabview button manager is not `grid`.
+- Validation: targeted UI probe passed with `tab_grid row=0 pady=0`, segmented manager empty, preview height `150`; `py_compile` passed; `smoke_test.py` passed 14/14; `full_debug_test.py` passed 169/169.

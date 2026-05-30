@@ -2133,6 +2133,78 @@ def _get_sidebar_button_font(app):
     return font
 
 
+def _compact_main_tabview_header(app):
+    tabview = getattr(app, "main_panel", None)
+    if tabview is None:
+        return
+
+    try:
+        tabview._outer_spacing = 0
+        tabview._outer_button_overhang = 0
+        tabview._button_height = 0
+    except Exception:
+        pass
+
+    segmented_button = getattr(tabview, "_segmented_button", None)
+    if segmented_button is not None:
+        try:
+            segmented_button.grid_forget()
+            segmented_button.configure(height=1, width=1)
+        except Exception:
+            pass
+
+    try:
+        for row in (0, 1, 2):
+            tabview.grid_rowconfigure(row, weight=0, minsize=0)
+        tabview.grid_rowconfigure(3, weight=1, minsize=0)
+    except Exception:
+        pass
+
+    canvas = getattr(tabview, "_canvas", None)
+    if canvas is not None:
+        try:
+            canvas.grid(row=0, rowspan=4, column=0, sticky="nsew")
+        except Exception:
+            pass
+
+    if not getattr(tabview, "_fx_compact_header_patch_ready", False):
+        original_set_grid_current_tab = getattr(tabview, "_set_grid_current_tab", None)
+
+        if callable(original_set_grid_current_tab):
+            def compact_set_grid_current_tab(panel_self):
+                original_set_grid_current_tab()
+                try:
+                    current_name = getattr(panel_self, "_current_name", "")
+                    tab_dict = getattr(panel_self, "_tab_dict", {}) or {}
+                    current_tab = tab_dict.get(current_name)
+                    if current_tab is not None:
+                        current_tab.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+                except Exception:
+                    pass
+                try:
+                    segmented = getattr(panel_self, "_segmented_button", None)
+                    if segmented is not None:
+                        segmented.grid_forget()
+                except Exception:
+                    pass
+
+            try:
+                tabview._fx_original_set_grid_current_tab = original_set_grid_current_tab
+                tabview._set_grid_current_tab = types.MethodType(compact_set_grid_current_tab, tabview)
+                tabview._fx_compact_header_patch_ready = True
+            except Exception:
+                pass
+
+    try:
+        current_name = getattr(tabview, "_current_name", "")
+        tab_dict = getattr(tabview, "_tab_dict", {}) or {}
+        current_tab = tab_dict.get(current_name)
+        if current_tab is not None:
+            current_tab.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+    except Exception:
+        pass
+
+
 def _apply_shell_layout_tightening(app):
     if getattr(app, "_fx_shell_layout_tightened", False):
         return
@@ -2153,6 +2225,7 @@ def _apply_shell_layout_tightening(app):
         app.main_panel.configure(fg_color=shell_fill_color)
     except Exception:
         pass
+    _compact_main_tabview_header(app)
 
     app.top_bar.configure(height=92)
     app.btn_browse.configure(height=40, text="浏览文件/文件夹")
@@ -2343,6 +2416,10 @@ def _tighten_single_tab_layout(app, task_name):
         meta_card = children[0]
         _tighten_meta_tab_layout(meta_card)
 
+    if task_name == "audio" and children:
+        audio_card = children[0]
+        _tighten_audio_tab_layout(app, audio_card)
+
     if task_name == "zip":
         _patch_zip_tab_texts(tab)
 
@@ -2399,7 +2476,7 @@ def _tighten_pdf_tab_layout(pdf_card):
     base_children = list(base_panel.winfo_children())
     if base_children:
         try:
-            base_children[0].pack_configure(anchor="w", pady=(0, 8))
+            base_children[0].pack_configure(anchor="w", pady=(0, 4))
         except Exception:
             pass
 
@@ -2408,8 +2485,8 @@ def _tighten_pdf_tab_layout(pdf_card):
     for child in base_children[1:]:
         if isinstance(child, customtkinter.CTkButton):
             try:
-                child.configure(height=40, font=compact_button_font)
-                child.pack_configure(fill="x", pady=(0, 5))
+                child.configure(height=28, font=compact_button_font)
+                child.pack_configure(fill="x", pady=(0, 2))
             except Exception:
                 pass
         else:
@@ -2504,6 +2581,47 @@ def _tighten_meta_tab_layout(meta_card):
                     section_children[1].pack_configure(fill="x", pady=0)
                 except Exception:
                     pass
+        except Exception:
+            pass
+
+
+def _tighten_audio_tab_layout(app, audio_card):
+    try:
+        audio_card.pack_configure(padx=18, pady=(0, 8))
+    except Exception:
+        pass
+
+    sections = list(audio_card.winfo_children())
+    if sections:
+        try:
+            sections[0].pack_configure(anchor="w", padx=45, pady=(0, 10))
+        except Exception:
+            pass
+    if len(sections) > 1:
+        try:
+            sections[1].pack_configure(fill="x", padx=45, pady=(0, 12))
+        except Exception:
+            pass
+
+    settings_frame = _find_audio_settings_frame(app)
+    if settings_frame is None:
+        return
+
+    for child in settings_frame.winfo_children():
+        try:
+            if child is getattr(app, "_fx_audio_transcribe_preview_frame", None):
+                child.pack_configure(fill="x", pady=(4, 6))
+            elif child is getattr(app, "_fx_audio_transcribe_model_hint", None):
+                child.pack_configure(fill="x", pady=(2, 0))
+            else:
+                child.pack_configure(pady=(0, 6))
+        except Exception:
+            pass
+
+    preview_box = getattr(app, "_fx_audio_transcribe_preview_box", None)
+    if preview_box is not None:
+        try:
+            preview_box.configure(height=150)
         except Exception:
             pass
 
@@ -5347,6 +5465,7 @@ def _run_pdf_ocr_task(app, input_folder):
     )
     tracker = _get_active_progress_tracker(app)
     total = len(pdf_files)
+    _clear_pdf_ocr_preview(app, "实时预览：正在准备 OCR 搜索版 PDF 任务...\n")
 
     def _on_engine_ready(engine_backend_key):
         app.log(f"🛡️ [安全模式] OCR 搜索版 PDF 使用单线程稳定处理，共 {total} 个文件...")
@@ -5359,6 +5478,7 @@ def _run_pdf_ocr_task(app, input_folder):
 
     def _on_file_started(src, _dst, _index, _total):
         app.log(f"🔎 [OCR] 正在处理：{os.path.basename(src)}")
+        _set_pdf_ocr_preview_text(app, f"\n[{os.path.basename(src)}] 开始 OCR，识别内容会逐页显示在下方。\n")
         if tracker is not None:
             tracker.set_current_item(src, "OCR 准备")
             tracker.set_current_item_fraction(0.02, stage="OCR 准备", current_file=src)
@@ -5388,6 +5508,9 @@ def _run_pdf_ocr_task(app, input_folder):
         else:
             app.progress_bar.set((index + overall_fraction) / total_count)
 
+    def _on_page_preview(src, page_done, total_pages, page_payload):
+        _append_pdf_ocr_preview_page(app, src, page_done, total_pages, page_payload)
+
     def _on_file_finished(src, dst, ocr_result):
         _add_task_result_output(result, dst)
         usage_text = ", ".join(f"{key}:{value}" for key, value in sorted((ocr_result.get("backend_usage") or {}).items()))
@@ -5415,6 +5538,7 @@ def _run_pdf_ocr_task(app, input_folder):
             on_engine_ready=_on_engine_ready,
             on_file_started=_on_file_started,
             on_page_progress=_on_page_progress,
+            on_page_preview=_on_page_preview,
             on_file_finished=_on_file_finished,
             on_file_failed=_on_file_failed,
             on_file_completed=_on_file_completed,
@@ -6050,6 +6174,7 @@ def _patch_pdf_ocr_mode():
                     widget.destroy()
                 except Exception:
                     pass
+            self.pdf_pwd_var = tkinter.StringVar(value=pwd_value)
 
             content_row = customtkinter.CTkFrame(body, fg_color="transparent")
             content_row.pack(fill="both", expand=True, padx=0, pady=(4, 0))
@@ -6099,9 +6224,9 @@ def _patch_pdf_ocr_mode():
             def make_mode_button(mode, title, hint):
                 frame = customtkinter.CTkButton(
                     base_panel,
-                    text=f"{title}\n{hint}",
+                    text=title,
                     command=lambda selected=mode: select_pdf_mode(selected),
-                    height=54,
+                    height=28,
                     anchor="w",
                     corner_radius=8,
                     border_width=1,
@@ -6109,9 +6234,10 @@ def _patch_pdf_ocr_mode():
                     hover_color="#303030",
                     border_color="#44515A",
                     text_color="#DDE6EA",
-                    font=customtkinter.CTkFont(size=12),
+                    font=customtkinter.CTkFont(size=11),
                 )
-                frame.pack(fill="x", pady=(0, 7))
+                frame._fx_pdf_mode_hint = hint
+                frame.pack(fill="x", pady=(0, 2))
                 mode_buttons[mode] = frame
 
             make_mode_button("merge", merge_text, "多份合成一份")
@@ -6140,15 +6266,12 @@ def _patch_pdf_ocr_mode():
 
             self.pdf_pwd_entry = customtkinter.CTkEntry(
                 shared_panel,
+                textvariable=self.pdf_pwd_var,
                 placeholder_text=pwd_placeholder,
                 **self._get_entry_style(),
             )
             self.pdf_pwd_entry.pack(fill="x")
-            if pwd_value:
-                try:
-                    self.pdf_pwd_entry.insert(0, pwd_value)
-                except Exception:
-                    pass
+            self._fx_pdf_shared_pwd_entry = self.pdf_pwd_entry
 
             self.pdf_compress_level_var = tkinter.StringVar(value="标准")
             self.pdf_image_compress_level_var = tkinter.StringVar(value="标准")
@@ -6184,7 +6307,23 @@ def _patch_pdf_ocr_mode():
             add_panel_note(split_panel, "把每份 PDF 按页面拆成单页文件，并在结果目录中按原文件名建立子文件夹。")
 
             encrypt_panel = create_detail_panel("encrypt", "PDF 加密")
-            add_panel_note(encrypt_panel, "在左侧密码框填写打开密码后开始处理。密码框也兼容加密 PDF 的 OCR 和压缩读取。")
+            add_panel_note(encrypt_panel, "填写打开密码后开始处理。这个密码也兼容加密 PDF 的 OCR 和压缩读取。")
+            encrypt_pwd_field = customtkinter.CTkFrame(encrypt_panel, fg_color="transparent")
+            encrypt_pwd_field.pack(fill="x", padx=8, pady=(6, 10))
+            customtkinter.CTkLabel(
+                encrypt_pwd_field,
+                text="打开密码：",
+                text_color=COLOR_TEXT_SOFT,
+                font=customtkinter.CTkFont(size=11),
+            ).pack(anchor="w", pady=(0, 4))
+            self._fx_pdf_encrypt_pwd_entry = customtkinter.CTkEntry(
+                encrypt_pwd_field,
+                textvariable=self.pdf_pwd_var,
+                placeholder_text=pwd_placeholder,
+                **self._get_entry_style(),
+            )
+            self._fx_pdf_encrypt_pwd_entry.pack(fill="x")
+            self.pdf_pwd_entry = self._fx_pdf_encrypt_pwd_entry
 
             compress_panel = create_detail_panel("compress", "PDF 压缩")
             add_panel_note(compress_panel, "PDF 压缩程度控制对象清理、字体和数据流压缩；图片压缩程度控制内嵌图片的重压缩和降采样。")
@@ -6397,6 +6536,47 @@ def _patch_pdf_ocr_mode():
                 **self._get_switch_style(),
             ).pack(anchor="w", padx=8, pady=(0, 4))
 
+            ocr_preview_frame = customtkinter.CTkFrame(ocr_panel, fg_color="#202426", corner_radius=10)
+            ocr_preview_frame.pack(fill="x", padx=8, pady=(2, 6))
+            self._fx_pdf_ocr_preview_frame = ocr_preview_frame
+
+            ocr_preview_header = customtkinter.CTkFrame(ocr_preview_frame, fg_color="transparent")
+            ocr_preview_header.pack(fill="x", padx=10, pady=(8, 2))
+            customtkinter.CTkLabel(
+                ocr_preview_header,
+                text="实时 OCR 预览",
+                text_color="#E6EEF2",
+                font=customtkinter.CTkFont(size=11, weight="bold"),
+            ).pack(side="left", anchor="w")
+            customtkinter.CTkButton(
+                ocr_preview_header,
+                text="清空",
+                command=lambda target=self: _clear_pdf_ocr_preview(target),
+                height=24,
+                width=58,
+                corner_radius=7,
+                fg_color="#2A6DA8",
+                hover_color="#1F5C91",
+                text_color="#FFFFFF",
+                font=customtkinter.CTkFont(size=10),
+            ).pack(side="right")
+
+            ocr_preview_box = customtkinter.CTkTextbox(
+                ocr_preview_frame,
+                height=118,
+                wrap="word",
+                activate_scrollbars=True,
+                fg_color="#262A2C",
+                text_color="#DDE6EA",
+                border_width=0,
+                corner_radius=8,
+                font=customtkinter.CTkFont(family="Microsoft YaHei UI", size=11),
+            )
+            ocr_preview_box.pack(fill="x", padx=10, pady=(0, 10))
+            ocr_preview_box.configure(state="disabled")
+            self._fx_pdf_ocr_preview_box = ocr_preview_box
+            _clear_pdf_ocr_preview(self)
+
             customtkinter.CTkLabel(
                 ocr_panel,
                 text="说明：生成双层可搜索 PDF，保留原页面画面并叠加透明文字层；自动增强会在识别偏弱时尝试去灰底、增强对比和降噪。",
@@ -6594,6 +6774,69 @@ def _build_audio_output_path(src, input_root, output_folder, target_fmt):
 
 def _process_one_audio_file(job):
     return _audio_task_process_one_file(job, convert_audio_format, copy_file_safe, _speech_transcribe_media_file)
+
+
+def _set_pdf_ocr_preview_text(app, text, *, clear=False, force_bottom=False):
+    box = getattr(app, "_fx_pdf_ocr_preview_box", None)
+    if box is None:
+        return False
+
+    def update():
+        try:
+            should_follow = True
+            if not clear and not force_bottom:
+                try:
+                    should_follow = float(box.yview()[1]) >= 0.98
+                except Exception:
+                    should_follow = True
+            box.configure(state="normal")
+            if clear:
+                box.delete("1.0", "end")
+            box.insert("end", str(text or ""))
+            box.configure(state="disabled")
+            if clear or force_bottom or should_follow:
+                box.see("end")
+            return True
+        except Exception as exc:
+            _debug(f"pdf_ocr:preview_update_error:{exc}")
+            return False
+
+    try:
+        app.after(0, update)
+        return True
+    except Exception:
+        return bool(update())
+
+
+def _clear_pdf_ocr_preview(app, message=None):
+    text = message or "实时预览：开始 OCR 后，这里会按页显示已识别出的文字。\n"
+    return _set_pdf_ocr_preview_text(app, text, clear=True, force_bottom=True)
+
+
+def _append_pdf_ocr_preview_page(app, src, page_done, total_pages, payload):
+    payload = payload if isinstance(payload, dict) else {}
+    basename = os.path.basename(str(src or ""))
+    try:
+        page_number = int(payload.get("page_number") or page_done or 0)
+    except Exception:
+        page_number = int(page_done or 0)
+    try:
+        page_total = int(payload.get("total_pages") or total_pages or 0)
+    except Exception:
+        page_total = int(total_pages or 0)
+    lines = payload.get("lines") if isinstance(payload.get("lines"), list) else []
+    output = [f"\n[{basename}] 第 {page_number}/{page_total} 页\n"]
+    clean_lines = [str(line).strip() for line in lines if str(line or "").strip()]
+    if clean_lines:
+        for line in clean_lines[:12]:
+            output.append(f"  {line}\n")
+        if len(clean_lines) > 12:
+            output.append(f"  ... 还有 {len(clean_lines) - 12} 行未显示\n")
+    else:
+        text_count = int(payload.get("text_count") or 0)
+        ocr_count = int(payload.get("ocr_count") or 0)
+        output.append(f"  本页暂未识别到可预览文本。（原文 {text_count} 行，OCR {ocr_count} 行）\n")
+    return _set_pdf_ocr_preview_text(app, "".join(output))
 
 
 def _set_audio_transcribe_preview_text(app, text, *, clear=False, force_bottom=False):
@@ -6833,7 +7076,7 @@ def _install_audio_transcribe_ui(app):
     ).pack(side="right")
     preview_box = customtkinter.CTkTextbox(
         preview_frame,
-        height=96,
+        height=150,
         wrap="word",
         font=customtkinter.CTkFont(size=12),
     )

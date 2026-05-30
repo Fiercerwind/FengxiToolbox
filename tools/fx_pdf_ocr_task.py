@@ -34,6 +34,7 @@ class PdfOcrTaskCallbacks:
     on_engine_ready: Callable[[str], None] | None = None
     on_file_started: Callable[[str, str, int, int], None] | None = None
     on_page_progress: Callable[[str, int, int, int, int], None] | None = None
+    on_page_preview: Callable[[str, int, int, dict[str, Any]], None] | None = None
     on_file_finished: Callable[[str, str, dict[str, Any]], None] | None = None
     on_file_failed: Callable[[str, str, str, Exception], None] | None = None
     on_file_completed: Callable[[str, str, int, int], None] | None = None
@@ -151,8 +152,10 @@ def run_pdf_ocr_task_core(
                     else:
                         _call(callbacks.on_compare_report if callbacks else None, src, report_path, report_result)
 
-                def _page_progress(page_done, total_pages):
+                def _page_progress(page_done, total_pages, page_payload=None):
                     _call(callbacks.on_page_progress if callbacks else None, src, zero_index, total, page_done, total_pages)
+                    if page_payload:
+                        _call(callbacks.on_page_preview if callbacks else None, src, page_done, total_pages, page_payload)
 
                 ocr_result = engine.ocr_pdf_to_searchable_pdf(
                     src,
