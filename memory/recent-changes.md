@@ -1,5 +1,10 @@
 # 最近变更
 
+## 2026-05-30 21:35:51 | pdf
+- 摘要：PDF encrypt password entry visibility fix
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/categories/pdf-file-meta-zip.md, memory/debug-status.md
+- 说明：Added a visible password entry directly in the PDF 加密 detail panel. The left shared password entry and right encrypt entry share pdf_pwd_var, and pdf_pwd_entry points to the visible encrypt entry so execution/history paths keep working. Validation: py_compile passed, smoke_test.py 14/14, full_debug_test.py 172/172.
+
 ## 2026-05-30 01:03:15 | runtime
 - 摘要：packaged and opened OCR nav fix build
 - 文件：dist_release_ascii/fx_toolbox/fx_toolbox.exe, memory/recent-changes.md, memory/changes.jsonl
