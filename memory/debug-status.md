@@ -1603,3 +1603,122 @@
   - No changes to PDF encryption processing logic.
   - No changes to `fengxi_runtime.bin`.
   - No changes to stable batch-compress or add-watermark core logic.
+
+## 2026-05-31 ZIP smart mode root-only folder notice
+- Request: user asked why batch compression could not compress `D:\Users\CHEER\xwechat_files\wxid_3q9imbf73w2l32_f9cb\msg\file\2026-05\计量（大类）期末(1)`.
+- Reproduction:
+  - Read-only probe confirmed the folder exists and has two direct child folders but no direct files.
+  - `plan_zip_archives(..., "total")` planned 1 root archive.
+  - `plan_zip_archives(..., "recursive")` planned 4 archives.
+  - `plan_zip_archives(..., "smart_recursive")` planned 2 child-folder archives.
+- Cause:
+  - Not a path-not-found or permission issue.
+  - The target folder shape triggers smart mode's intended "only subfolders -> keep descending" behavior, so no root zip appears in the selected root folder.
+- Fix:
+  - Added ZIP pre-run plan messages in the loader layer.
+  - Smart mode now warns when the selected root has only subfolders and explains to choose `仅压缩总文件` for a single whole-folder zip.
+  - It also logs the planned output count and first output paths.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py tools\fx_zip_core.py` passed.
+  - Targeted ZIP notice probe passed.
+  - `python smoke_test.py` passed: 14/14.
+  - `python full_debug_test.py` passed: 173/173.
+- Boundaries:
+  - No changes to `tools/fx_zip_core.py` compression core.
+  - No changes to stable ZIP semantics.
+  - No project-external files were deleted or modified.
+
+## 2026-05-31 ZIP smart mode revised layer semantics and max depth
+- Request:
+  - User clarified the previous smart mode logic was wrong.
+  - New smart mode must be like recursive compression, but stop descending after a layer that contains both ordinary files and child folders.
+  - If a layer only has child folders, it must be zipped and then scanned deeper.
+  - Archive files such as existing `.zip` files are exceptions and should not block continued descent.
+  - Root package is written inside root; non-root folder packages are written to their parent.
+  - Add a shared max-depth input for recursive and smart modes.
+- Implementation:
+  - Updated `tools/fx_zip_core.py` planning semantics for `smart_recursive`.
+  - Added `max_depth` support to `plan_zip_archives`, `estimate_zip_progress_units`, and `run_zip_task`.
+  - Added `normalize_zip_max_depth`.
+  - Updated recursive/smart output placement so non-root folder packages go to their parent.
+  - Added `最多压缩层数` entry to the ZIP UI and documented the full logic on the page.
+  - Added last-settings memory for ZIP mode and max depth.
+- Read-only real-folder probe:
+  - Modified WeChat folder smart plan now has 5 packages:
+    - root package
+    - `大物C期末卷.zip`
+    - `计量（大类）期末.zip`
+    - `【处理完成】结果文件夹.zip`
+    - `新建文件夹.zip`
+  - With max depth 2, it plans only 3 packages: root + two first-level children.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_zip_core.py tools\fx_user_prefs.py full_debug_test.py` passed.
+  - Targeted ZIP write probe passed.
+  - `python smoke_test.py` passed: 14/14.
+  - `python full_debug_test.py` passed: 177/177.
+- Boundaries:
+  - This is an explicitly user-requested change to batch-compress visible behavior.
+  - No changes to batch watermark logic.
+  - No project-external files were modified or deleted; the WeChat folder was only probed read-only.
+
+## 2026-06-01 ZIP start preview and max-depth UI placement fix
+- Request:
+  - User reported ZIP start preview incorrectly showed no processable files.
+  - User also asked that `最多压缩层数` be placed on the right side rather than below.
+- Diagnosis:
+  - The ZIP core plan was valid, but the unified pre-start preview used the generic file collector before ZIP planning.
+  - Folder-based ZIP modes must count planned archive jobs, not generic collected files.
+- Fix:
+  - ZIP preview now uses `plan_zip_archives(...)` with the active mode and `max_depth`.
+  - ZIP UI places mode options on the left and max-depth settings on the right, with the full logic description below.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - Targeted probe: folder-only ZIP preview returned 2 jobs; max-depth frame is gridded in column 1.
+  - `python smoke_test.py` passed: 14/14.
+  - `python full_debug_test.py` passed: 179/179.
+- Boundaries:
+  - ZIP compression core rules were not changed in this fix.
+  - No batch-watermark logic was changed.
+
+## 2026-06-01 Batch watermark skipped-file copy option
+- Request:
+  - User wanted the existing filename-rule skip feature to optionally copy skipped files into the output folder.
+- Diagnosis:
+  - The existing skip rule filtered files out before the batch watermark runner, so skipped files disappeared from the result folder.
+  - Later watermark task routing bypassed the older `run_process` wrapper that temporarily installed the filename-rule runtime state, so the task runner now sets that runtime state directly before collecting files.
+- Fix:
+  - Added `wm_copy_skipped_var` and a visible `跳过文件复制到输出文件夹` checkbox.
+  - Added local preference persistence under `watermark.filename_skip_rule.copy_skipped` and included it in watermark last-settings.
+  - The watermark runner now copies skipped originals into the output/result folder when enabled, preserving relative paths.
+  - Result counts now include skipped-rule files in `skipped_count` and copied files in `outputs`.
+- Validation:
+  - Targeted probe: `normal.pdf` got watermarked; `FX_skip.pdf` was skipped and copied byte-for-byte.
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_user_prefs.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed: 14/14.
+  - `python full_debug_test.py` passed: 181/181.
+- Boundaries:
+  - No changes to watermark rendering core.
+  - No changes to batch compression.
+
+## 2026-06-01 Batch watermark prefix/suffix skip restoration
+- Fix: watermark filename-rule position values are normalized before execution and persistence, accepting Chinese labels (`开头`, `结尾`, `末尾`) and internal/English values (`prefix`, `suffix`, `start`, `end`), then saving canonical `开头`/`结尾`.
+- Regression:
+  - `watermark_filename_rule_position_normalization`
+  - `watermark_suffix_dash_rule_skips_files`
+- Validation:
+  - Targeted probe: `normal.pdf` was watermarked; `skip-.pdf` was skipped by `结尾` + `-` and copied byte-for-byte when copy-skipped was enabled.
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_user_prefs.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 183/183.
+- Boundaries: no changes to watermark rendering core or batch compression.
+
+## 2026-06-01 Batch watermark skip-rule UI active-panel fix
+- Fix: the filename-rule controls are now ensured on the visible/right-side watermark parameter panel, not the stale duplicate panel. The visible switch is renamed to `按文件名规则跳过`, with the controls row (`匹配位置`, marker entry, `跳过文件复制到输出文件夹`) in the same parent panel.
+- Regression:
+  - `watermark_filename_rule_controls_on_active_panel`
+- Validation:
+  - Targeted UI probe confirmed `active_same_parent=True` and exactly one marked controls row on the active panel.
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 184/184.
+- Boundaries: no changes to `tools/fx_watermark_core.py`, watermark rendering core, or batch compression.

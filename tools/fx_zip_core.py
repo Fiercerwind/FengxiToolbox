@@ -12,6 +12,16 @@ ZIP_MODE_TOTAL = "total"
 ZIP_MODE_RECURSIVE = "recursive"
 ZIP_MODE_SMART_RECURSIVE = "smart_recursive"
 ZIP_MODES = {ZIP_MODE_TOTAL, ZIP_MODE_RECURSIVE, ZIP_MODE_SMART_RECURSIVE}
+ARCHIVE_FILE_EXTS = {
+    ".zip",
+    ".rar",
+    ".7z",
+    ".tar",
+    ".gz",
+    ".bz2",
+    ".xz",
+    ".zst",
+}
 
 
 def normalize_zip_mode(mode):
@@ -21,12 +31,32 @@ def normalize_zip_mode(mode):
     return ZIP_MODE_TOTAL
 
 
-def _archive_output_for(source, mode, is_file=False):
+def normalize_zip_max_depth(value):
+    """Return a positive layer count, or None for unlimited."""
+
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        depth = int(str(value).strip())
+    except Exception:
+        return None
+    return depth if depth > 0 else None
+
+
+def _archive_output_for(source, mode, is_file=False, root_source=None):
     source = Path(source)
     if is_file:
         return source.parent / f"{source.name}_Backup.zip"
     if normalize_zip_mode(mode) == ZIP_MODE_TOTAL:
         return source / f"{source.name}_Backup.zip"
+    if root_source is not None:
+        try:
+            if source.resolve() != Path(root_source).resolve():
+                return source.parent / f"{source.name}.zip"
+        except Exception:
+            pass
     return source / f"{source.name}.zip"
 
 
@@ -44,18 +74,34 @@ def _sorted_child_files(folder):
         return []
 
 
-def plan_zip_archives(input_path, mode=ZIP_MODE_TOTAL):
+def _is_archive_file(path):
+    return Path(path).suffix.lower() in ARCHIVE_FILE_EXTS
+
+
+def _within_max_depth(depth, max_depth):
+    max_depth = normalize_zip_max_depth(max_depth)
+    return max_depth is None or depth <= max_depth
+
+
+def _can_descend(depth, max_depth):
+    max_depth = normalize_zip_max_depth(max_depth)
+    return max_depth is None or depth < max_depth
+
+
+def plan_zip_archives(input_path, mode=ZIP_MODE_TOTAL, max_depth=None):
     """Return archive jobs without touching the filesystem."""
 
     source = Path(input_path).resolve()
     mode = normalize_zip_mode(mode)
+    max_depth = normalize_zip_max_depth(max_depth)
     if source.is_file():
         return [
             {
                 "source": source,
-                "output": _archive_output_for(source, mode, is_file=True),
+                "output": _archive_output_for(source, mode, is_file=True, root_source=source),
                 "kind": "file",
                 "mode": mode,
+                "depth": 1,
             }
         ]
     if not source.is_dir():
@@ -65,53 +111,71 @@ def plan_zip_archives(input_path, mode=ZIP_MODE_TOTAL):
         return [
             {
                 "source": source,
-                "output": _archive_output_for(source, mode),
+                "output": _archive_output_for(source, mode, root_source=source),
                 "kind": "dir",
                 "mode": mode,
+                "depth": 1,
             }
         ]
 
     if mode == ZIP_MODE_RECURSIVE:
-        folders = [source]
+        folders = [(source, 1)]
         for current, dirs, _files in os.walk(source):
             dirs[:] = sorted(dirs, key=str.lower)
             current_path = Path(current)
+            try:
+                current_depth = len(current_path.relative_to(source).parts) + 1
+            except Exception:
+                current_depth = 1
+            if not _can_descend(current_depth, max_depth):
+                dirs[:] = []
+                continue
             for dirname in dirs:
-                folders.append(current_path / dirname)
+                child_depth = current_depth + 1
+                if _within_max_depth(child_depth, max_depth):
+                    folders.append((current_path / dirname, child_depth))
         return [
             {
                 "source": folder,
-                "output": _archive_output_for(folder, mode),
+                "output": _archive_output_for(folder, mode, root_source=source),
                 "kind": "dir",
                 "mode": mode,
+                "depth": depth,
             }
-            for folder in folders
+            for folder, depth in folders
+            if _within_max_depth(depth, max_depth)
         ]
 
     jobs = []
 
-    def visit(folder):
+    def visit(folder, depth=1):
+        if not _within_max_depth(depth, max_depth):
+            return
         child_dirs = _sorted_child_dirs(folder)
         child_files = _sorted_child_files(folder)
-        if child_files or not child_dirs:
-            jobs.append(
-                {
-                    "source": Path(folder),
-                    "output": _archive_output_for(folder, mode),
-                    "kind": "dir",
-                    "mode": mode,
-                }
-            )
+        meaningful_files = [item for item in child_files if not _is_archive_file(item)]
+        jobs.append(
+            {
+                "source": Path(folder),
+                "output": _archive_output_for(folder, mode, root_source=source),
+                "kind": "dir",
+                "mode": mode,
+                "depth": depth,
+            }
+        )
+        if not child_dirs or not _can_descend(depth, max_depth):
+            return
+        if meaningful_files:
             return
         for child in child_dirs:
-            visit(child)
+            visit(child, depth + 1)
 
-    visit(source)
+    visit(source, 1)
     return jobs
 
 
-def estimate_zip_progress_units(input_path, mode=ZIP_MODE_TOTAL):
-    return len(plan_zip_archives(input_path, mode))
+def estimate_zip_progress_units(input_path, mode=ZIP_MODE_TOTAL, max_depth=None):
+    return len(plan_zip_archives(input_path, mode, max_depth=max_depth))
 
 
 def _is_excluded(path, exclude_paths):
@@ -194,6 +258,7 @@ def run_zip_task(
     input_path,
     mode=ZIP_MODE_TOTAL,
     *,
+    max_depth=None,
     progress=None,
     stop_requested=None,
     log=None,
@@ -204,9 +269,11 @@ def run_zip_task(
     started_at = time.time()
     source = Path(input_path).resolve()
     mode = normalize_zip_mode(mode)
+    max_depth = normalize_zip_max_depth(max_depth)
     result = {
         "status": "unknown",
         "mode": mode,
+        "max_depth": max_depth,
         "input_path": str(source),
         "outputs": [],
         "failed_items": [],
@@ -229,7 +296,7 @@ def run_zip_task(
         )
         return result
 
-    jobs = plan_zip_archives(source, mode)
+    jobs = plan_zip_archives(source, mode, max_depth=max_depth)
     total = len(jobs)
     if total <= 0:
         result.update({"status": "skipped", "skipped_count": 1, "message": "no archive job"})

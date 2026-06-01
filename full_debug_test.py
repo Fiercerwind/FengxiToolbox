@@ -28,6 +28,7 @@ from tools.fx_user_prefs import (
     load_last_settings as load_last_settings_module,
     load_presets as load_presets_module,
     load_user_prefs as load_user_prefs_module,
+    normalize_filename_rule_position as normalize_filename_rule_position_module,
     save_last_settings_entry as save_last_settings_entry_module,
     save_output_strategy as save_output_strategy_module,
     save_preset_entry as save_preset_entry_module,
@@ -54,6 +55,7 @@ from tools.fx_watermark_core import (
 )
 from tools.fx_zip_core import (
     estimate_zip_progress_units as estimate_zip_progress_units_module,
+    normalize_zip_max_depth as normalize_zip_max_depth_module,
     normalize_zip_mode as normalize_zip_mode_module,
     plan_zip_archives as plan_zip_archives_module,
     run_zip_task as run_zip_task_module,
@@ -860,6 +862,7 @@ def main():
         enabled=True,
         position="开头",
         marker="FX",
+        copy_skipped=True,
     )
     user_prefs_payload = load_user_prefs_module(user_prefs_context)
     record(
@@ -868,8 +871,21 @@ def main():
         and get_saved_remove_wm_mode_module(user_prefs_context) == "standard"
         and get_saved_watermark_text_module(user_prefs_context) == "Line1\nLine2"
         and get_saved_watermark_filename_rule_settings_module(user_prefs_context)
-        == {"enabled": True, "position": "开头", "marker": "FX"},
+        == {"enabled": True, "position": "开头", "marker": "FX", "copy_skipped": True},
         user_prefs_payload,
+    )
+    record(
+        "watermark_filename_rule_position_normalization",
+        normalize_filename_rule_position_module("prefix", user_prefs_context) == "开头"
+        and normalize_filename_rule_position_module("start", user_prefs_context) == "开头"
+        and normalize_filename_rule_position_module("末尾", user_prefs_context) == "结尾"
+        and normalize_filename_rule_position_module("suffix", user_prefs_context) == "结尾",
+        {
+            "prefix": normalize_filename_rule_position_module("prefix", user_prefs_context),
+            "start": normalize_filename_rule_position_module("start", user_prefs_context),
+            "end_label": normalize_filename_rule_position_module("末尾", user_prefs_context),
+            "suffix": normalize_filename_rule_position_module("suffix", user_prefs_context),
+        },
     )
     saved_last_settings_entry = save_last_settings_entry_module(
         "ocr",
@@ -1039,6 +1055,7 @@ def main():
     app.wm_skip_hyphen_var.set(True)
     app.wm_skip_name_position_var.set("开头")
     app.wm_skip_name_text_var.set("AUTO")
+    app.wm_copy_skipped_var.set(True)
     app.wm_color_var.set("#336699")
     for slider_name, slider_value in (("slider_size", 66), ("slider_opacity", 0.31), ("slider_angle", 27)):
         mod._safe_named_widget_set(app, slider_name, slider_value)
@@ -1061,6 +1078,7 @@ def main():
         and auto_watermark_settings.get("wm_skip_hyphen_var") is True
         and auto_watermark_settings.get("wm_skip_name_position_var") == "开头"
         and auto_watermark_settings.get("wm_skip_name_text_var") == "AUTO"
+        and auto_watermark_settings.get("wm_copy_skipped_var") is True
         and auto_watermark_settings.get("wm_color_var") == "#336699"
         and abs(float(auto_watermark_settings.get("slider_size", 0)) - float(app.slider_size.get())) < 0.01
         and abs(float(auto_watermark_settings.get("slider_opacity", 0)) - float(app.slider_opacity.get())) < 0.01
@@ -1075,6 +1093,7 @@ def main():
     app.wm_skip_hyphen_var.set(True)
     app.wm_skip_name_position_var.set("开头")
     app.wm_skip_name_text_var.set("FX")
+    app.wm_copy_skipped_var.set(True)
     app.wm_color_var.set("#2A7FFF")
     mod._safe_named_widget_set(app, "slider_size", 72)
     mod._safe_named_widget_set(app, "slider_opacity", 0.22)
@@ -1084,6 +1103,7 @@ def main():
     mod._safe_named_widget_set(app, "wm_text", "changed")
     app.wm_range_var.set("all")
     app.wm_skip_name_text_var.set("ZZ")
+    app.wm_copy_skipped_var.set(False)
     app.wm_color_var.set("#C0C0C0")
     mod._safe_named_widget_set(app, "slider_size", 20)
     apply_ok, apply_message = mod._restore_last_settings_category(app, "watermark")
@@ -1095,6 +1115,7 @@ def main():
         and mod._read_watermark_text_widget(app) == "Preset Watermark\nCONFIDENTIAL"
         and app.wm_range_var.get() == "first"
         and app.wm_skip_name_text_var.get() == "FX"
+        and app.wm_copy_skipped_var.get() is True
         and app.wm_color_var.get() == "#2A7FFF"
         and abs(float(app.slider_size.get()) - saved_slider_size) < 0.01,
         {
@@ -1370,11 +1391,12 @@ def main():
     app.wm_skip_hyphen_var.set(True)
     app.wm_skip_name_position_var.set("开头")
     app.wm_skip_name_text_var.set("FX")
+    app.wm_copy_skipped_var.set(True)
     mod._flush_watermark_filename_rule_persistence(app)
     saved_rule = mod._get_saved_watermark_filename_rule_settings()
     record(
         "watermark_filename_rule_memory_save",
-        saved_rule == {"enabled": True, "position": "开头", "marker": "FX"},
+        saved_rule == {"enabled": True, "position": "开头", "marker": "FX", "copy_skipped": True},
         saved_rule,
     )
 
@@ -1382,6 +1404,7 @@ def main():
     reload_probe.wm_skip_hyphen_var = mod.tkinter.BooleanVar(master=app, value=False)
     reload_probe.wm_skip_name_position_var = mod.tkinter.StringVar(master=app, value="结尾")
     reload_probe.wm_skip_name_text_var = mod.tkinter.StringVar(master=app, value="-")
+    reload_probe.wm_copy_skipped_var = mod.tkinter.BooleanVar(master=app, value=False)
     reload_probe.after = app.after
     reload_probe.after_cancel = app.after_cancel
     mod._install_watermark_filename_rule_memory(reload_probe)
@@ -1389,27 +1412,164 @@ def main():
         "watermark_filename_rule_memory_load",
         reload_probe.wm_skip_hyphen_var.get()
         and reload_probe.wm_skip_name_position_var.get() == "开头"
-        and reload_probe.wm_skip_name_text_var.get() == "FX",
+        and reload_probe.wm_skip_name_text_var.get() == "FX"
+        and reload_probe.wm_copy_skipped_var.get() is True,
         {
             "enabled": reload_probe.wm_skip_hyphen_var.get(),
             "position": reload_probe.wm_skip_name_position_var.get(),
             "marker": reload_probe.wm_skip_name_text_var.get(),
+            "copy_skipped": reload_probe.wm_copy_skipped_var.get(),
         },
     )
 
     controls_row = getattr(getattr(app, "wm_skip_name_entry", None), "master", None)
     controls_row = getattr(controls_row, "master", None)
-    hint_text = ""
+    candidate_controls = []
     try:
-        hint_text = controls_row.winfo_children()[-1].cget("text")
+        stack = [getattr(app, "tab_wm", None)]
+        while stack:
+            widget = stack.pop()
+            if widget is None:
+                continue
+            if getattr(widget, "_fx_wm_filename_rule_controls", False):
+                candidate_controls.append(widget)
+            try:
+                stack.extend(widget.winfo_children())
+            except Exception:
+                pass
     except Exception:
-        hint_text = ""
+        pass
+    if controls_row not in candidate_controls and controls_row is not None:
+        candidate_controls.append(controls_row)
+
+    def collect_widget_texts(widget):
+        texts = []
+        stack = [widget]
+        while stack:
+            item = stack.pop()
+            try:
+                text = str(item.cget("text") or "")
+                if text:
+                    texts.append(text)
+            except Exception:
+                pass
+            try:
+                stack.extend(item.winfo_children())
+            except Exception:
+                pass
+        return texts
+
+    all_rule_texts = []
+    for candidate in candidate_controls:
+        all_rule_texts.extend(collect_widget_texts(candidate))
+    hint_marker = "\u7559\u7a7a\u9ed8\u8ba4"
+    hint_detail_marker = "\u4efb\u610f\u5f00\u5934\u6216\u7ed3\u5c3e\u5b57\u7b26"
+    copy_option_marker = "\u8df3\u8fc7\u6587\u4ef6\u590d\u5236\u5230\u8f93\u51fa\u6587\u4ef6\u5939"
+    hint_text = next((text for text in all_rule_texts if hint_marker in text), "")
+    copy_option_text = next((text for text in all_rule_texts if copy_option_marker in text), "")
     record(
         "watermark_filename_rule_hint_layout",
-        bool(getattr(controls_row, "_fx_wm_filename_rule_controls", False))
-        and "留空默认" in hint_text
-        and "任意开头或结尾字符" in hint_text,
-        hint_text,
+        bool(candidate_controls)
+        and hint_marker in hint_text
+        and hint_detail_marker in hint_text,
+        {"hint": hint_text, "texts": all_rule_texts},
+    )
+    record(
+        "watermark_copy_skipped_option_visible",
+        bool(candidate_controls)
+        and copy_option_marker in copy_option_text,
+        {"hint": hint_text, "copy_option": copy_option_text, "texts": all_rule_texts},
+    )
+    active_skip_switch = mod._find_watermark_skip_switch(getattr(app, "tab_wm", None))
+    active_controls_row = getattr(getattr(app, "wm_skip_name_entry", None), "master", None)
+    active_controls_row = getattr(active_controls_row, "master", None)
+    record(
+        "watermark_filename_rule_controls_on_active_panel",
+        active_skip_switch is not None
+        and active_controls_row is not None
+        and getattr(active_controls_row, "master", None) is getattr(active_skip_switch, "master", None),
+        {
+            "switch": str(active_skip_switch),
+            "controls": str(active_controls_row),
+            "switch_text": active_skip_switch.cget("text") if active_skip_switch is not None else "",
+            "controls_parent": str(getattr(active_controls_row, "master", "")),
+            "switch_parent": str(getattr(active_skip_switch, "master", "")),
+        },
+    )
+
+    wm_skip_copy_root = root / "watermark_skip_copy"
+    wm_skip_copy_root.mkdir()
+    wm_keep_pdf = wm_skip_copy_root / "normal.pdf"
+    wm_skip_pdf = wm_skip_copy_root / "FX_skip.pdf"
+    make_pdf(wm_keep_pdf, ["normal watermark target"])
+    make_pdf(wm_skip_pdf, ["skip copy target"])
+    mod._safe_named_widget_set(app, "wm_text", "SKIP COPY WATERMARK")
+    mod._safe_var_set(app, "output_strategy_var", mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["result_folder"])
+    mod._safe_var_set(app, "wm_delete_var", False)
+    mod._safe_var_set(app, "wm_convert_pdf", False)
+    mod._safe_var_set(app, "wm_skip_hyphen_var", True)
+    mod._safe_var_set(app, "wm_skip_name_position_var", "开头")
+    mod._safe_var_set(app, "wm_skip_name_text_var", "FX")
+    mod._safe_var_set(app, "wm_copy_skipped_var", True)
+    mod._safe_var_set(app, "wm_range_var", "all")
+    mod._safe_var_set(app, "wm_overwrite_var", "force")
+    app.run_process(str(wm_skip_copy_root), "watermark")
+    wm_skip_copy_result = mod._get_last_task_result(app)
+    wm_skip_copy_folder = wm_skip_copy_root / mod.RESULT_FOLDER_NAME
+    wm_skip_copied = wm_skip_copy_folder / "FX_skip.pdf"
+    wm_watermarked_outputs = [
+        Path(item)
+        for item in wm_skip_copy_result.get("outputs", [])
+        if Path(item).name != "FX_skip.pdf" and Path(item).suffix.lower() == ".pdf"
+    ]
+    record(
+        "watermark_copy_rule_skipped_files_to_result_folder",
+        wm_skip_copy_result.get("status") == "success"
+        and wm_skip_copy_result.get("success_count") == 1
+        and wm_skip_copy_result.get("skipped_count") == 1
+        and wm_skip_copied.exists()
+        and wm_skip_copied.read_bytes() == wm_skip_pdf.read_bytes()
+        and any(path.exists() and "normal" in path.name for path in wm_watermarked_outputs),
+        {
+            "result": wm_skip_copy_result,
+            "copied": str(wm_skip_copied),
+            "outputs": [str(path) for path in wm_watermarked_outputs],
+        },
+    )
+
+    wm_suffix_skip_root = root / "watermark_suffix_skip"
+    wm_suffix_skip_root.mkdir()
+    wm_suffix_keep_pdf = wm_suffix_skip_root / "normal.pdf"
+    wm_suffix_skip_pdf = wm_suffix_skip_root / "skip-.pdf"
+    make_pdf(wm_suffix_keep_pdf, ["normal suffix target"])
+    make_pdf(wm_suffix_skip_pdf, ["suffix skip target"])
+    mod._safe_named_widget_set(app, "wm_text", "SUFFIX SKIP WATERMARK")
+    mod._safe_var_set(app, "output_strategy_var", mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["result_folder"])
+    mod._safe_var_set(app, "wm_delete_var", False)
+    mod._safe_var_set(app, "wm_convert_pdf", False)
+    mod._safe_var_set(app, "wm_skip_hyphen_var", True)
+    mod._safe_var_set(app, "wm_skip_name_position_var", "结尾")
+    mod._safe_var_set(app, "wm_skip_name_text_var", "-")
+    mod._safe_var_set(app, "wm_copy_skipped_var", True)
+    mod._safe_var_set(app, "wm_range_var", "all")
+    mod._safe_var_set(app, "wm_overwrite_var", "force")
+    app.run_process(str(wm_suffix_skip_root), "watermark")
+    wm_suffix_skip_result = mod._get_last_task_result(app)
+    wm_suffix_skip_folder = wm_suffix_skip_root / mod.RESULT_FOLDER_NAME
+    wm_suffix_copied = wm_suffix_skip_folder / "skip-.pdf"
+    record(
+        "watermark_suffix_dash_rule_skips_files",
+        mod._get_watermark_filename_rule(app) == ("suffix", "-")
+        and wm_suffix_skip_result.get("status") == "success"
+        and wm_suffix_skip_result.get("success_count") == 1
+        and wm_suffix_skip_result.get("skipped_count") == 1
+        and wm_suffix_copied.exists()
+        and wm_suffix_copied.read_bytes() == wm_suffix_skip_pdf.read_bytes(),
+        {
+            "rule": mod._get_watermark_filename_rule(app),
+            "result": wm_suffix_skip_result,
+            "copied": str(wm_suffix_copied),
+        },
     )
 
     queue_root = root / "queue_probe"
@@ -3018,6 +3178,47 @@ def main():
         },
     )
 
+    mod._ensure_lazy_tab_initialized(app, "zip")
+    mod._refresh_visible_tab_layout(app, "zip")
+    record(
+        "zip_depth_control_visible",
+        getattr(app, "zip_max_depth_var", None) is not None
+        and getattr(app, "zip_max_depth_entry", None) is not None
+        and "留空=不限" in str(app.zip_max_depth_entry.cget("placeholder_text")),
+        getattr(app, "zip_max_depth_entry", None),
+    )
+    try:
+        zip_tab = getattr(app, mod.TAB_LAYOUT_ATTRS["zip"])
+        zip_card = list(zip_tab.winfo_children())[0]
+        zip_children = list(zip_card.winfo_children())
+        zip_mode_frame = zip_children[1]
+        zip_depth_frame = getattr(app, "_fx_zip_depth_frame", None)
+        zip_depth_grid = zip_depth_frame.grid_info() if zip_depth_frame is not None else {}
+        zip_mode_grid = zip_mode_frame.grid_info()
+    except Exception as exc:
+        zip_depth_grid = {"error": str(exc)}
+        zip_mode_grid = {}
+    record(
+        "zip_depth_control_on_right_side",
+        zip_depth_grid.get("column") == 1
+        and zip_mode_grid.get("column") == 0
+        and getattr(app, "_fx_zip_depth_frame", None) is not None
+        and getattr(app, "_fx_zip_depth_frame").winfo_manager() == "grid",
+        {"mode_grid": zip_mode_grid, "depth_grid": zip_depth_grid},
+    )
+
+    zip_preview_root = root / "zip_preview_subfolders_only"
+    (zip_preview_root / "child").mkdir(parents=True)
+    app.current_task = "zip"
+    app.zip_mode_var.set("smart_recursive")
+    app.zip_max_depth_var.set("")
+    zip_preview = mod._build_start_preview(app, str(zip_preview_root), "zip")
+    record(
+        "zip_start_preview_uses_zip_plan",
+        zip_preview.get("effective_count", 0) > 0,
+        zip_preview,
+    )
+
     for mode in ["total", "recursive", "smart_recursive"]:
         zroot = root / f"zip_{mode}"
         (zroot / "sub").mkdir(parents=True)
@@ -3051,6 +3252,73 @@ def main():
             "counts": zip_core_plan_counts,
             "result": zip_core_run,
         },
+    )
+
+    zip_smart_mix_root = root / "zip_smart_mix_semantics"
+    (zip_smart_mix_root / "child_a").mkdir(parents=True)
+    (zip_smart_mix_root / "child_b").mkdir()
+    (zip_smart_mix_root / "child_a" / "a.txt").write_text("a", encoding="utf-8")
+    (zip_smart_mix_root / "child_b" / "nested").mkdir()
+    (zip_smart_mix_root / "child_b" / "nested" / "deep.txt").write_text("deep", encoding="utf-8")
+    (zip_smart_mix_root / "child_b" / "nested.zip").write_text("old archive", encoding="utf-8")
+    zip_smart_mix_jobs = plan_zip_archives_module(zip_smart_mix_root, "smart_recursive")
+    zip_smart_mix_outputs = {Path(item["output"]).relative_to(zip_smart_mix_root).as_posix() for item in zip_smart_mix_jobs}
+    record(
+        "zip_smart_new_layer_semantics",
+        zip_smart_mix_outputs
+        == {
+            "zip_smart_mix_semantics.zip",
+            "child_a.zip",
+            "child_b.zip",
+            "child_b/nested.zip",
+        },
+        {"outputs": sorted(zip_smart_mix_outputs), "jobs": zip_smart_mix_jobs},
+    )
+
+    zip_depth_root = root / "zip_depth_limit"
+    (zip_depth_root / "level2" / "level3").mkdir(parents=True)
+    (zip_depth_root / "level2" / "level3" / "deep.txt").write_text("deep", encoding="utf-8")
+    recursive_depth_outputs = {
+        Path(item["output"]).relative_to(zip_depth_root).as_posix()
+        for item in plan_zip_archives_module(zip_depth_root, "recursive", max_depth=2)
+    }
+    smart_depth_outputs = {
+        Path(item["output"]).relative_to(zip_depth_root).as_posix()
+        for item in plan_zip_archives_module(zip_depth_root, "smart_recursive", max_depth=2)
+    }
+    record(
+        "zip_max_depth_recursive_and_smart",
+        normalize_zip_max_depth_module("2") == 2
+        and normalize_zip_max_depth_module("") is None
+        and recursive_depth_outputs == {"zip_depth_limit.zip", "level2.zip"}
+        and smart_depth_outputs == {"zip_depth_limit.zip", "level2.zip"}
+        and estimate_zip_progress_units_module(zip_depth_root, "smart_recursive", max_depth=2) == 2,
+        {"recursive": sorted(recursive_depth_outputs), "smart": sorted(smart_depth_outputs)},
+    )
+
+    app.zip_mode_var.set("smart_recursive")
+    app.zip_max_depth_var.set("2")
+    zip_last = mod._save_last_settings_category(app, "zip")
+    app.zip_mode_var.set("total")
+    app.zip_max_depth_var.set("")
+    zip_apply_ok, _zip_apply_message = mod._restore_last_settings_category(app, "zip")
+    record(
+        "last_settings_zip_save_restore",
+        zip_apply_ok
+        and isinstance(zip_last, dict)
+        and app.zip_mode_var.get() == "smart_recursive"
+        and app.zip_max_depth_var.get() == "2",
+        {"saved": zip_last, "mode": app.zip_mode_var.get(), "depth": app.zip_max_depth_var.get()},
+    )
+
+    zip_smart_notice_messages = mod._build_zip_plan_messages(zip_smart_mix_root, "smart_recursive", max_depth=2)
+    record(
+        "zip_smart_plan_notice",
+        any("最多压缩层数：2" in item for item in zip_smart_notice_messages)
+        and any("智能混合" in item for item in zip_smart_notice_messages)
+        and any("本次预计生成" in item for item in zip_smart_notice_messages)
+        and any("child_a.zip" in item for item in zip_smart_notice_messages),
+        zip_smart_notice_messages,
     )
 
     single_zip_src = root / "single_zip_input.txt"

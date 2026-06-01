@@ -190,10 +190,10 @@
     - `estimate_zip_progress_units(input_path, mode)`：给真进度条估算任务单位。
     - `run_zip_task(input_path, mode, progress=..., stop_requested=..., log=..., overwrite=True)`：执行压缩并返回结构化结果字典。
   - `Fengxi_Toolbox.py` 通过 `_patch_zip_core_task()` 接管 `task_type == "zip"`，继续复用现有进度追踪、日志和任务结果模型。
-  - 行为保持原语义：
+  - 历史行为（2026-05-31 已被新智能语义替换，见下方最新记录）：
     - `total`：输出 `<folder>\<folder>_Backup.zip`。
     - `recursive`：输出根目录 zip 和各级子目录 zip。
-    - `smart_recursive`：目录内有文件就打包该目录并停止向下；只有子目录无文件才继续递归。
+    - `smart_recursive`：旧逻辑为“目录内有文件就打包该目录并停止向下；只有子目录无文件才继续递归”。
     - 单文件输入：输出 `<file>.ext_Backup.zip` 到同目录。
   - 回归覆盖：`zip_core_module_semantics`、`zip_total`、`zip_recursive`、`zip_smart_recursive`、`single_file_input_zip_total`，并随全量 `full_debug_test.py` 131/131 通过。
   - 后续仍不要随意改压缩命名和 `smart_recursive` 语义；如需改，先同步说明文案和回归。
@@ -299,3 +299,84 @@
   - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
   - `python smoke_test.py` passed 14/14.
   - `python full_debug_test.py` passed 172/172.
+
+## 2026-05-31 ZIP smart mode root-only folder notice
+- Symptom: user tried to batch-compress `D:\Users\CHEER\xwechat_files\wxid_3q9imbf73w2l32_f9cb\msg\file\2026-05\计量（大类）期末(1)` and thought it could not compress.
+- Diagnosis:
+  - The target path exists and is a directory.
+  - The root directory contains only subfolders and no direct files.
+  - ZIP planning result for that folder: `total` creates 1 root package, `recursive` creates 4 packages, `smart_recursive` creates 2 child-folder packages.
+  - Therefore the most likely confusion is smart mode output location: it writes zip files inside child folders instead of creating one root zip.
+- Fix:
+  - Added `_build_zip_plan_messages(...)` in `Fengxi_Toolbox.py` before ZIP execution.
+  - It logs planned output count and first output paths.
+  - When smart mode sees a root folder with only child folders, it explicitly tells the user that child folders will be zipped separately and that `仅压缩总文件` should be used for one whole-folder zip.
+- Boundaries:
+  - Did not change `tools/fx_zip_core.py`.
+  - Did not change ZIP naming, planning, compression, or overwrite semantics.
+  - Did not touch batch watermark logic.
+- Regression:
+  - Added `zip_smart_root_only_subfolders_notice`.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py tools\fx_zip_core.py` passed.
+  - Targeted ZIP notice probe passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 173/173.
+
+## 2026-05-31 ZIP smart mode revised layer semantics and max depth
+- User-canonical smart mode rule from now on:
+  - Smart mode first behaves like recursive compression: each visited layer gets its own zip.
+  - If a layer contains both ordinary files and child folders, zip that layer and stop descending into its children.
+  - If a layer contains only child folders and no ordinary files, zip that layer and continue descending.
+  - If a layer contains archive files such as `.zip/.rar/.7z` plus child folders, those archive files do not stop descent.
+  - If root contains both ordinary files and child folders, only the root package is kept for that branch.
+- Output location rule:
+  - Root folder package is written inside the selected root folder as `<root>\<root>.zip`.
+  - Non-root folder packages are written to that folder's parent as `<parent>\<folder>.zip`.
+  - Single file input still outputs `<file>.ext_Backup.zip`.
+  - `total` still outputs `<folder>\<folder>_Backup.zip`.
+- Max depth rule:
+  - Recursive and smart modes support `max_depth`; blank/invalid/<=0 means unlimited.
+  - Root is depth 1.
+  - `max_depth=1` creates only the root package.
+  - `max_depth=2` creates the root package and first-level child-folder packages.
+- UI:
+  - ZIP page now contains a visible `最多压缩层数` entry.
+  - ZIP page description documents the new smart mode, archive-file exception, output location, max-depth semantics, and cleanup behavior.
+  - ZIP settings are included in last-settings memory: `zip_mode_var` and `zip_max_depth_var`.
+- Implementation:
+  - `tools/fx_zip_core.py` exports `normalize_zip_max_depth(...)`.
+  - `plan_zip_archives(...)`, `estimate_zip_progress_units(...)`, and `run_zip_task(...)` accept `max_depth`.
+  - `Fengxi_Toolbox.py` reads `zip_max_depth_var`, passes it into ZIP progress estimation and execution, and logs planned output paths before running.
+- Validation:
+  - Read-only probe for the modified WeChat folder now plans 5 smart archives:
+    - `计量（大类）期末(1)\计量（大类）期末(1).zip`
+    - `计量（大类）期末(1)\大物C期末卷.zip`
+    - `计量（大类）期末(1)\计量（大类）期末.zip`
+    - `计量（大类）期末(1)\计量（大类）期末\【处理完成】结果文件夹.zip`
+    - `计量（大类）期末(1)\计量（大类）期末\新建文件夹.zip`
+  - With `max_depth=2`, the same folder plans only root + first-level child packages.
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_zip_core.py tools\fx_user_prefs.py full_debug_test.py` passed.
+  - Targeted ZIP probe passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 177/177.
+
+## 2026-06-01 ZIP start preview and max-depth placement fix
+- Symptom:
+  - User saw `任务预览` warning `未找到可处理的文件，请检查输入路径或当前功能模式。` when starting batch compression.
+  - The `最多压缩层数` control was visible below the ZIP page instead of on the right side.
+- Cause:
+  - The unified start-preview layer treated ZIP as a generic file-list task and called `collect_input_files(...)`.
+  - Folder-oriented ZIP modes can validly process folders even when the generic collector finds no task-specific files, so preview could incorrectly block execution before ZIP core planning ran.
+- Fix:
+  - `_collect_preview_files(...)` now special-cases `task_type == "zip"` and uses `plan_zip_archives(normalized_input, mode, max_depth)` for preview counts.
+  - ZIP page layout now grids the existing card as: left mode selection, right max-depth settings, bottom rule description.
+  - The ZIP compression core semantics from 2026-05-31 were not changed.
+- Regression coverage:
+  - `zip_start_preview_uses_zip_plan` verifies a folder containing only child folders has a positive ZIP preview count.
+  - `zip_depth_control_on_right_side` verifies the max-depth frame is gridded in the right column.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - Targeted UI/preview probe passed: preview count 2 and depth frame column 1.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 179/179.

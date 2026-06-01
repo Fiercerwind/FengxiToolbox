@@ -242,3 +242,52 @@
 - Fix: locate the target panel by walking up from the actual `app.wm_text`, remove stale `_fx_wm_color_preview_controls` frames, and run a repair pass after main-area setup plus last-settings restore.
 - Regression: `watermark_color_preview_ui` now checks the preview frame is under the actual text panel, is packed before the textbox via `pack_slaves()`, refreshes successfully, and has no duplicate stale preview frames.
 - Validation: `python -m py_compile Fengxi_Toolbox.py full_debug_test.py`; targeted UI hierarchy probe; `python full_debug_test.py` 159/159; `python smoke_test.py` 14/14.
+
+## 2026-06-01 Batch watermark skipped-file copy option
+- Request: on top of the existing filename-rule skip feature, user needs a choice for whether skipped files should be copied into the output/result folder.
+- UI:
+  - Batch watermark filename-rule block now has `跳过文件复制到输出文件夹`.
+  - The option is saved/restored with watermark last-settings and local `watermark.filename_skip_rule.copy_skipped`.
+- Runtime behavior:
+  - Files matched by the skip rule are not watermarked.
+  - If copy is enabled, skipped originals are copied to the output folder, preserving relative folder structure.
+  - Folder input still uses `【处理完成】结果文件夹`; single/same-dir cases use that result folder for skipped copies to avoid overwriting the source.
+  - Result model counts skipped files in `skipped_count`, watermarked files in `success_count`, and includes copied skipped files in `outputs`.
+- Boundaries:
+  - Did not change `add_watermark_to_pdf`, `add_watermark_to_word`, or watermark rendering core.
+  - This is a loader/UI/task-runner extension around the existing stable batch watermark workflow.
+- Validation:
+  - Targeted probe: `normal.pdf` was watermarked, `FX_skip.pdf` was skipped and copied byte-for-byte to `【处理完成】结果文件夹`.
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_user_prefs.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 181/181.
+
+## 2026-06-01 Batch watermark prefix/suffix skip rule restoration
+- Request: restore the existing filename-rule skip choice so users can choose `开头` or `结尾/末尾` and type a marker; example `结尾` + `-` skips files whose basename ends with `-`.
+- Fix:
+  - Added loader-layer normalization for watermark filename-rule positions.
+  - Accepted values now include `开头`, `结尾`, `末尾`, `前缀`, `后缀`, `prefix`, `suffix`, `start`, and `end`.
+  - Preferences are saved back as canonical `开头` or `结尾`, so old/English/non-standard values do not silently break the rule.
+  - The `跳过文件复制到输出文件夹` option remains compatible with both prefix and suffix skips.
+- Regression:
+  - Added `watermark_filename_rule_position_normalization`.
+  - Added `watermark_suffix_dash_rule_skips_files`: `skip-.pdf` is skipped by `结尾` + `-`, copied byte-for-byte when enabled, while `normal.pdf` is watermarked.
+- Boundaries:
+  - No changes to `tools/fx_watermark_core.py`.
+  - No changes to watermark rendering core or batch compression.
+
+## 2026-06-01 Batch watermark skip-rule UI active-panel fix
+- Symptom:
+  - User screenshot showed the page still displayed the old switch `跳过文件名以 '-' 结尾的文件`, and the new prefix/suffix/marker/copy controls were not visible.
+- Cause:
+  - The watermark page can contain two similar parameter panels during loader-layer startup/layout repair.
+  - The previous UI patch inserted the filename-rule controls into the first hidden/stale panel, while the actually visible right-side parameter panel still kept the old switch.
+- Fix:
+  - Filename-rule UI lookup now targets the active/latest skip switch.
+  - During watermark layout tightening, the loader ensures the visible right-side parameter panel has the controls row and renames the switch to `按文件名规则跳过`.
+  - Added a regression that verifies the controls row and the active skip switch share the same parent panel, preventing invisible/stale-panel UI regressions.
+- Validation:
+  - Targeted UI probe: active controls row and active skip switch are in the same right-side parameter panel.
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 184/184.

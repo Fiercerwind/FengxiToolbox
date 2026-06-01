@@ -162,7 +162,9 @@ from tools.fx_watermark_core import (
 )
 from tools.fx_zip_core import (
     estimate_zip_progress_units,
+    normalize_zip_max_depth,
     normalize_zip_mode,
+    plan_zip_archives,
     run_zip_task as _zip_core_run_zip_task,
 )
 
@@ -255,13 +257,15 @@ ZIP_MODE_LABEL_TEXTS = {
 ZIP_MODE_DESCRIPTION_TEXT = (
     "功能说明：\n"
     "1. 仅压缩总文件：只在根目录生成一个包含所有内容的总压缩包。\n"
-    "2. 全层级递归：会扫描每一层文件夹，并在各自【父级目录】生成对应压缩包。\n"
-    "3. 智能混合模式：\n"
+    "2. 全层级递归：会扫描每一层文件夹；根目录包放在根目录内，其他目录包放在各自上一级。\n"
+    "3. 智能混合模式：先像递归一样每层生成压缩包，再按内容自动剪枝。\n"
     "   • 若某一层同时包含文件和子文件夹，则该层会整体打包为一个压缩包。\n"
     "   • 整体打包后，会停止继续为该层内部子文件夹单独生成压缩包。\n"
-    "   • 若某一层只有子文件夹、没有文件，则继续向下递归扫描。\n"
+    "   • 若某一层只有子文件夹、没有普通文件，则压缩这一层后继续向下递归扫描。\n"
+    "   • 若某一层只有压缩包文件和子文件夹，压缩包文件不阻止继续向下扫描。\n"
     "   • 根目录若同时包含文件和子文件夹，则会直接跳过对子文件夹的单独压缩，最终只保留根目录总包。\n"
-    "4. 自动清理：生成前会自动删除同名的旧压缩包。"
+    "4. 最多压缩层数：递归与智能模式共用；留空表示不限，1 表示只压根目录。\n"
+    "5. 自动清理：生成前会自动删除同名的旧压缩包。"
 )
 HELP_TAB_TITLE = "使用教程"
 INLINE_HELP_SECTIONS = (
@@ -367,8 +371,10 @@ INLINE_HELP_SECTIONS = (
         "批量压缩",
         (
             "仅压缩总文件：只在根目录生成一个包含所有内容的总压缩包。",
-            "全层级递归：扫描每一层文件夹，并在各自父级目录生成对应压缩包。",
-            "智能混合模式：某一层同时包含文件和子文件夹时，会整体打包该层并停止继续为内部子文件夹单独打包；若只有子文件夹则继续向下递归。",
+            "全层级递归：扫描每一层文件夹；根目录包放根目录内，其他目录包放上一级。",
+            "智能混合模式：先像递归一样每层生成压缩包；若某层同时含普通文件和子文件夹，则压该层后停止下钻。",
+            "若某层只有子文件夹，或只有压缩包文件加子文件夹，会先压这一层再继续向下扫描。",
+            "最多压缩层数：递归和智能模式共用；留空不限，1 表示只压根目录。",
             "生成前会自动删除同名旧压缩包，避免结果混乱。",
             "这是稳定区功能，除非明确要求，不应改动核心批量压缩处理逻辑。",
         ),
@@ -468,6 +474,7 @@ PRESET_CATEGORY_LABELS = {
     "pdf_compress": "PDF 压缩",
     "audio": "音频工具",
     "rename": "命名规则",
+    "zip": "批量压缩",
 }
 PRESET_CATEGORY_TO_TASK = {
     "watermark": "watermark",
@@ -475,6 +482,7 @@ PRESET_CATEGORY_TO_TASK = {
     "pdf_compress": "pdf",
     "audio": "audio",
     "rename": "file",
+    "zip": "zip",
 }
 PRESET_LABEL_TO_CATEGORY = {label: key for key, label in PRESET_CATEGORY_LABELS.items()}
 QUEUE_ERROR_MARKERS = (
@@ -2421,7 +2429,7 @@ def _tighten_single_tab_layout(app, task_name):
         _tighten_audio_tab_layout(app, audio_card)
 
     if task_name == "zip":
-        _patch_zip_tab_texts(tab)
+        _patch_zip_tab_texts(app, tab)
 
     _apply_inline_title_icons(app, tab)
 
@@ -2626,7 +2634,101 @@ def _tighten_audio_tab_layout(app, audio_card):
             pass
 
 
-def _patch_zip_tab_texts(tab):
+def _layout_zip_depth_controls(app, tab):
+    try:
+        card = list(tab.winfo_children())[0]
+    except Exception:
+        return
+    depth_frame = getattr(app, "_fx_zip_depth_frame", None)
+    if depth_frame is None:
+        return
+
+    try:
+        children = list(card.winfo_children())
+    except Exception:
+        return
+    if len(children) < 3:
+        return
+
+    title = children[0]
+    mode_frame = children[1]
+    description = children[2]
+    spacer = children[3] if len(children) > 3 and children[3] is not depth_frame else None
+
+    try:
+        for child in children:
+            try:
+                child.pack_forget()
+            except Exception:
+                pass
+            try:
+                child.grid_forget()
+            except Exception:
+                pass
+        card.grid_columnconfigure(0, weight=3)
+        card.grid_columnconfigure(1, weight=2)
+        title.grid(row=0, column=0, columnspan=2, sticky="w", padx=45, pady=(22, 14))
+        mode_frame.grid(row=1, column=0, sticky="nsew", padx=(45, 10), pady=(0, 12))
+        depth_frame.grid(row=1, column=1, sticky="nsew", padx=(10, 45), pady=(0, 12))
+        description.grid(row=2, column=0, columnspan=2, sticky="ew", padx=45, pady=(0, 10))
+        if spacer is not None:
+            spacer.grid(row=3, column=0, columnspan=2, sticky="ew", padx=45, pady=(0, 4))
+        try:
+            description.configure(wraplength=860)
+        except Exception:
+            pass
+    except Exception as exc:
+        _debug(f"zip_depth_layout_error:{exc}")
+
+
+def _ensure_zip_depth_controls(app, tab):
+    if getattr(app, "_fx_zip_depth_controls_ready", False):
+        _layout_zip_depth_controls(app, tab)
+        return
+    if getattr(app, "zip_max_depth_var", None) is None:
+        try:
+            app.zip_max_depth_var = tkinter.StringVar(master=app, value="")
+        except Exception:
+            app.zip_max_depth_var = tkinter.StringVar(value="")
+
+    try:
+        children = list(tab.winfo_children())
+    except Exception:
+        children = []
+    parent = children[0] if children else tab
+
+    frame = customtkinter.CTkFrame(parent, fg_color="#151A20", corner_radius=12)
+    frame.pack(fill="x", padx=45, pady=(0, 12))
+    frame.grid_columnconfigure(1, weight=1)
+    customtkinter.CTkLabel(
+        frame,
+        text="最多压缩层数",
+        font=("Microsoft YaHei UI", 13, "bold"),
+        text_color="#E8EDF5",
+    ).grid(row=0, column=0, sticky="w", padx=(14, 10), pady=(12, 4))
+    entry = customtkinter.CTkEntry(
+        frame,
+        textvariable=app.zip_max_depth_var,
+        placeholder_text="留空=不限，1=只压根目录",
+        height=34,
+    )
+    entry.grid(row=0, column=1, sticky="ew", padx=(0, 14), pady=(12, 4))
+    customtkinter.CTkLabel(
+        frame,
+        text="适用于“全层级递归”和“智能混合”；根目录为第 1 层，填 2 表示压根目录和第一层子文件夹。",
+        font=("Microsoft YaHei UI", 11),
+        text_color="#AEB7C4",
+        wraplength=360,
+        justify="left",
+    ).grid(row=1, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 12))
+    app.zip_max_depth_entry = entry
+    app._fx_zip_depth_frame = frame
+    app._fx_zip_depth_controls_ready = True
+    _install_zip_last_settings_memory(app)
+    _layout_zip_depth_controls(app, tab)
+
+
+def _patch_zip_tab_texts(app, tab):
     try:
         stack = list(tab.winfo_children())
     except Exception:
@@ -2653,6 +2755,7 @@ def _patch_zip_tab_texts(tab):
             stack.extend(widget.winfo_children())
         except Exception:
             pass
+    _ensure_zip_depth_controls(app, tab)
 
 
 def _refresh_visible_tab_layout(app, task_name):
@@ -2673,7 +2776,7 @@ def _refresh_visible_tab_layout(app, task_name):
     elif task_name == "meta":
         _tighten_meta_tab_layout(card)
     elif task_name == "zip":
-        _patch_zip_tab_texts(tab)
+        _patch_zip_tab_texts(app, tab)
     _apply_inline_title_icons(app, tab)
 
 
@@ -2738,6 +2841,7 @@ def _tighten_watermark_tab_layout(app, tab):
     right_panel = _find_watermark_settings_panel(app, tab, left_panel)
     if left_panel is None or right_panel is None:
         return
+    _ensure_active_watermark_filename_rule_controls(app, right_panel)
 
     try:
         left_panel.grid_configure(row=0, column=0, padx=(0, 14), pady=0, sticky="nsew")
@@ -2855,7 +2959,7 @@ def _tighten_watermark_tab_layout(app, tab):
                 pass
     if len(right_children) > 11:
         try:
-            controls_height = 56 if getattr(right_children[11], "_fx_wm_filename_rule_controls", False) else 30
+            controls_height = 82 if getattr(right_children[11], "_fx_wm_filename_rule_controls", False) else 30
             right_children[11].configure(height=controls_height)
             right_children[11].pack_propagate(False)
             right_children[11].pack_configure(fill="x", padx=24, pady=(0, 2))
@@ -4641,12 +4745,23 @@ def _build_runtime_progress_site_map(runtime_run_process):
     return site_map
 
 
-def _count_zip_progress_units(input_value, mode):
+def _get_zip_max_depth(app):
+    value = ""
+    var = getattr(app, "zip_max_depth_var", None)
+    if var is not None:
+        try:
+            value = var.get()
+        except Exception:
+            value = ""
+    return normalize_zip_max_depth(value)
+
+
+def _count_zip_progress_units(input_value, mode, max_depth=None):
     normalized = _normalize_input_path_value(input_value)
     if not normalized:
         return 0
     try:
-        return estimate_zip_progress_units(normalized, normalize_zip_mode(mode))
+        return estimate_zip_progress_units(normalized, normalize_zip_mode(mode), max_depth=max_depth)
     except Exception:
         return 1 if os.path.exists(normalized) else 0
 
@@ -4676,7 +4791,7 @@ def _estimate_progress_total_units(app, input_value, task_type):
                 mode = app.zip_mode_var.get()
             except Exception:
                 mode = ""
-        return _count_zip_progress_units(normalized, mode)
+        return _count_zip_progress_units(normalized, mode, _get_zip_max_depth(app))
 
     if task_type == "image":
         mode = _get_image_pdf_mode(app)
@@ -4902,9 +5017,45 @@ def _get_zip_mode(app):
     return normalize_zip_mode(mode)
 
 
+def _build_zip_plan_messages(input_path, mode, max_depth=None):
+    source = Path(str(input_path or "")).resolve()
+    mode = normalize_zip_mode(mode)
+    max_depth = normalize_zip_max_depth(max_depth)
+    try:
+        jobs = plan_zip_archives(source, mode, max_depth=max_depth)
+    except Exception:
+        jobs = []
+
+    messages = []
+    if mode in {"recursive", "smart_recursive"}:
+        if max_depth is None:
+            messages.append("ℹ️ [ZIP] 最多压缩层数：不限。")
+        else:
+            messages.append(f"ℹ️ [ZIP] 最多压缩层数：{max_depth} 层（根目录为第 1 层）。")
+    if mode == "smart_recursive":
+        messages.append(
+            "ℹ️ [ZIP] 智能混合：每层先生成压缩包；遇到“普通文件 + 子文件夹”的层会停止继续下钻。"
+        )
+
+    if jobs:
+        messages.append(f"📦 [ZIP] 本次预计生成 {len(jobs)} 个压缩包。")
+        preview_limit = 5
+        for job in jobs[:preview_limit]:
+            output = Path(job.get("output", ""))
+            try:
+                output_text = str(output.relative_to(source))
+            except Exception:
+                output_text = str(output)
+            messages.append(f"   → {output_text}")
+        if len(jobs) > preview_limit:
+            messages.append(f"   … 还有 {len(jobs) - preview_limit} 个压缩包未展开显示")
+    return messages
+
+
 def _run_zip_task_with_core(app, input_folder):
     normalized_input = _normalize_input_path_value(input_folder)
     mode = _get_zip_mode(app)
+    max_depth = _get_zip_max_depth(app)
     result = _get_last_task_result(app)
     if result is None:
         result = _start_task_result(app, normalized_input, "zip")
@@ -4966,10 +5117,13 @@ def _run_zip_task_with_core(app, input_folder):
             pass
 
     try:
-        log_message(f"[ZIP] mode={mode} input={normalized_input}")
+        log_message(f"[ZIP] mode={mode} max_depth={max_depth or 'unlimited'} input={normalized_input}")
+        for message in _build_zip_plan_messages(normalized_input, mode, max_depth=max_depth):
+            log_message(message)
         core_result = _zip_core_run_zip_task(
             normalized_input,
             mode,
+            max_depth=max_depth,
             progress=report_progress,
             stop_requested=lambda: bool(getattr(app, "stop_event", False)),
             log=log_message,
@@ -7162,6 +7316,53 @@ def _install_audio_last_settings_memory(app):
     app._fx_audio_last_settings_memory_ready = True
 
 
+def _schedule_zip_last_settings_persistence(app, delay_ms=350):
+    if getattr(app, "_fx_last_settings_loading", False):
+        return
+    after_id = getattr(app, "_fx_zip_last_settings_after_id", None)
+    if after_id:
+        try:
+            app.after_cancel(after_id)
+        except Exception:
+            pass
+
+    def persist(target=app):
+        try:
+            target._fx_zip_last_settings_after_id = None
+        except Exception:
+            pass
+        try:
+            if _last_settings_category_ready(target, "zip"):
+                _save_last_settings_category(target, "zip", update_active=(getattr(target, "current_task", "") == "zip"))
+        except Exception as exc:
+            _debug(f"last_settings:zip_auto_save_error:{exc}")
+
+    try:
+        app._fx_zip_last_settings_after_id = app.after(delay_ms, persist)
+    except Exception:
+        persist()
+
+
+def _install_zip_last_settings_memory(app):
+    if getattr(app, "_fx_zip_last_settings_memory_ready", False):
+        return
+
+    def changed(*_args, target=app):
+        _schedule_zip_last_settings_persistence(target)
+
+    trace_ids = []
+    for name in ("zip_mode_var", "zip_max_depth_var"):
+        var = getattr(app, name, None)
+        if not isinstance(var, tkinter.Variable):
+            continue
+        try:
+            trace_ids.append((name, var.trace_add("write", changed)))
+        except Exception:
+            pass
+    app._fx_zip_last_settings_trace_ids = trace_ids
+    app._fx_zip_last_settings_memory_ready = True
+
+
 def _patch_audio_transcribe_ui():
     try:
         original_init_audio_ui = FengxiToolboxApp.init_audio_ui
@@ -7228,6 +7429,7 @@ def _iter_widget_tree(widget):
 
 
 def _find_watermark_skip_switch(root_widget):
+    candidate = None
     for widget in _iter_widget_tree(root_widget):
         if not isinstance(widget, customtkinter.CTkSwitch):
             continue
@@ -7235,11 +7437,9 @@ def _find_watermark_skip_switch(root_widget):
             label = str(widget.cget("text") or "")
         except Exception:
             continue
-        if "-" not in label:
-            continue
-        if "文件名" in label or "结尾" in label:
-            return widget
-    return None
+        if ("文件名" in label and "跳过" in label) or ("-" in label and "结尾" in label):
+            candidate = widget
+    return candidate
 
 
 def _get_option_menu_style(combo_style):
@@ -7261,6 +7461,139 @@ def _get_option_menu_style(combo_style):
         "anchor",
     }
     return {key: value for key, value in dict(combo_style or {}).items() if key in allowed_keys}
+
+
+def _create_watermark_filename_rule_controls(app, controls_parent, option_menu_style=None):
+    if controls_parent is None:
+        return None
+    if getattr(app, "wm_skip_name_position_var", None) is None:
+        app.wm_skip_name_position_var = tkinter.StringVar(value="结尾")
+    if getattr(app, "wm_skip_name_text_var", None) is None:
+        app.wm_skip_name_text_var = tkinter.StringVar(value="-")
+    if getattr(app, "wm_copy_skipped_var", None) is None:
+        app.wm_copy_skipped_var = tkinter.BooleanVar(value=False)
+
+    option_menu_style = dict(option_menu_style or {})
+    controls_row = customtkinter.CTkFrame(
+        controls_parent,
+        height=82,
+        fg_color="transparent",
+    )
+    controls_row._fx_wm_filename_rule_controls = True
+    try:
+        controls_row.pack_propagate(False)
+    except Exception:
+        pass
+
+    fields_row = customtkinter.CTkFrame(controls_row, fg_color="transparent", height=30)
+    fields_row.pack(fill="x", pady=(0, 2))
+
+    customtkinter.CTkLabel(
+        fields_row,
+        text="匹配位置",
+        text_color=globals().get("COLOR_TEXT_SOFT"),
+        font=customtkinter.CTkFont(size=11),
+        height=30,
+    ).pack(side="left", padx=(0, 8))
+
+    customtkinter.CTkOptionMenu(
+        fields_row,
+        variable=app.wm_skip_name_position_var,
+        values=["结尾", "开头"],
+        width=82,
+        height=30,
+        **option_menu_style,
+    ).pack(side="left", padx=(0, 8))
+
+    app.wm_skip_name_entry = customtkinter.CTkEntry(
+        fields_row,
+        width=126,
+        height=30,
+        textvariable=app.wm_skip_name_text_var,
+        placeholder_text="-",
+    )
+    app.wm_skip_name_entry.pack(side="left", fill="x", expand=True, padx=(0, 0))
+
+    customtkinter.CTkLabel(
+        controls_row,
+        text='留空默认 “-”，可填写任意开头或结尾字符',
+        text_color=globals().get("COLOR_TEXT_SOFT"),
+        font=customtkinter.CTkFont(size=11),
+        height=18,
+        anchor="w",
+    ).pack(anchor="w", fill="x")
+    customtkinter.CTkCheckBox(
+        controls_row,
+        text="跳过文件复制到输出文件夹",
+        variable=app.wm_copy_skipped_var,
+        height=22,
+        font=customtkinter.CTkFont(size=11),
+    ).pack(anchor="w", fill="x", pady=(1, 0))
+    return controls_row
+
+
+def _ensure_active_watermark_filename_rule_controls(app, right_panel=None):
+    try:
+        skip_switch = _find_watermark_skip_switch(getattr(app, "tab_wm", None))
+    except Exception:
+        skip_switch = None
+    controls_parent = right_panel or (getattr(skip_switch, "master", None) if skip_switch is not None else None)
+    if controls_parent is None:
+        return None
+
+    active_controls = None
+    try:
+        for child in controls_parent.winfo_children():
+            if getattr(child, "_fx_wm_filename_rule_controls", False):
+                active_controls = child
+                break
+    except Exception:
+        active_controls = None
+
+    if skip_switch is not None:
+        try:
+            skip_switch.configure(text="按文件名规则跳过")
+        except Exception:
+            pass
+
+    if active_controls is None:
+        combo_style = {}
+        try:
+            combo_style = app._get_combo_style()
+        except Exception:
+            combo_style = {}
+        active_controls = _create_watermark_filename_rule_controls(
+            app,
+            controls_parent,
+            _get_option_menu_style(combo_style),
+        )
+        if active_controls is not None:
+            try:
+                active_controls.pack(fill="x", padx=24, pady=(0, 2))
+            except Exception:
+                pass
+    try:
+        _install_watermark_filename_rule_memory(app)
+    except Exception:
+        pass
+    return active_controls
+
+
+def _normalize_watermark_filename_rule_mode(value):
+    text = str(value or "").strip().lower()
+    if text in ("prefix", "start", "starts_with", "startswith"):
+        return "prefix"
+    if text in ("suffix", "end", "ends_with", "endswith"):
+        return "suffix"
+    if "开头" in text or "起始" in text or "前缀" in text:
+        return "prefix"
+    if "结尾" in text or "末尾" in text or "后缀" in text:
+        return "suffix"
+    return "suffix"
+
+
+def _watermark_filename_rule_mode_to_label(mode):
+    return "开头" if mode == "prefix" else "结尾"
 
 
 def _get_watermark_filename_rule(app):
@@ -7288,8 +7621,18 @@ def _get_watermark_filename_rule(app):
 
     if not marker_text:
         marker_text = "-"
-    mode = "prefix" if mode_label == "开头" else "suffix"
+    mode = _normalize_watermark_filename_rule_mode(mode_label)
     return mode, marker_text
+
+
+def _get_watermark_copy_skipped_to_output(app):
+    var = getattr(app, "wm_copy_skipped_var", None)
+    if var is None:
+        return False
+    try:
+        return bool(var.get())
+    except Exception:
+        return False
 
 
 def _watermark_filename_matches_rule(name_no_ext, mode, marker):
@@ -7344,6 +7687,14 @@ def _collect_preview_files(app, input_value, task_type):
     if not normalized_input:
         return []
     try:
+        if task_type == "zip":
+            mode = _get_zip_mode(app)
+            max_depth = _get_zip_max_depth(app)
+            return [
+                str(job.get("source") or "")
+                for job in plan_zip_archives(normalized_input, mode, max_depth=max_depth)
+                if job.get("source")
+            ]
         if task_type == "pdf":
             all_files = app.collect_input_files(normalized_input, "pdf")
             return [item for item in all_files if str(item).lower().endswith(".pdf")]
@@ -7729,6 +8080,7 @@ def _save_watermark_filename_rule_settings(app):
     skip_var = getattr(app, "wm_skip_hyphen_var", None)
     mode_var = getattr(app, "wm_skip_name_position_var", None)
     marker_var = getattr(app, "wm_skip_name_text_var", None)
+    copy_var = getattr(app, "wm_copy_skipped_var", None)
     if skip_var is None and mode_var is None and marker_var is None:
         return
 
@@ -7745,8 +8097,9 @@ def _save_watermark_filename_rule_settings(app):
     try:
         if mode_var is not None:
             raw_position = str(mode_var.get() or "").strip()
-            if raw_position in ("开头", "结尾"):
-                position = raw_position
+            position = _watermark_filename_rule_mode_to_label(
+                _normalize_watermark_filename_rule_mode(raw_position)
+            )
     except Exception:
         position = "结尾"
 
@@ -7756,11 +8109,19 @@ def _save_watermark_filename_rule_settings(app):
     except Exception:
         marker = "-"
 
+    copy_skipped = False
+    try:
+        if copy_var is not None:
+            copy_skipped = bool(copy_var.get())
+    except Exception:
+        copy_skipped = False
+
     _prefs_save_watermark_filename_rule_settings(
         _user_prefs_context(),
         enabled=enabled,
         position=position,
         marker=marker,
+        copy_skipped=copy_skipped,
     )
 
 
@@ -7804,6 +8165,7 @@ def _install_watermark_filename_rule_memory(app):
     skip_var = getattr(app, "wm_skip_hyphen_var", None)
     mode_var = getattr(app, "wm_skip_name_position_var", None)
     marker_var = getattr(app, "wm_skip_name_text_var", None)
+    copy_var = getattr(app, "wm_copy_skipped_var", None)
 
     saved = _get_saved_watermark_filename_rule_settings()
     try:
@@ -7811,9 +8173,15 @@ def _install_watermark_filename_rule_memory(app):
         if "enabled" in saved and skip_var is not None:
             skip_var.set(bool(saved["enabled"]))
         if "position" in saved and mode_var is not None:
-            mode_var.set(saved["position"])
+            mode_var.set(
+                _watermark_filename_rule_mode_to_label(
+                    _normalize_watermark_filename_rule_mode(saved["position"])
+                )
+            )
         if "marker" in saved and marker_var is not None:
             marker_var.set(saved["marker"])
+        if "copy_skipped" in saved and copy_var is not None:
+            copy_var.set(bool(saved["copy_skipped"]))
     except Exception as exc:
         _debug(f"wm_filename_rule_memory:load_error:{exc}")
     finally:
@@ -7825,7 +8193,7 @@ def _install_watermark_filename_rule_memory(app):
     def on_focus_out(_event=None, target=app):
         _flush_watermark_filename_rule_persistence(target)
 
-    for var in (skip_var, mode_var, marker_var):
+    for var in (skip_var, mode_var, marker_var, copy_var):
         try:
             if var is not None:
                 var.trace_add("write", on_var_change)
@@ -7947,12 +8315,13 @@ def _patch_watermark_filename_rule_ui():
         try:
             self.wm_skip_name_position_var = tkinter.StringVar(value="结尾")
             self.wm_skip_name_text_var = tkinter.StringVar(value="-")
+            self.wm_copy_skipped_var = tkinter.BooleanVar(value=False)
 
             skip_switch = _find_watermark_skip_switch(getattr(self, "tab_wm", None))
             controls_parent = getattr(skip_switch, "master", None) if skip_switch is not None else None
             controls_row = customtkinter.CTkFrame(
                 controls_parent if controls_parent is not None else self.tab_wm,
-                height=56,
+                height=82,
                 fg_color="transparent",
             )
             controls_row._fx_wm_filename_rule_controls = True
@@ -8014,6 +8383,13 @@ def _patch_watermark_filename_rule_ui():
                 height=18,
                 anchor="w",
             ).pack(anchor="w", fill="x")
+            customtkinter.CTkCheckBox(
+                controls_row,
+                text="跳过文件复制到输出文件夹",
+                variable=self.wm_copy_skipped_var,
+                height=22,
+                font=customtkinter.CTkFont(size=11),
+            ).pack(anchor="w", fill="x", pady=(1, 0))
             _install_watermark_filename_rule_memory(self)
         except Exception as exc:
             _debug(f"patch_watermark_filename_rule:init_ui_error:{exc}")
@@ -8026,6 +8402,10 @@ def _patch_watermark_filename_rule_ui():
 
         rule = getattr(self, "_fx_wm_filename_rule_runtime", None)
         if not rule:
+            try:
+                self._fx_wm_filename_rule_skipped_files = []
+            except Exception:
+                pass
             return files
 
         mode, marker = rule
@@ -8044,11 +8424,20 @@ def _patch_watermark_filename_rule_ui():
 
         if skipped_files:
             try:
+                self._fx_wm_filename_rule_skipped_files = list(skipped_files)
+            except Exception:
+                pass
+            try:
                 direction = "开头" if mode == "prefix" else "结尾"
                 preview = ", ".join(os.path.basename(item) for item in skipped_files[:5])
                 if len(skipped_files) > 5:
                     preview = f"{preview} 等 {len(skipped_files)} 个文件"
                 self.log(f"⏭️ [智能水印] 已跳过文件名{direction}为“{marker}”的文件：{preview}")
+            except Exception:
+                pass
+        else:
+            try:
+                self._fx_wm_filename_rule_skipped_files = []
             except Exception:
                 pass
         return filtered_files
@@ -8073,6 +8462,7 @@ def _patch_watermark_filename_rule_ui():
         previous_rule_loading = getattr(self, "_fx_wm_filename_rule_loading", False)
         try:
             self._fx_wm_filename_rule_runtime = rule
+            self._fx_wm_filename_rule_skipped_files = []
             if skip_var is not None:
                 try:
                     self._fx_wm_filename_rule_loading = True
@@ -8831,6 +9221,43 @@ def _watermark_convert_ppt_to_pdf(src, raw_pdf, ppt_app):
     return _convert_ppt_to_pdf_safely(ppt_app, str(src), str(raw_pdf))
 
 
+def _copy_watermark_skipped_files(app, skipped_files, input_root, output_root, actual_strategy, logs, result):
+    if not skipped_files or not _get_watermark_copy_skipped_to_output(app):
+        return [], []
+
+    copy_root = Path(output_root)
+    if actual_strategy in {"same_dir", "overwrite"}:
+        copy_root = Path(input_root) / RESULT_FOLDER_NAME
+    copy_root.mkdir(parents=True, exist_ok=True)
+
+    copied = []
+    failed = []
+    for item in skipped_files:
+        src = Path(_normalize_input_path_value(item))
+        try:
+            if not src.exists() or not src.is_file():
+                raise FileNotFoundError(str(src))
+            try:
+                rel = src.relative_to(Path(input_root))
+            except Exception:
+                rel = Path(src.name)
+            dst = copy_root / rel
+            if dst.resolve() == src.resolve():
+                _watermark_log(app, logs, f"[批量水印] 跳过文件已在输出位置，无需复制: {src.name}")
+                copied.append(str(dst))
+                _add_task_result_output(result, str(dst))
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(src), str(dst))
+            copied.append(str(dst))
+            _add_task_result_output(result, str(dst))
+            _watermark_log(app, logs, f"[批量水印] 已复制跳过文件: {src.name} -> {dst}")
+        except Exception as exc:
+            failed.append(str(src))
+            _watermark_log(app, logs, f"[批量水印] 复制跳过文件失败: {src.name} | {exc}")
+    return copied, failed
+
+
 def _run_watermark_task(app, input_value):
     normalized_input = _normalize_input_path_value(input_value)
     is_single_input = bool(normalized_input and os.path.isfile(normalized_input))
@@ -8853,21 +9280,54 @@ def _run_watermark_task(app, input_value):
     except Exception:
         pass
 
-    all_files = list(app.collect_input_files(normalized_input, "watermark"))
+    filename_rule = _get_watermark_filename_rule(app)
+    previous_runtime_rule = getattr(app, "_fx_wm_filename_rule_runtime", None)
+    previous_skipped_files = getattr(app, "_fx_wm_filename_rule_skipped_files", None)
+    skip_var = getattr(app, "wm_skip_hyphen_var", None)
+    previous_skip_value = None
+    restore_skip_value = False
+    previous_rule_loading = getattr(app, "_fx_wm_filename_rule_loading", False)
+    try:
+        app._fx_wm_filename_rule_runtime = filename_rule
+        app._fx_wm_filename_rule_skipped_files = []
+        if filename_rule and skip_var is not None:
+            try:
+                app._fx_wm_filename_rule_loading = True
+                previous_skip_value = skip_var.get()
+                skip_var.set(False)
+                restore_skip_value = True
+            except Exception as exc:
+                _debug(f"watermark_task:disable_builtin_skip_error:{exc}")
+        all_files = list(app.collect_input_files(normalized_input, "watermark"))
+        rule_skipped_files = list(getattr(app, "_fx_wm_filename_rule_skipped_files", []) or [])
+    finally:
+        app._fx_wm_filename_rule_runtime = previous_runtime_rule
+        if previous_skipped_files is not None and not getattr(app, "_fx_wm_filename_rule_skipped_files", None):
+            app._fx_wm_filename_rule_skipped_files = previous_skipped_files
+        if restore_skip_value and skip_var is not None:
+            try:
+                skip_var.set(previous_skip_value)
+            except Exception:
+                pass
+        app._fx_wm_filename_rule_loading = previous_rule_loading
     total = len(all_files)
-    if total <= 0:
+    if total <= 0 and not rule_skipped_files:
         _watermark_log(app, logs, "[批量水印] 未找到可处理文件")
         _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=1)
         _set_task_result_finished(result, "skipped", message="未找到可处理文件", detail="未找到可处理文件", skipped=True)
         return result
 
-    if actual_strategy == "result_folder":
+    if actual_strategy == "result_folder" or (rule_skipped_files and _get_watermark_copy_skipped_to_output(app)):
         os.makedirs(output_root, exist_ok=True)
 
     _watermark_log(app, logs, f"[批量水印] 将处理 {total} 个文件 | 输出策略：{_get_output_strategy_label(actual_strategy)}")
+    if rule_skipped_files:
+        copy_hint = "会复制到输出文件夹" if _get_watermark_copy_skipped_to_output(app) else "仅跳过不复制"
+        _watermark_log(app, logs, f"[批量水印] 文件名规则跳过 {len(rule_skipped_files)} 个文件 | {copy_hint}")
     success_outputs = []
     failed_items = []
     skipped_items = []
+    copied_skipped_outputs = []
     processed_count = 0
     word_app = None
     ppt_app = None
@@ -9036,6 +9496,20 @@ def _run_watermark_task(app, input_value):
                     fraction=processed_count / max(1, total),
                 )
 
+        if rule_skipped_files:
+            copied_skipped, failed_copies = _copy_watermark_skipped_files(
+                app,
+                rule_skipped_files,
+                input_root,
+                output_root,
+                actual_strategy,
+                logs,
+                result,
+            )
+            copied_skipped_outputs.extend(copied_skipped)
+            skipped_items.extend(str(Path(_normalize_input_path_value(item))) for item in rule_skipped_files)
+            failed_items.extend(failed_copies)
+
         if failed_items:
             report_root = Path(output_root if actual_strategy == "result_folder" else input_root)
             report_root.mkdir(parents=True, exist_ok=True)
@@ -9052,7 +9526,7 @@ def _run_watermark_task(app, input_value):
         result["failed_items"] = list(failed_items)
         _set_task_result_counts(
             result,
-            processed=processed_count,
+            processed=processed_count + len(rule_skipped_files),
             success=len(success_outputs),
             failed=len(failed_items),
             skipped=len(skipped_items),
@@ -9067,7 +9541,7 @@ def _run_watermark_task(app, input_value):
                 detail=f"批量水印失败 {len(failed_items)} 个文件",
                 error=f"failed_items={len(failed_items)}",
             )
-        elif success_outputs:
+        elif success_outputs or copied_skipped_outputs:
             _set_task_result_finished(result, "success", message="批量水印完成", detail="批量水印完成")
         else:
             _set_task_result_finished(result, "skipped", message="没有生成新的水印文件", detail="没有生成新的水印文件", skipped=True)
@@ -9250,6 +9724,8 @@ def _get_current_preset_category(app):
         return "rename"
     if task_type == "watermark":
         return "watermark"
+    if task_type == "zip":
+        return "zip"
     return "watermark"
 
 
@@ -9318,6 +9794,7 @@ def _capture_preset_settings(app, category=None):
                 "wm_skip_hyphen_var": bool(_safe_var_get(app, "wm_skip_hyphen_var", False)),
                 "wm_skip_name_position_var": _safe_var_get(app, "wm_skip_name_position_var", "结尾"),
                 "wm_skip_name_text_var": _safe_var_get(app, "wm_skip_name_text_var", "-"),
+                "wm_copy_skipped_var": bool(_safe_var_get(app, "wm_copy_skipped_var", False)),
                 "wm_color_var": _get_watermark_color(app),
                 "slider_size": _safe_named_widget_get(app, "slider_size", 60),
                 "slider_opacity": _safe_named_widget_get(app, "slider_opacity", 0.08),
@@ -9381,6 +9858,13 @@ def _capture_preset_settings(app, category=None):
                 "rename_rep": _safe_named_widget_get(app, "rename_rep", ""),
                 "rename_cut_head": _safe_named_widget_get(app, "rename_cut_head", ""),
                 "rename_cut_tail": _safe_named_widget_get(app, "rename_cut_tail", ""),
+            }
+        )
+    elif category == "zip":
+        settings.update(
+            {
+                "zip_mode_var": _safe_var_get(app, "zip_mode_var", "total"),
+                "zip_max_depth_var": _safe_var_get(app, "zip_max_depth_var", ""),
             }
         )
     return settings
@@ -9452,7 +9936,7 @@ def _apply_preset_settings(app, preset, switch_task=True):
                 _safe_var_set(app, name, settings.get(name))
         if "wm_color_var" in settings:
             _set_watermark_color(app, settings.get("wm_color_var"))
-        for name in ("allow_simsun", "wm_delete_var", "wm_convert_pdf", "wm_skip_hyphen_var"):
+        for name in ("allow_simsun", "wm_delete_var", "wm_convert_pdf", "wm_skip_hyphen_var", "wm_copy_skipped_var"):
             if name in settings:
                 _safe_var_set(app, name, bool(settings.get(name)))
         for name in ("slider_size", "slider_opacity", "slider_angle"):
@@ -9534,6 +10018,9 @@ def _apply_preset_settings(app, preset, switch_task=True):
         _safe_var_set(app, "rename_type_var", settings.get("rename_type_var", "add"))
         for name in ("rename_prefix", "rename_suffix", "rename_find", "rename_rep", "rename_cut_head", "rename_cut_tail"):
             _safe_named_widget_set(app, name, settings.get(name, ""))
+    elif category == "zip":
+        _safe_var_set(app, "zip_mode_var", settings.get("zip_mode_var", "total"))
+        _safe_var_set(app, "zip_max_depth_var", settings.get("zip_max_depth_var", ""))
     else:
         return False, "暂不支持该设置类型。"
 
@@ -9563,6 +10050,8 @@ def _last_settings_category_ready(app, category):
         return getattr(app, "audio_mode_var", None) is not None
     if category == "rename":
         return getattr(app, "rename_type_var", None) is not None and getattr(app, "rename_prefix", None) is not None
+    if category == "zip":
+        return getattr(app, "zip_mode_var", None) is not None and getattr(app, "zip_max_depth_var", None) is not None
     return False
 
 
@@ -9583,6 +10072,8 @@ def _get_current_last_settings_category(app):
             return "rename"
     if task_type == "audio":
         return "audio"
+    if task_type == "zip":
+        return "zip"
     return None
 
 
@@ -9655,6 +10146,7 @@ def _install_watermark_last_settings_memory(app):
         "wm_skip_hyphen_var",
         "wm_skip_name_position_var",
         "wm_skip_name_text_var",
+        "wm_copy_skipped_var",
         "wm_color_var",
         "output_strategy_var",
     )

@@ -25,6 +25,22 @@ class UserPrefsContext:
     debug: Callable[[str], None] | None = None
 
 
+def normalize_filename_rule_position(value: Any, context: UserPrefsContext) -> str:
+    normalized = str(value or "").strip()
+    lowered = normalized.lower()
+    if lowered in ("prefix", "start", "starts_with", "startswith"):
+        return "开头"
+    if lowered in ("suffix", "end", "ends_with", "endswith"):
+        return "结尾"
+    if "开头" in normalized or "起始" in normalized or "前缀" in normalized:
+        return "开头"
+    if "结尾" in normalized or "末尾" in normalized or "后缀" in normalized:
+        return "结尾"
+    if normalized in context.filename_rule_positions:
+        return normalized
+    return "结尾"
+
+
 def _debug(context: UserPrefsContext, message: str) -> None:
     try:
         if callable(context.debug):
@@ -145,12 +161,15 @@ def get_saved_watermark_filename_rule_settings(context: UserPrefsContext) -> dic
         saved["enabled"] = bool(settings.get("enabled"))
 
     position = settings.get("position")
-    if isinstance(position, str) and position in context.filename_rule_positions:
-        saved["position"] = position
+    if isinstance(position, str):
+        saved["position"] = normalize_filename_rule_position(position, context)
 
     marker = settings.get("marker")
     if isinstance(marker, str):
         saved["marker"] = marker
+
+    if "copy_skipped" in settings:
+        saved["copy_skipped"] = bool(settings.get("copy_skipped"))
     return saved
 
 
@@ -160,10 +179,9 @@ def save_watermark_filename_rule_settings(
     enabled: Any = False,
     position: Any = "结尾",
     marker: Any = "-",
+    copy_skipped: Any = False,
 ) -> None:
-    normalized_position = str(position or "").strip()
-    if normalized_position not in context.filename_rule_positions:
-        normalized_position = "结尾"
+    normalized_position = normalize_filename_rule_position(position, context)
 
     prefs = load_user_prefs(context)
     watermark_prefs = prefs.get("watermark")
@@ -174,6 +192,7 @@ def save_watermark_filename_rule_settings(
         "enabled": bool(enabled),
         "position": normalized_position,
         "marker": str(marker or ""),
+        "copy_skipped": bool(copy_skipped),
     }
     prefs["watermark"] = watermark_prefs
     save_user_prefs(prefs, context)
@@ -265,6 +284,8 @@ def get_active_last_settings_category(task_name: Any, context: UserPrefsContext)
         return "rename" if "rename" in last_settings else None
     if normalized_task == "watermark":
         return "watermark" if "watermark" in last_settings else None
+    if normalized_task == "zip":
+        return "zip" if "zip" in last_settings else None
     return None
 
 
