@@ -291,3 +291,45 @@
   - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
   - `python smoke_test.py` passed 14/14.
   - `python full_debug_test.py` passed 184/184.
+
+## 2026-06-01 Batch watermark skip-rule adjacent layout fix
+- Symptom:
+  - User screenshot showed `按文件名规则跳过` was visible, but its related controls (`匹配位置`, marker entry, copy skipped checkbox) were separated below font, compatibility, PDF-convert, and slider controls.
+- Fix:
+  - The active filename-rule controls row is now explicitly packed immediately after the active skip switch.
+  - Watermark layout tightening now treats the filename-rule controls row by marker, not by fragile child index, so slider/font compaction no longer moves it away.
+- Regression:
+  - Added `watermark_filename_rule_controls_below_switch`, asserting the controls row is exactly the next packed widget after the active skip switch.
+- Validation:
+  - Targeted UI probe: switch index `3`, controls index `4`, adjacent `True`.
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 185/185.
+
+## 2026-06-01 Batch watermark output-path failure isolation
+- Symptom: a folder batch could stop halfway with [批量水印] 严重错误: [WinError 3] when a nested output path could not be created, especially suspicious paths with trailing spaces in a folder name.
+- Rule going forward: batch watermark task-runner/output-path failures must be per-file failures, not whole-task crashes. Continue processing remaining files and write a failed-file report when possible.
+- Implementation: _run_watermark_task now catches target parent creation failures before processing each file and records them in ailed_items; skipped-file copy root and failure report creation also log graceful failures.
+- Regression: watermark_output_path_failure_does_not_abort_batch.
+- Do not fix this by changing 	ools/fx_watermark_core.py; this is an output planning/task-runner resilience issue, not watermark rendering.
+
+## 2026-06-01 Batch watermark progress bar sync
+- Symptom: batch watermark bottom status text could show real progress while the blue progress bar did not move.
+- Rule going forward: watermark task progress updates must update both progress_bar.set(fraction) and _set_progress_status(...); do not update status text alone.
+- Implementation: _watermark_update_progress(...) is the watermark runner helper for synchronized progress updates.
+- Regression: watermark_progress_bar_syncs_with_status.
+- Boundaries: do not fix this by editing watermark rendering core; this is a loader/UI progress synchronization issue.
+
+## 2026-06-01 Watermark core modification rule update
+- New user instruction: watermark rendering core is no longer an absolute no-touch area.
+- It may be modified when necessary, including 	ools/fx_watermark_core.py, but must preserve stable processing behavior, output rules, skip rules, color/preview settings, Word/PDF compatibility, and task result semantics unless the user explicitly asks for behavior changes.
+- Any core change must include regression coverage and validation notes. Prefer minimal, explainable patches over broad rewrites.
+- This supersedes older notes saying not to touch watermark rendering core except for modularization.
+
+## 2026-06-01 Batch watermark trailing-space directory output fix
+- Symptom: real batch run failed at [WinError 3] under a result path containing a source directory segment with trailing space, e.g. 系解人体结构神经系统资料试卷 .
+- Root cause: result-folder output mirrored source relative directories verbatim; Windows may reject path segments ending with spaces or dots when creating/accessing nested directories.
+- Fix: _watermark_safe_relative_parent(...) now sanitizes each relative directory segment for result-folder outputs by stripping trailing spaces/dots. _copy_watermark_skipped_files(...) applies the same sanitization to copied skipped files.
+- Important: do not rename or delete source files/folders. Only generated result-folder paths are normalized for Windows safety.
+- Regressions: watermark_result_path_strips_trailing_space_dirs, watermark_output_path_failure_does_not_abort_batch, watermark_progress_bar_syncs_with_status.
+- Validation: smoke_test 14/14; full_debug_test 188/188.

@@ -2884,6 +2884,10 @@ def _tighten_watermark_tab_layout(app, tab):
             pass
 
     right_children = list(right_panel.winfo_children())
+    filename_rule_controls = next(
+        (child for child in right_children if getattr(child, "_fx_wm_filename_rule_controls", False)),
+        None,
+    )
     for child in right_children:
         try:
             current = child.pack_info()
@@ -2920,19 +2924,24 @@ def _tighten_watermark_tab_layout(app, tab):
     for index in (3, 5, 6, 7):
         if index < len(right_children):
             try:
+                if right_children[index] is filename_rule_controls:
+                    continue
                 right_children[index].configure(height=30)
                 right_children[index].pack_configure(anchor="w", padx=24, pady=(0, 1))
             except Exception:
                 pass
     if len(right_children) > 4:
         try:
-            right_children[4].configure(height=38)
-            right_children[4].pack_configure(fill="x", padx=24, pady=(0, 2))
+            if right_children[4] is not filename_rule_controls:
+                right_children[4].configure(height=38)
+                right_children[4].pack_configure(fill="x", padx=24, pady=(0, 2))
         except Exception:
             pass
     for index in (8, 9, 10):
         if index < len(right_children):
             try:
+                if right_children[index] is filename_rule_controls:
+                    continue
                 right_children[index].configure(height=36)
                 right_children[index].pack_propagate(False)
                 right_children[index].pack_configure(fill="x", padx=24, pady=(0, 1))
@@ -2957,7 +2966,14 @@ def _tighten_watermark_tab_layout(app, tab):
                         pass
             except Exception:
                 pass
-    if len(right_children) > 11:
+    if filename_rule_controls is not None:
+        try:
+            filename_rule_controls.configure(height=82)
+            filename_rule_controls.pack_propagate(False)
+            filename_rule_controls.pack_configure(fill="x", padx=24, pady=(0, 3))
+        except Exception:
+            pass
+    elif len(right_children) > 11:
         try:
             controls_height = 82 if getattr(right_children[11], "_fx_wm_filename_rule_controls", False) else 30
             right_children[11].configure(height=controls_height)
@@ -7572,6 +7588,19 @@ def _ensure_active_watermark_filename_rule_controls(app, right_panel=None):
                 active_controls.pack(fill="x", padx=24, pady=(0, 2))
             except Exception:
                 pass
+    if active_controls is not None and skip_switch is not None:
+        try:
+            pack_info = active_controls.pack_info()
+        except Exception:
+            pack_info = {}
+        try:
+            if str(pack_info.get("after", "")) != str(skip_switch):
+                active_controls.pack_forget()
+                active_controls.pack(after=skip_switch, fill="x", padx=24, pady=(0, 3))
+            else:
+                active_controls.pack_configure(fill="x", padx=24, pady=(0, 3))
+        except Exception:
+            pass
     try:
         _install_watermark_filename_rule_memory(app)
     except Exception:
@@ -8824,6 +8853,17 @@ def _watermark_relative_parent(src_path, input_root):
         return Path()
 
 
+def _watermark_safe_relative_parent(src_path, input_root):
+    rel_parent = _watermark_relative_parent(src_path, input_root)
+    safe_parts = []
+    for part in rel_parent.parts:
+        safe = str(part).strip().rstrip(" .")
+        if not safe:
+            safe = _sanitize_filename_component(part, fallback="folder")
+        safe_parts.append(safe)
+    return Path(*safe_parts) if safe_parts else Path()
+
+
 def _build_watermark_output_path(src, input_root, output_root, strategy, *, convert_to_pdf=False, single_input=False):
     src_path = Path(src)
     input_root_path = Path(input_root)
@@ -8835,7 +8875,7 @@ def _build_watermark_output_path(src, input_root, output_root, strategy, *, conv
         return str(src_path)
 
     if strategy == "result_folder":
-        target_dir = output_root_path / _watermark_relative_parent(src_path, input_root_path)
+        target_dir = output_root_path / _watermark_safe_relative_parent(src_path, input_root_path)
         target_name = src_path.name if output_suffix.lower() == src_path.suffix.lower() else f"{src_path.stem}{output_suffix}"
         return str(target_dir / target_name)
 
@@ -9221,6 +9261,37 @@ def _watermark_convert_ppt_to_pdf(src, raw_pdf, ppt_app):
     return _convert_ppt_to_pdf_safely(ppt_app, str(src), str(raw_pdf))
 
 
+def _watermark_format_path_error(path_value, exc):
+    message = str(exc)
+    try:
+        parts = Path(path_value).parts
+        if any(part != part.rstrip(" .") for part in parts):
+            message += " | path contains a folder/file name ending with space or dot; Windows may reject this path"
+    except Exception:
+        pass
+    return message
+
+
+def _watermark_update_progress(app, current_file="", stage="添加水印", completed=0, total=1, fraction=None):
+    progress_fraction = _clamp_progress_value(
+        completed / max(1, total) if fraction is None else fraction
+    )
+    progress_bar = getattr(app, "progress_bar", None)
+    if progress_bar is not None:
+        try:
+            progress_bar.set(progress_fraction)
+        except Exception:
+            pass
+    return _set_progress_status(
+        app,
+        current_file=current_file,
+        stage=stage,
+        completed=completed,
+        total=total,
+        fraction=progress_fraction,
+    )
+
+
 def _copy_watermark_skipped_files(app, skipped_files, input_root, output_root, actual_strategy, logs, result):
     if not skipped_files or not _get_watermark_copy_skipped_to_output(app):
         return [], []
@@ -9228,7 +9299,12 @@ def _copy_watermark_skipped_files(app, skipped_files, input_root, output_root, a
     copy_root = Path(output_root)
     if actual_strategy in {"same_dir", "overwrite"}:
         copy_root = Path(input_root) / RESULT_FOLDER_NAME
-    copy_root.mkdir(parents=True, exist_ok=True)
+    try:
+        copy_root.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        failed = [str(Path(_normalize_input_path_value(item))) for item in skipped_files]
+        _watermark_log(app, logs, f"[批量水印] 复制跳过文件失败: {copy_root} | {_watermark_format_path_error(copy_root, exc)}")
+        return [], failed
 
     copied = []
     failed = []
@@ -9241,6 +9317,7 @@ def _copy_watermark_skipped_files(app, skipped_files, input_root, output_root, a
                 rel = src.relative_to(Path(input_root))
             except Exception:
                 rel = Path(src.name)
+            rel = Path(*[str(part).strip().rstrip(" .") or _sanitize_filename_component(part, fallback="folder") for part in rel.parts])
             dst = copy_root / rel
             if dst.resolve() == src.resolve():
                 _watermark_log(app, logs, f"[批量水印] 跳过文件已在输出位置，无需复制: {src.name}")
@@ -9372,7 +9449,20 @@ def _run_watermark_task(app, input_value):
                     single_input=is_single_input,
                 )
             )
-            target_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+            except Exception as exc:
+                failed_items.append(str(src))
+                processed_count += 1
+                _watermark_log(app, logs, f"[批量水印] 失败: {src.name} | 输出路径准备失败: {_watermark_format_path_error(target_path.parent, exc)}")
+                _watermark_update_progress(
+                    app,
+                    current_file=str(src),
+                    stage="添加水印",
+                    completed=processed_count,
+                    total=total,
+                )
+                continue
             output_path = target_path
             stage_dir = None
             stage_path = target_path
@@ -9396,18 +9486,30 @@ def _run_watermark_task(app, input_value):
                         single_input=True,
                     )
                 )
-                target_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                except Exception as exc:
+                    failed_items.append(str(src))
+                    processed_count += 1
+                    _watermark_log(app, logs, f"[批量水印] 失败: {src.name} | 输出路径准备失败: {_watermark_format_path_error(target_path.parent, exc)}")
+                    _watermark_update_progress(
+                        app,
+                        current_file=str(src),
+                        stage="添加水印",
+                        completed=processed_count,
+                        total=total,
+                    )
+                    continue
                 output_path = target_path
                 stage_path = target_path
                 _watermark_log(app, logs, f"[批量水印] {src.name} 转 PDF 后扩展名变化，已改为同目录新文件输出")
 
-            _set_progress_status(
+            _watermark_update_progress(
                 app,
                 current_file=str(src),
                 stage="添加水印",
                 completed=index - 1,
                 total=total,
-                fraction=(index - 1) / max(1, total),
             )
             try:
                 if suffix in WATERMARK_PDF_EXTS:
@@ -9487,13 +9589,12 @@ def _run_watermark_task(app, input_value):
                         shutil.rmtree(stage_dir, ignore_errors=True)
                     except Exception:
                         pass
-                _set_progress_status(
+                _watermark_update_progress(
                     app,
                     current_file=str(src),
                     stage="添加水印",
                     completed=processed_count,
                     total=total,
-                    fraction=processed_count / max(1, total),
                 )
 
         if rule_skipped_files:
@@ -9512,7 +9613,12 @@ def _run_watermark_task(app, input_value):
 
         if failed_items:
             report_root = Path(output_root if actual_strategy == "result_folder" else input_root)
-            report_root.mkdir(parents=True, exist_ok=True)
+            try:
+                report_root.mkdir(parents=True, exist_ok=True)
+            except Exception as exc:
+                _watermark_log(app, logs, f"[批量水印] 失败清单写入失败: {report_root} | {_watermark_format_path_error(report_root, exc)}")
+                report_root = Path(input_root)
+                report_root.mkdir(parents=True, exist_ok=True)
             report_path = report_root / "!失败文件清单.txt"
             lines = ["以下文件处理失败："]
             for item in failed_items:

@@ -1,5 +1,30 @@
 # 最近变更
 
+## 2026-06-02 00:01:45 | watermark
+- 摘要：Batch watermark handles trailing-space source directories and syncs progress bar
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory\categories\watermark-and-remove.md, memory\debug-status.md
+- 说明：Sanitized result-folder relative path segments for watermark outputs and copied skipped files so Windows trailing-space directories no longer cause WinError 3. Completed progress-bar synchronization via _watermark_update_progress. Added regressions watermark_result_path_strips_trailing_space_dirs and watermark_progress_bar_syncs_with_status. smoke_test 14/14 and full_debug_test 188/188 passed.
+
+## 2026-06-01 23:53:07 | project-rules
+- 摘要：Watermark and compression cores may be modified with stability guardrails
+- 文件：agent.md, memory\debug-status.md, memory\categories\watermark-and-remove.md, memory\categories\pdf-file-meta-zip.md
+- 说明：Updated project instructions: watermark/compression rendering/core logic is no longer an absolute no-touch area, but changes must preserve processing stability, compatibility, output semantics, and include regression validation.
+
+## 2026-06-01 23:20:21 | watermark
+- 摘要：Batch watermark bad output paths no longer abort whole run
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory\categories\watermark-and-remove.md, memory\debug-status.md
+- 说明：Moved output parent mkdir failures into per-file failure handling, guarded skipped-copy root creation and failure report writes, added regression watermark_output_path_failure_does_not_abort_batch. smoke_test 14/14 and full_debug_test 186/186 passed.
+
+## 2026-06-01 22:37:55 | runtime
+- 摘要：packaged and opened adjacent watermark skip-rule layout build
+- 文件：dist_release_ascii\fx_toolbox\fx_toolbox.exe
+- 说明：Release build completed after placing batch watermark filename-rule controls directly below the skip switch. Started dist_release_ascii\\fx_toolbox\\fx_toolbox.exe successfully with PID 40032. PyInstaller optional pycparser/AppKit warnings were non-blocking.
+
+## 2026-06-01 22:34:27 | watermark
+- 摘要：keep watermark filename skip controls below switch
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory\categories\watermark-and-remove.md, memory\debug-status.md
+- 说明：Fixed batch watermark skip-rule UI order so match-position, marker entry, and copy-skipped checkbox are packed directly below 按文件名规则跳过. Added adjacent-layout regression. Validation: py_compile, targeted UI probe, smoke_test 14/14, full_debug_test 185/185.
+
 ## 2026-06-01 08:33:43 | runtime
 - 摘要：packaged and opened visible watermark skip-rule UI build
 - 文件：dist_release_ascii\fx_toolbox\fx_toolbox.exe

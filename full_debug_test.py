@@ -1483,6 +1483,12 @@ def main():
     active_skip_switch = mod._find_watermark_skip_switch(getattr(app, "tab_wm", None))
     active_controls_row = getattr(getattr(app, "wm_skip_name_entry", None), "master", None)
     active_controls_row = getattr(active_controls_row, "master", None)
+    active_pack_slaves = []
+    try:
+        if active_skip_switch is not None:
+            active_pack_slaves = list(active_skip_switch.master.pack_slaves())
+    except Exception:
+        active_pack_slaves = []
     record(
         "watermark_filename_rule_controls_on_active_panel",
         active_skip_switch is not None
@@ -1494,6 +1500,24 @@ def main():
             "switch_text": active_skip_switch.cget("text") if active_skip_switch is not None else "",
             "controls_parent": str(getattr(active_controls_row, "master", "")),
             "switch_parent": str(getattr(active_skip_switch, "master", "")),
+        },
+    )
+    record(
+        "watermark_filename_rule_controls_below_switch",
+        active_skip_switch in active_pack_slaves
+        and active_controls_row in active_pack_slaves
+        and active_pack_slaves.index(active_controls_row) == active_pack_slaves.index(active_skip_switch) + 1,
+        {
+            "switch_index": active_pack_slaves.index(active_skip_switch) if active_skip_switch in active_pack_slaves else None,
+            "controls_index": active_pack_slaves.index(active_controls_row) if active_controls_row in active_pack_slaves else None,
+            "order": [
+                {
+                    "class": child.__class__.__name__,
+                    "text": child.cget("text") if hasattr(child, "cget") and "text" in getattr(child, "_keys", set()) else "",
+                    "rule_controls": bool(getattr(child, "_fx_wm_filename_rule_controls", False)),
+                }
+                for child in active_pack_slaves
+            ],
         },
     )
 
@@ -1570,6 +1594,97 @@ def main():
             "result": wm_suffix_skip_result,
             "copied": str(wm_suffix_copied),
         },
+    )
+
+    wm_bad_path_root = root / "watermark_bad_output_path"
+    wm_bad_path_root.mkdir()
+    wm_bad_first = wm_bad_path_root / "bad.pdf"
+    wm_bad_second = wm_bad_path_root / "good.pdf"
+    make_pdf(wm_bad_first, ["bad output path"])
+    make_pdf(wm_bad_second, ["good output path"])
+    mod._safe_named_widget_set(app, "wm_text", "BAD PATH WATERMARK")
+    mod._safe_var_set(app, "output_strategy_var", mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["result_folder"])
+    mod._safe_var_set(app, "wm_delete_var", False)
+    mod._safe_var_set(app, "wm_convert_pdf", False)
+    mod._safe_var_set(app, "wm_skip_hyphen_var", False)
+    mod._safe_var_set(app, "wm_range_var", "all")
+    mod._safe_var_set(app, "wm_overwrite_var", "force")
+    original_wm_output_path = mod._build_watermark_output_path
+
+    def fake_wm_output_path(src, input_root, output_root, strategy, convert_to_pdf=False, single_input=False):
+        src_path = Path(src)
+        if src_path.name == "bad.pdf":
+            return str(Path(output_root) / "bad\0parent" / src_path.name)
+        return original_wm_output_path(src, input_root, output_root, strategy, convert_to_pdf=convert_to_pdf, single_input=single_input)
+
+    mod._build_watermark_output_path = fake_wm_output_path
+    try:
+        app.run_process(str(wm_bad_path_root), "watermark")
+    finally:
+        mod._build_watermark_output_path = original_wm_output_path
+    wm_bad_path_result = mod._get_last_task_result(app)
+    wm_bad_path_logs = list(getattr(app, "_fx_last_task_logs", []) or [])
+    record(
+        "watermark_output_path_failure_does_not_abort_batch",
+        wm_bad_path_result.get("failed_count") == 1
+        and wm_bad_path_result.get("success_count") == 1
+        and wm_bad_path_result.get("processed_count") == 2
+        and any("输出路径准备失败" in str(item) for item in wm_bad_path_logs)
+        and not any("严重错误" in str(item) for item in wm_bad_path_logs),
+        {"result": wm_bad_path_result, "logs": wm_bad_path_logs[-8:]},
+    )
+
+    wm_trailing_space_src = Path("D:/probe/root/医学药学公卫资料试卷/系解人体结构神经系统资料试卷 /人体结构神经系统系解复习资料/试题.pdf")
+    wm_trailing_space_out = Path(
+        mod._build_watermark_output_path(
+            wm_trailing_space_src,
+            "D:/probe/root",
+            "D:/probe/root/【处理完成】结果文件夹",
+            "result_folder",
+        )
+    )
+    record(
+        "watermark_result_path_strips_trailing_space_dirs",
+        "系解人体结构神经系统资料试卷 " not in wm_trailing_space_out.parts
+        and "系解人体结构神经系统资料试卷" in wm_trailing_space_out.parts
+        and wm_trailing_space_out.name == "试题.pdf",
+        str(wm_trailing_space_out),
+    )
+
+    wm_progress_values = []
+    original_progress_bar = getattr(app, "progress_bar", None)
+
+    class WatermarkProgressProbe:
+        def set(self, value):
+            wm_progress_values.append(round(float(value), 4))
+
+    app.progress_bar = WatermarkProgressProbe()
+    wm_progress_root = root / "watermark_progress_sync"
+    wm_progress_root.mkdir()
+    wm_progress_a = wm_progress_root / "a.pdf"
+    wm_progress_b = wm_progress_root / "b.pdf"
+    make_pdf(wm_progress_a, ["progress a"])
+    make_pdf(wm_progress_b, ["progress b"])
+    mod._safe_named_widget_set(app, "wm_text", "PROGRESS WATERMARK")
+    mod._safe_var_set(app, "output_strategy_var", mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["result_folder"])
+    mod._safe_var_set(app, "wm_delete_var", False)
+    mod._safe_var_set(app, "wm_convert_pdf", False)
+    mod._safe_var_set(app, "wm_skip_hyphen_var", False)
+    mod._safe_var_set(app, "wm_range_var", "all")
+    mod._safe_var_set(app, "wm_overwrite_var", "force")
+    try:
+        app.run_process(str(wm_progress_root), "watermark")
+    finally:
+        app.progress_bar = original_progress_bar
+    wm_progress_result = mod._get_last_task_result(app)
+    record(
+        "watermark_progress_bar_syncs_with_status",
+        wm_progress_result.get("status") == "success"
+        and wm_progress_values
+        and wm_progress_values[0] == 0.0
+        and wm_progress_values[-1] == 1.0
+        and any(0.0 < value < 1.0 for value in wm_progress_values),
+        {"values": wm_progress_values, "result": wm_progress_result},
     )
 
     queue_root = root / "queue_probe"

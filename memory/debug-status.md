@@ -1722,3 +1722,46 @@
   - `python smoke_test.py` passed 14/14.
   - `python full_debug_test.py` passed 184/184.
 - Boundaries: no changes to `tools/fx_watermark_core.py`, watermark rendering core, or batch compression.
+
+## 2026-06-01 Batch watermark skip-rule adjacent layout fix
+- Fix: the filename-rule controls row is now packed immediately after the active `按文件名规则跳过` switch. Layout tightening uses the `_fx_wm_filename_rule_controls` marker instead of assuming child index 11, so the controls no longer drift below font/sliders.
+- Regression:
+  - `watermark_filename_rule_controls_below_switch`
+- Validation:
+  - Targeted UI probe confirmed switch index `3`, controls index `4`, adjacent `True`.
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 185/185.
+- Boundaries: no changes to `tools/fx_watermark_core.py`, watermark rendering core, or batch compression.
+
+## 2026-06-01 Batch watermark output-path failure isolation
+- Request: batch watermark stopped mid-run with WinError 3 when creating a nested output path under a directory whose name appeared to end with a space.
+- Diagnosis: the watermark task runner created target output parent directories before the per-file try/except, so one bad nested path escaped to the outer patched_run_process handler and logged a whole-task severe error.
+- Fix: output parent directory creation is now isolated per file; failures are logged as that file's failure and the remaining files continue. Copy-skipped root creation and failure-report writing also now fail gracefully with path diagnostics.
+- Regression: watermark_output_path_failure_does_not_abort_batch verifies one bad output path fails while the next PDF still succeeds and no severe error is logged.
+- Validation: python -m py_compile Fengxi_Toolbox.py full_debug_test.py; python smoke_test.py passed 14/14; python full_debug_test.py passed 186/186.
+- Boundaries: no changes to tools/fx_watermark_core.py, watermark rendering core, batch compression, or project-external files.
+
+## 2026-06-01 Batch watermark progress bar sync
+- Request: user screenshot showed batch watermark status text advancing (e.g. file 2088/6713, total 31%) while the blue progress bar stayed near zero.
+- Diagnosis: loader-layer _run_watermark_task(...) updated only _set_progress_status(...), which changes the bottom status text but does not call progress_bar.set(...).
+- Fix: added _watermark_update_progress(...) to update both the CTk progress bar and progress status text from the same fraction, and routed all watermark runner progress updates through it.
+- Regression: watermark_progress_bar_syncs_with_status verifies a batch watermark run pushes progress bar values from 0.0 through an intermediate value to 1.0.
+- Validation: python -m py_compile Fengxi_Toolbox.py full_debug_test.py; python smoke_test.py passed 14/14; python full_debug_test.py passed 187/187.
+- Boundaries: no changes to 	ools/fx_watermark_core.py, watermark rendering core, batch compression, or project-external files.
+
+## 2026-06-01 Core modification rule update
+- User instruction: future work no longer has a forced prohibition on touching watermark or compression rendering/core logic.
+- New rule: watermark/compression cores may be modified when needed, but stability of processing logic and existing functionality is the highest priority.
+- Required practice: before touching these cores, identify impact scope and prefer minimal patches; after touching them, add/update regression coverage and run at least smoke tests, plus full or targeted workflow tests when behavior/output semantics are involved.
+- Updated gent.md from absolute stable-zone wording to 稳定核心修改规则.
+- This instruction supersedes older memory notes that said core logic must not be touched except for modularization.
+
+## 2026-06-01 Batch watermark trailing-space path fix and progress sync
+- Request: user asked whether the previous progress fix was complete, then asked to re-check [批量水印] 严重错误: [WinError 3] for a path containing 系解人体结构神经系统资料试卷  with a trailing space.
+- Diagnosis: the earlier isolation fix stopped one bad path from aborting the whole batch, but Windows can still reject creating/accessing output directories whose path segments end with spaces or dots. The specific failing path had a source folder segment ending in a space, which was mirrored into the result folder.
+- Fix: watermark result-folder relative directory mapping now sanitizes each relative path segment by stripping trailing spaces/dots before creating the output path. Skipped-file copy uses the same safe relative path logic.
+- Also completed the prior progress-bar fix: watermark runner now updates progress_bar.set(...) and status text from the same fraction via _watermark_update_progress(...).
+- Regression: watermark_result_path_strips_trailing_space_dirs, watermark_output_path_failure_does_not_abort_batch, and watermark_progress_bar_syncs_with_status.
+- Validation: python -m py_compile Fengxi_Toolbox.py full_debug_test.py; python smoke_test.py passed 14/14; python full_debug_test.py passed 188/188.
+- Behavior note: source folders/files are not renamed; only the generated result-folder path is made Windows-safe.

@@ -380,3 +380,9 @@
   - Targeted UI/preview probe passed: preview count 2 and depth frame column 1.
   - `python smoke_test.py` passed 14/14.
   - `python full_debug_test.py` passed 179/179.
+
+## 2026-06-01 Compression core modification rule update
+- New user instruction: batch compression/PDF compression cores are no longer absolute no-touch areas.
+- 	ools/fx_zip_core.py and 	ools/fx_pdf_compress_core.py may be modified when necessary, but must preserve stable processing behavior, output placement, archive naming, smart/recursive semantics, max-depth behavior, PDF/image compression options, and task result semantics unless the user explicitly asks for behavior changes.
+- Any core change must include regression coverage and validation notes. Prefer minimal, explainable patches over broad rewrites.
+- This supersedes older notes saying compression business/core code should not be changed by default.
