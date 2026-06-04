@@ -159,3 +159,11 @@
   - the existing audio card/preview layout remains unchanged: preview height stays `150`.
 - Regression coverage: `audio_transcribe_preview_roomy_layout` now asserts the selected audio tab is `row=0`, `tab_top_pady <= 2`, and the tabview button manager is not `grid`.
 - Validation: targeted UI probe passed with `tab_grid row=0 pady=0`, segmented manager empty, preview height `150`; `py_compile` passed; `smoke_test.py` passed 14/14; `full_debug_test.py` passed 169/169.
+
+## 2026-06-03 Convert/Audio/Image Resume Rules
+- Image PDF task resume lives in `tools/fx_image_pdf_task.py` and is controlled by `ImagePdfTaskOptions.resume=True`.
+- Existing image-to-PDF outputs and existing merge-PDF outputs are reused and counted as success + skipped.
+- Audio task resume lives in `tools/fx_audio_task.py`; existing converted/copied outputs are skipped.
+- Speech-to-text skips existing transcript outputs for the requested format (`txt`, `srt`, or `txt+srt`) and counts them as success + skipped.
+- Ordinary conversion/image paths that still flow through `process_single_file` are also covered by the generic resume wrapper in `Fengxi_Toolbox.py`.
+- Delete-source behavior must not run for resumed items; deletion is only allowed after fresh successful processing.

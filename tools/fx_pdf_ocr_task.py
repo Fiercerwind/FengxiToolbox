@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from tools.fx_pdf_ocr import FengxiPdfOcrEngine, write_pdf_ocr_comparison_report
+from tools.fx_resume import is_nonempty_file
 
 
 @dataclass
@@ -116,6 +117,24 @@ def run_pdf_ocr_task_core(
         return result
 
     Path(output_folder).mkdir(parents=True, exist_ok=True)
+    completed_before_start = [
+        (src, build_pdf_ocr_output_path(src, input_root, output_folder))
+        for src in files
+        if is_nonempty_file(build_pdf_ocr_output_path(src, input_root, output_folder))
+    ]
+    if len(completed_before_start) == total:
+        for zero_index, (src, dst) in enumerate(completed_before_start):
+            _call(callbacks.on_file_started if callbacks else None, src, dst, zero_index, total)
+            result["outputs"].append(dst)
+            result["processed_count"] += 1
+            result["success_count"] += 1
+            result["skipped_count"] += 1
+            _call(callbacks.on_file_finished if callbacks else None, src, dst, {"resumed": True, "backend_usage": {}})
+            _call(callbacks.on_file_completed if callbacks else None, src, dst, zero_index, total)
+        result.update({"status": "success", "message": f"{result['skipped_count']} existing pdf output(s) reused"})
+        result["duration_seconds"] = round(time.time() - started_at, 4)
+        return result
+
     engine = FengxiPdfOcrEngine(
         model_root=options.model_root,
         profile_key=options.profile_key,
@@ -143,6 +162,13 @@ def run_pdf_ocr_task_core(
 
             should_count_completion = True
             try:
+                if is_nonempty_file(dst):
+                    result["success_count"] += 1
+                    result["skipped_count"] += 1
+                    result["outputs"].append(dst)
+                    _call(callbacks.on_file_finished if callbacks else None, src, dst, {"resumed": True, "backend_usage": {}})
+                    continue
+
                 if options.compare_report:
                     report_path = build_pdf_ocr_compare_report_path(src, output_folder)
                     try:

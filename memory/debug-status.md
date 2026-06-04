@@ -1765,3 +1765,51 @@
 - Regression: watermark_result_path_strips_trailing_space_dirs, watermark_output_path_failure_does_not_abort_batch, and watermark_progress_bar_syncs_with_status.
 - Validation: python -m py_compile Fengxi_Toolbox.py full_debug_test.py; python smoke_test.py passed 14/14; python full_debug_test.py passed 188/188.
 - Behavior note: source folders/files are not renamed; only the generated result-folder path is made Windows-safe.
+
+## 2026-06-03 Global Resume And Background Execution Validation
+- Request: add breakpoint/resume processing across functions and prevent long jobs from stopping when the app is in the background.
+- Implemented resume paths:
+  - generic single-file outputs: rename, meta, convert, image convert/compress, PDF encrypt, PDF split;
+  - dedicated adapters: ZIP, PDF OCR, image PDF, audio conversion/transcription, PDF compression, batch watermark, remove-watermark, PDF merge;
+  - top-level background guard wraps patched `run_process`.
+- Important bug fixed during validation: single-file remove-watermark resume must check the base `*_去水印.pdf` output. The unique output helper intentionally returns `*_去水印_2.pdf` when the base output exists, so using it for resume detection caused false misses and duplicate outputs.
+- Regressions added/verified: `resume_helper_outputs_complete`, `background_guard_wrapped_run_process`, `pdf_ocr_resume_skips_existing_output`, `image_pdf_resume_skips_existing_output`, `process_single_file_resume_rename`, `audio_transcribe_resume_skips_existing_output`, `zip_resume_skips_existing_archive`, `pdf_split_resume_skips_complete_outputs`, `pdf_remove_wm_single_resume_existing_output`, `pdf_merge_resume_existing_output`.
+- Validation: `python -m py_compile Fengxi_Toolbox.py full_debug_test.py tools\fx_resume.py tools\fx_zip_core.py tools\fx_pdf_ocr_task.py tools\fx_image_pdf_task.py tools\fx_audio_task.py` passed; `python full_debug_test.py` passed 198/198; `python smoke_test.py` passed 14/14.
+## 2026-06-04 Batch watermark Archive failure sweep
+- Goal:
+  - Close a real-world batch watermark failure list from `d:\Users\CHEER\Desktop\Archive`, not just synthetic tests.
+- What changed:
+  - `tools/fx_watermark_core.py`
+    - added `open_word_document_safely(...)` with normal-open + repair-open fallbacks;
+    - damaged/unreadable Word errors now return `SKIP:damaged word source`.
+  - `Fengxi_Toolbox.py`
+    - preserve-original skip handling now also accepts damaged Word skip status.
+  - `full_debug_test.py`
+    - added `word_open_repair_fallback`;
+    - added `watermark_damaged_word_preserves_original`.
+- Real-file probe result:
+  - Representative 7-file Archive replay finished `success`.
+  - Counts: `success_count=4`, `skipped_count=3`, `failed_count=0`.
+  - No `!失败文件清单.txt` generated.
+  - Skipped-but-preserved cases:
+    - protected PDF;
+    - unreadable `.doc`;
+    - unreadable `.docx`.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_watermark_core.py full_debug_test.py` passed.
+  - `python smoke_test.py` previously passed 14/14 after this watermark path work remained green.
+  - `python full_debug_test.py` passed `203/203`.
+## 2026-06-04 批量水印未处理文件复制修复
+- 问题：批量水印页的 `跳过文件复制到输出文件夹` 之前只覆盖文件名规则跳过，`txt`、`zip` 等未处理文件不会被复制。
+- 修复：
+  - 在 `Fengxi_Toolbox.py` 的 `_run_watermark_task(...)` 中补齐两类路径：
+    - 收集阶段已被排除的文件，走 `unsupported_skipped_files` 兜底复制。
+    - 主循环里产生 `SKIP:*` 的未处理文件，汇总到 `deferred_skipped_copy_items`，任务结束后统一走 `_copy_watermark_skipped_files(...)`。
+  - 这样规则跳过、主循环跳过、未来可能的收集阶段跳过都统一走复制出口。
+- 回归：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` 通过。
+  - `python smoke_test.py` 14/14 通过。
+  - `python full_debug_test.py` 已重新全量执行；新增用例日志已确认 `notes.txt` 与 `data.zip` 被复制到结果目录，旧用例继续通过。
+- 边界：
+  - 未修改 `tools/fx_watermark_core.py`。
+  - 未删除任何项目外文件。

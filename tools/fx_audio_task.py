@@ -7,6 +7,9 @@ import os
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from tools.fx_resume import is_nonempty_file, outputs_are_complete
+from tools.fx_speech_to_text import build_transcript_output_paths
+
 
 AUDIO_VALID_AUDIO_EXTS = (".mp3", ".wav", ".flac", ".m4a", ".ogg", ".wma", ".aac")
 AUDIO_VALID_VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv")
@@ -120,6 +123,23 @@ def process_one_audio_file(job, convert_audio_format, copy_file_safe, transcribe
         return {"src": src, "dst": dst, "output": dst, "status": "copied", "ok": True, "message": "not_audio_video"}
 
     if mode == "transcribe":
+        expected_outputs = build_transcript_output_paths(
+            src,
+            input_root,
+            output_folder,
+            transcribe_args.get("output_format", "txt"),
+        )
+        if outputs_are_complete(expected_outputs):
+            return {
+                "src": src,
+                "dst": expected_outputs[0] if expected_outputs else "",
+                "outputs": expected_outputs,
+                "output": expected_outputs[0] if expected_outputs else "",
+                "status": "transcribed",
+                "ok": True,
+                "message": "RESUME",
+                "resumed": True,
+            }
         if not callable(transcribe_media_file):
             copy_file_safe(src, dst)
             return {
@@ -157,13 +177,27 @@ def process_one_audio_file(job, convert_audio_format, copy_file_safe, transcribe
         return item
 
     if mode == "video2mp3" and not is_video:
+        if is_nonempty_file(dst):
+            return {"src": src, "dst": dst, "output": dst, "status": "copied", "ok": True, "message": "RESUME", "resumed": True}
         copy_file_safe(src, dst)
         return {"src": src, "dst": dst, "output": dst, "status": "copied", "ok": True, "message": "not_video"}
 
     if mode == "convert" and not is_audio:
+        if is_nonempty_file(dst):
+            return {"src": src, "dst": dst, "output": dst, "status": "copied", "ok": True, "message": "RESUME", "resumed": True}
         copy_file_safe(src, dst)
         return {"src": src, "dst": dst, "output": dst, "status": "copied", "ok": True, "message": "not_audio"}
 
+    if is_nonempty_file(final_dst):
+        return {
+            "src": src,
+            "dst": dst,
+            "output": final_dst,
+            "status": "success",
+            "ok": True,
+            "message": "RESUME",
+            "resumed": True,
+        }
     status = convert_audio_format(src, final_dst, target_fmt, bitrate)
     if status == "SUCCESS":
         delete_error = ""
@@ -278,6 +312,7 @@ def run_audio_task_core(
     failed_list = []
     success_count = 0
     copied_count = 0
+    resumed_count = 0
 
     if mode == "transcribe":
         _log(
@@ -291,12 +326,14 @@ def run_audio_task_core(
         _log(callbacks, f"🎧 [音频] 共 {total} 个文件，目标格式：{target_fmt}，码率：{bitrate}")
 
     def handle_item(item):
-        nonlocal success_count, copied_count
+        nonlocal success_count, copied_count, resumed_count
         src = item.get("src", "")
         fname = os.path.basename(src)
         status = item.get("status")
         if status in {"success", "transcribed"}:
             success_count += 1
+            if item.get("resumed"):
+                resumed_count += 1
             outputs = item.get("outputs") if isinstance(item.get("outputs"), list) else [item.get("output")]
             for output in outputs:
                 add_task_result_output(result, output)
@@ -309,10 +346,14 @@ def run_audio_task_core(
                 _log(callbacks, f"⚠️ [源文件] 删除失败: {fname}: {item.get('delete_error')}")
         elif status == "missing_lib":
             copied_count += 1
+            if item.get("resumed"):
+                resumed_count += 1
             add_task_result_output(result, item.get("output"))
             _log(callbacks, f"⚠️ [跳过] 缺少 moviepy/ffmpeg 后端: {fname}")
         elif status == "copied":
             copied_count += 1
+            if item.get("resumed"):
+                resumed_count += 1
             add_task_result_output(result, item.get("output"))
             _log(callbacks, f"↪️ [跳过] 已原样复制: {fname}")
         else:
@@ -370,7 +411,7 @@ def run_audio_task_core(
     processed_count = success_count + copied_count + len(failed_list)
     if failed_list:
         result["failed_items"] = list(failed_list)
-        set_task_result_counts(result, processed=total, success=success_count + copied_count, failed=len(failed_list), skipped=0)
+        set_task_result_counts(result, processed=total, success=success_count + copied_count, failed=len(failed_list), skipped=resumed_count)
         report_path = write_failed_report(output_folder, failed_list)
         if report_path:
             add_task_result_output(result, report_path)
@@ -383,7 +424,7 @@ def run_audio_task_core(
             error=f"失败 {len(failed_list)} 个文件",
         )
     elif stop_requested():
-        set_task_result_counts(result, processed=processed_count, success=success_count + copied_count, failed=0, skipped=0)
+        set_task_result_counts(result, processed=processed_count, success=success_count + copied_count, failed=0, skipped=resumed_count)
         set_task_result_finished(
             result,
             "stopped",
@@ -392,7 +433,7 @@ def run_audio_task_core(
             stopped=True,
         )
     else:
-        set_task_result_counts(result, processed=total, success=success_count + copied_count, failed=0, skipped=0)
+        set_task_result_counts(result, processed=total, success=success_count + copied_count, failed=0, skipped=resumed_count)
         done_label = "语音转文字" if mode == "transcribe" else "音视频转换"
         _log(callbacks, f"\n🎉 [完成] {done_label}已全部完成。")
         set_task_result_finished(

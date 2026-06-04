@@ -35,6 +35,25 @@ def _safe_float(value, default):
         return default
 
 
+def _looks_like_unreadable_word_error(exc):
+    text = str(exc or "").lower()
+    markers = [
+        "word 无法读取",
+        "文档可能已损坏",
+        "文件似乎已经损坏",
+        "cannot read",
+        "may be corrupted",
+        "appears to be corrupted",
+        "损坏",
+        "corrupt",
+        "-2146823137",
+        "-2146822496",
+    ]
+    if any(marker in text for marker in markers):
+        return True
+    return "microsoft word" in text and "wdmain11.chm" in text
+
+
 def _word_visible_opacity(value):
     opacity = max(0.0, min(1.0, _safe_float(value, 0.2)))
     return max(WORD_WATERMARK_MIN_VISIBLE_OPACITY, min(WORD_WATERMARK_MAX_VISIBLE_OPACITY, opacity))
@@ -195,16 +214,99 @@ def _writer_metadata(reader):
     return metadata
 
 
+def _repair_pdf_for_watermark(src_path):
+    """Return a PyMuPDF-cleaned temporary PDF path, or a status string."""
+
+    try:
+        import fitz
+    except Exception as exc:
+        return None, f"ERROR:PDF repair backend unavailable: {exc}"
+
+    doc = None
+    temp_path = None
+    try:
+        doc = fitz.open(str(src_path))
+        if getattr(doc, "needs_pass", False):
+            try:
+                if not doc.authenticate(""):
+                    return None, "SKIP:protected pdf requires password"
+            except Exception:
+                return None, "SKIP:protected pdf requires password"
+        handle = tempfile.NamedTemporaryFile(
+            prefix=f"{src_path.stem}_repair_",
+            suffix=src_path.suffix or ".pdf",
+            dir=str(src_path.parent),
+            delete=False,
+        )
+        temp_path = Path(handle.name)
+        handle.close()
+        doc.save(str(temp_path), garbage=4, deflate=True, clean=True)
+        return temp_path, ""
+    except Exception as exc:
+        try:
+            if temp_path and temp_path.exists():
+                temp_path.unlink()
+        except Exception:
+            pass
+        if "encrypted" in str(exc).lower():
+            return None, "SKIP:protected pdf requires password"
+        return None, f"ERROR:PDF repair failed: {exc}"
+    finally:
+        try:
+            if doc is not None:
+                doc.close()
+        except Exception:
+            pass
+
+
+def _open_pdf_reader_for_watermark(src_path):
+    repair_path = None
+    try:
+        reader = PdfReader(str(src_path))
+        if getattr(reader, "is_encrypted", False):
+            try:
+                if not reader.decrypt(""):
+                    return None, None, "SKIP:protected pdf requires password"
+            except Exception:
+                return None, None, "SKIP:protected pdf requires password"
+        # Force page parsing now so damaged PDFs can fall back to repair.
+        len(reader.pages)
+        return reader, None, ""
+    except Exception as first_exc:
+        if "not been decrypted" in str(first_exc).lower():
+            return None, None, "SKIP:protected pdf requires password"
+        repair_path, repair_status = _repair_pdf_for_watermark(src_path)
+        if not repair_path:
+            return None, None, repair_status or f"ERROR:{first_exc}"
+        try:
+            reader = PdfReader(str(repair_path))
+            if getattr(reader, "is_encrypted", False):
+                try:
+                    if not reader.decrypt(""):
+                        return None, repair_path, "SKIP:protected pdf requires password"
+                except Exception:
+                    return None, repair_path, "SKIP:protected pdf requires password"
+            len(reader.pages)
+            return reader, repair_path, ""
+        except Exception as repair_exc:
+            return None, repair_path, f"ERROR:{first_exc}; repair read failed: {repair_exc}"
+
+
 def add_watermark_to_pdf(src, dst, watermark_packet, page_range="all", check_text=None, force_mode=False):
     """Apply the watermark packet to a PDF and return a runtime-compatible status."""
 
+    repair_path = None
     try:
         src_path = Path(src)
         dst_path = Path(dst)
         if not src_path.exists():
             return f"ERROR:source not found: {src_path}"
 
-        reader = PdfReader(str(src_path))
+        reader, repair_path, open_status = _open_pdf_reader_for_watermark(src_path)
+        if open_status:
+            return open_status
+        if reader is None:
+            return "ERROR:PDF reader unavailable"
         if not force_mode and _metadata_has_marker(reader.metadata):
             return "SKIP:already watermarked"
         if not force_mode and check_text and _first_page_contains(reader, check_text):
@@ -248,6 +350,12 @@ def add_watermark_to_pdf(src, dst, watermark_packet, page_range="all", check_tex
         return "SUCCESS"
     except Exception as exc:
         return f"ERROR:{exc}"
+    finally:
+        try:
+            if repair_path is not None and Path(repair_path).exists():
+                Path(repair_path).unlink()
+        except Exception:
+            pass
 
 
 def _call_collection_item(collection, index):
@@ -388,6 +496,27 @@ def _add_word_header_watermark(header, section, text, font_name, font_size, opac
     return shape
 
 
+def open_word_document_safely(word_app, src_path):
+    """Open a Word document with repair fallbacks for damaged files."""
+
+    src_value = str(Path(src_path).resolve())
+    attempts = [
+        lambda: word_app.Documents.Open(src_value, False, False, False),
+        lambda: word_app.Documents.Open(src_value),
+        lambda: word_app.Documents.Open(src_value, False, False, False, "", "", False, "", "", 0, 0, False, False, True),
+        lambda: word_app.Documents.Open(src_value, False, True, False, "", "", False, "", "", 0, 0, False, False, True),
+    ]
+    last_exc = None
+    for attempt in attempts:
+        try:
+            return attempt()
+        except Exception as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"unable to open Word document: {src_value}")
+
+
 def add_watermark_to_word(
     word_app,
     src,
@@ -422,10 +551,7 @@ def add_watermark_to_word(
             except Exception:
                 previous_alerts = None
 
-            try:
-                doc = word_app.Documents.Open(str(src_path), False, False, False)
-            except Exception:
-                doc = word_app.Documents.Open(str(src_path))
+            doc = open_word_document_safely(word_app, src_path)
 
             if not force_mode and _word_has_marker(doc):
                 try:
@@ -465,6 +591,8 @@ def add_watermark_to_word(
                     doc.SaveAs(str(dst_path))
             return "SUCCESS"
     except Exception as exc:
+        if _looks_like_unreadable_word_error(exc):
+            return "SKIP:damaged word source"
         return f"ERROR:{exc}"
     finally:
         if doc is not None:

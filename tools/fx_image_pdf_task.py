@@ -10,6 +10,8 @@ from typing import Any, Callable
 
 from PIL import Image as PILImage
 
+from tools.fx_resume import is_nonempty_file
+
 
 IMAGE_TO_PDF_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
@@ -23,6 +25,7 @@ class ImagePdfTaskOptions:
     executor_factory: Callable[..., Any] | None = None
     image_to_pdf: Callable[[str, str], str] | None = None
     merge_images_to_pdf: Callable[[list[str], str], str] | None = None
+    resume: bool = True
 
 
 @dataclass
@@ -93,6 +96,11 @@ def build_image_pdf_output_path(src, output_folder):
     return str(candidate)
 
 
+def build_image_pdf_resume_output_path(src, output_folder):
+    source = Path(src)
+    return str(Path(output_folder) / f"{source.stem}.pdf")
+
+
 def build_image_merge_pdf_output_path(input_root, normalized_input, output_folder):
     output_name = f"{Path(input_root or normalized_input).name or 'images'}_图集合并.pdf"
     return str(Path(output_folder) / output_name)
@@ -146,6 +154,8 @@ def _delete_source(src, failed_items):
 
 def _process_one_image_pdf(job, image_to_pdf_func):
     src, dst = job
+    if is_nonempty_file(dst):
+        return {"src": src, "dst": dst, "ok": True, "status": "RESUME", "resumed": True}
     status = image_to_pdf_func(src, dst)
     return {"src": src, "dst": dst, "ok": status == "SUCCESS", "status": status}
 
@@ -201,19 +211,25 @@ def run_image_pdf_task_core(
             raise ValueError("merge_images_to_pdf callback is required for merge mode")
         dst = build_image_merge_pdf_output_path(input_root, normalized_input, output_folder)
         _call(callbacks.on_merge_started if callbacks else None, dst, total)
-        status = merge_func(files, dst)
         result["processed_count"] = total
-        if status != "SUCCESS" or not os.path.exists(dst):
-            result["failed_items"].append(f"{normalized_input}: {status}")
-            result["failed_count"] = 1
-            _call(callbacks.on_item_failed if callbacks else None, str(normalized_input), dst, status)
-        else:
+        if options.resume and is_nonempty_file(dst):
             result["success_count"] = total
+            result["skipped_count"] = total
             result["outputs"].append(dst)
-            _call(callbacks.on_item_finished if callbacks else None, str(normalized_input), dst, {"status": status, "merge": True})
-            if options.delete_source:
-                for src in files:
-                    _delete_source(src, result["failed_items"])
+            _call(callbacks.on_item_finished if callbacks else None, str(normalized_input), dst, {"status": "RESUME", "merge": True, "resumed": True})
+        else:
+            status = merge_func(files, dst)
+            if status != "SUCCESS" or not os.path.exists(dst):
+                result["failed_items"].append(f"{normalized_input}: {status}")
+                result["failed_count"] = 1
+                _call(callbacks.on_item_failed if callbacks else None, str(normalized_input), dst, status)
+            else:
+                result["success_count"] = total
+                result["outputs"].append(dst)
+                _call(callbacks.on_item_finished if callbacks else None, str(normalized_input), dst, {"status": status, "merge": True})
+                if options.delete_source:
+                    for src in files:
+                        _delete_source(src, result["failed_items"])
         if callbacks is not None:
             _call(callbacks.on_item_completed, total)
         result["failed_count"] = len(result["failed_items"])
@@ -221,7 +237,17 @@ def run_image_pdf_task_core(
 
     image_to_pdf_func = options.image_to_pdf or image_file_to_pdf
     reserved_outputs = set()
-    jobs = [(src, _reserve_unique_output_path(src, output_folder, reserved_outputs)) for src in files]
+    stem_counts = {}
+    for src in files:
+        stem = Path(src).stem.lower()
+        stem_counts[stem] = stem_counts.get(stem, 0) + 1
+    jobs = []
+    for src in files:
+        resume_output = build_image_pdf_resume_output_path(src, output_folder)
+        if options.resume and stem_counts.get(Path(src).stem.lower(), 0) == 1 and is_nonempty_file(resume_output):
+            jobs.append((src, resume_output))
+        else:
+            jobs.append((src, _reserve_unique_output_path(src, output_folder, reserved_outputs)))
     parallel_workers = max(1, int(options.parallel_workers or 1))
     if parallel_workers > 1 and callable(options.executor_factory):
         _log(callbacks, f"🚀 [批量并行] 图片转 PDF 启用 {parallel_workers} 个线程。")
@@ -270,8 +296,10 @@ def _record_image_pdf_item(result, item, options, callbacks):
     else:
         result["success_count"] += 1
         result["outputs"].append(dst)
+        if item.get("resumed"):
+            result["skipped_count"] += 1
         _call(callbacks.on_item_finished if callbacks else None, src, dst, item)
-        if options.delete_source:
+        if options.delete_source and not item.get("resumed"):
             _delete_source(src, result["failed_items"])
     result["processed_count"] += 1
     _call(callbacks.on_item_completed if callbacks else None, 1)

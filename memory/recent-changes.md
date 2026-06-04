@@ -1,5 +1,20 @@
 # 最近变更
 
+## 2026-06-04 01:06:31 | watermark
+- 摘要：batch watermark now copies all unprocessed skipped files
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory\categories\watermark-and-remove.md, memory\debug-status.md
+- 说明：Extended batch-watermark skipped-copy behavior so unsupported/unprocessed files like txt and zip are copied into the result folder when wm_copy_skipped_var is enabled. Added a regression covering normal.pdf + notes.txt + data.zip.
+
+## 2026-06-04 00:07:29 | watermark
+- 摘要：Batch watermark now preserves damaged Word files instead of failing the whole batch
+- 文件：Fengxi_Toolbox.py, tools\fx_watermark_core.py, full_debug_test.py, memory\categories\watermark-and-remove.md, memory\debug-status.md
+- 说明：Added repair-style Word open fallback, mapped unreadable Office watermark sources to SKIP:damaged word source, verified with real Archive samples (7 files => 4 success / 3 skipped / 0 failed, no failure report), and added regressions for Word repair fallback plus damaged-word preserve-original handling.
+
+## 2026-06-03 22:55:36 | runtime
+- 摘要：global resume and background guard
+- 文件：Fengxi_Toolbox.py, tools/fx_resume.py, full_debug_test.py, memory/architecture.md, memory/debug-status.md, memory/categories/watermark-and-remove.md, memory/categories/pdf-file-meta-zip.md, memory/categories/convert-audio-image.md
+- 说明：Added shared resume helpers, background execution guard, and resume coverage for generic single-file routes plus ZIP/PDF OCR/image PDF/audio/PDF compression/watermark/remove-watermark/PDF merge. Fixed single-file remove-watermark resume to reuse base *_去水印 output instead of creating *_2 duplicates. Validation: py_compile passed, full_debug_test.py 198/198, smoke_test.py 14/14.
+
 ## 2026-06-02 00:01:45 | watermark
 - 摘要：Batch watermark handles trailing-space source directories and syncs progress bar
 - 文件：Fengxi_Toolbox.py, full_debug_test.py, memory\categories\watermark-and-remove.md, memory\debug-status.md

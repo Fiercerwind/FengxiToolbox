@@ -1,5 +1,6 @@
 import ast
 import concurrent.futures
+import ctypes
 import dis
 import inspect
 import io
@@ -95,6 +96,10 @@ from tools.fx_queue_history import (
     queue_status_text,
     save_queue_history,
 )
+from tools.fx_resume import (
+    format_resume_skip_message,
+    is_nonempty_file,
+)
 from tools.fx_runtime_patches import wrap_callable
 from tools.fx_startup_patches import StartupPatchContext, install_startup_performance_patch
 from tools.fx_file_manager_core import (
@@ -107,6 +112,7 @@ from tools.fx_file_manager_core import (
 )
 from tools.fx_file_manager_task import run_file_dedup_task_core as _run_file_dedup_task_core
 from tools.fx_meta_core import (
+    build_meta_output_path as _meta_core_build_output_path,
     modify_file_timestamp as _meta_core_modify_file_timestamp,
     modify_office_meta as _meta_core_modify_office_meta,
     modify_pdf_author as _meta_core_modify_pdf_author,
@@ -158,6 +164,7 @@ from tools.fx_watermark_core import (
     add_watermark_to_pdf as _watermark_core_add_watermark_to_pdf,
     add_watermark_to_word as _watermark_core_add_watermark_to_word,
     create_watermark_packet as _watermark_core_create_watermark_packet,
+    open_word_document_safely as _watermark_core_open_word_document_safely,
     watermark_color_to_hex as _watermark_core_color_to_hex,
 )
 from tools.fx_zip_core import (
@@ -3570,6 +3577,123 @@ def _patch_convert_file_adapter():
 _patch_convert_file_adapter()
 
 
+def _build_generic_resume_output_path(src, input_folder, output_folder, task_type, args):
+    values = list(args or [])
+    task = str(task_type or "").strip().lower()
+    try:
+        if task == "file":
+            mode = str(values[0] if values else "").strip().lower()
+            if mode == "rename":
+                spec = _file_core_normalize_rename_spec(values)
+                return _file_core_plan_renamed_output_path(src, output_folder, spec)
+
+        if task == "meta":
+            return _meta_core_build_output_path(src, input_folder, output_folder)[1]
+
+        if task == "convert":
+            mode = _convert_core_normalize_mode(values[0] if values else "word2pdf")
+            if mode != "imgs2pdf":
+                return _convert_core_plan_output_path(src, input_folder, output_folder, mode)
+
+        if task == "image":
+            mode = str(values[0] if values else "").strip().lower()
+            if mode in {"convert", "compress"}:
+                target_format = str(values[2] if len(values) > 2 else Path(src).suffix.lstrip(".") or "jpg").strip().lower()
+                target_format = target_format.lstrip(".") or Path(src).suffix.lstrip(".") or "jpg"
+                try:
+                    rel = os.path.relpath(str(src), str(input_folder))
+                except Exception:
+                    rel = os.path.basename(str(src))
+                if rel.startswith(".."):
+                    rel = os.path.basename(str(src))
+                return str((Path(output_folder) / rel).with_suffix(f".{target_format}"))
+
+        if task == "pdf":
+            mode = str(values[0] if values else "").strip().lower()
+            if mode == "encrypt":
+                try:
+                    rel = os.path.relpath(str(src), str(input_folder))
+                except Exception:
+                    rel = os.path.basename(str(src))
+                if rel.startswith(".."):
+                    rel = os.path.basename(str(src))
+                return str(Path(output_folder) / rel)
+    except Exception:
+        return ""
+    return ""
+
+
+def _generic_resume_outputs_complete(src, input_folder, output_folder, task_type, args):
+    values = list(args or [])
+    task = str(task_type or "").strip().lower()
+    try:
+        if task == "pdf":
+            mode = str(values[0] if values else "").strip().lower()
+            if mode == "split":
+                split_dir = Path(output_folder) / Path(src).stem
+                if not split_dir.is_dir():
+                    return False, ""
+                try:
+                    page_count = len(pypdf.PdfReader(str(src)).pages)
+                except Exception:
+                    page_count = 0
+                outputs = [item for item in split_dir.glob("*.pdf") if is_nonempty_file(item)]
+                return page_count > 0 and len(outputs) >= page_count, str(split_dir)
+    except Exception:
+        return False, ""
+
+    output_path = _build_generic_resume_output_path(src, input_folder, output_folder, task_type, args)
+    if not output_path:
+        return False, ""
+    try:
+        same_file_output = Path(output_path).resolve() == Path(src).resolve()
+    except Exception:
+        same_file_output = False
+    if same_file_output:
+        return False, output_path
+    return is_nonempty_file(output_path), output_path
+
+
+def _patch_generic_process_resume():
+    try:
+        original_process_single = FengxiToolboxApp.process_single_file
+    except Exception as exc:
+        _debug(f"patch_process_resume:missing:{exc}")
+        return
+
+    if getattr(original_process_single, "__fx_process_resume_patch__", False):
+        return
+
+    def patched_process_single_file(self, src, input_folder, output_folder, task_type, args, failed_list):
+        complete, output_path = _generic_resume_outputs_complete(src, input_folder, output_folder, task_type, args)
+        if complete:
+            try:
+                log = getattr(self, "log", None)
+                if callable(log):
+                    log(format_resume_skip_message("断点续跑", src, output_path))
+            except Exception:
+                pass
+            return None
+        return original_process_single(self, src, input_folder, output_folder, task_type, args, failed_list)
+
+    patched_process_single_file.__fx_process_resume_patch__ = True
+    patched_process_single_file.__fx_convert_file_adapter_patch__ = bool(
+        getattr(original_process_single, "__fx_convert_file_adapter_patch__", False)
+    )
+    patched_process_single_file.__fx_meta_core_patch__ = bool(
+        getattr(original_process_single, "__fx_meta_core_patch__", False)
+    )
+    patched_process_single_file.__fx_file_manager_core_patch__ = bool(
+        getattr(original_process_single, "__fx_file_manager_core_patch__", False)
+    )
+    patched_process_single_file.__wrapped__ = original_process_single
+    FengxiToolboxApp.process_single_file = patched_process_single_file
+    _debug("patch_process_resume:installed")
+
+
+_patch_generic_process_resume()
+
+
 def _run_file_dedup_task(app, input_folder):
     normalized_input = _normalize_input_path_value(input_folder)
     result = _run_file_dedup_task_core(
@@ -3846,7 +3970,7 @@ def _remove_watermark_from_word_safely(word_app, src, dst, preserve_mine=False, 
         src_abs = os.path.abspath(src)
         dst_abs = os.path.abspath(dst)
         with _DisableWin32ComGenCache():
-            doc = word_app.Documents.Open(src_abs)
+            doc = _watermark_core_open_word_document_safely(word_app, src_abs)
             page_width = _safe_float(_safe_getattr(_safe_getattr(doc, "PageSetup", None), "PageWidth", 0.0))
             page_height = _safe_float(_safe_getattr(_safe_getattr(doc, "PageSetup", None), "PageHeight", 0.0))
 
@@ -4153,7 +4277,7 @@ def _export_word_docx_to_pdf_safely(docx_path, pdf_path):
         os.makedirs(os.path.dirname(pdf_abs), exist_ok=True)
         word_app = _create_hidden_word_app()
         with _DisableWin32ComGenCache():
-            doc = word_app.Documents.Open(docx_abs)
+            doc = _watermark_core_open_word_document_safely(word_app, docx_abs)
             doc.ExportAsFixedFormat(pdf_abs, 17)
             doc.Close(False)
             doc = None
@@ -4199,6 +4323,12 @@ def _build_single_remove_wm_output_path(source_path):
         candidate = source.with_name(f"{source.stem}_去水印_{counter}{source.suffix}")
         counter += 1
     return str(candidate)
+
+
+def _build_single_remove_wm_base_output_path(source_path):
+    source = Path(source_path)
+    suffix = Path(_build_single_remove_wm_output_path(source)).suffix
+    return str(source.with_name(f"{source.stem}_去水印{suffix}"))
 
 
 def _replace_file_safely(src, dst):
@@ -4425,6 +4555,67 @@ def _clear_last_task_result(app):
         app._fx_last_task_result = None
     except Exception:
         pass
+
+
+_FX_ES_CONTINUOUS = 0x80000000
+_FX_ES_SYSTEM_REQUIRED = 0x00000001
+_FX_ES_AWAYMODE_REQUIRED = 0x00000040
+
+
+def _fx_background_guard_begin(app, reason="task"):
+    """Keep Windows from idling/sleeping while long batch work is running."""
+
+    if app is None:
+        return False
+    try:
+        count = int(getattr(app, "_fx_background_guard_count", 0) or 0)
+    except Exception:
+        count = 0
+    try:
+        app._fx_background_guard_count = count + 1
+    except Exception:
+        pass
+    if count > 0:
+        return True
+    try:
+        flags = _FX_ES_CONTINUOUS | _FX_ES_SYSTEM_REQUIRED | _FX_ES_AWAYMODE_REQUIRED
+        result = ctypes.windll.kernel32.SetThreadExecutionState(flags)
+        try:
+            app._fx_background_guard_active = bool(result)
+        except Exception:
+            pass
+        _debug(f"background_guard:begin:{reason}:{bool(result)}")
+        return bool(result)
+    except Exception as exc:
+        _debug(f"background_guard:begin_error:{reason}:{exc}")
+        return False
+
+
+def _fx_background_guard_end(app, reason="task"):
+    if app is None:
+        return False
+    try:
+        count = int(getattr(app, "_fx_background_guard_count", 0) or 0)
+    except Exception:
+        count = 0
+    next_count = max(0, count - 1)
+    try:
+        app._fx_background_guard_count = next_count
+    except Exception:
+        pass
+    if next_count > 0:
+        return True
+    try:
+        result = ctypes.windll.kernel32.SetThreadExecutionState(_FX_ES_CONTINUOUS)
+        try:
+            app._fx_background_guard_active = False
+        except Exception:
+            pass
+        _debug(f"background_guard:end:{reason}:{bool(result)}")
+        return bool(result)
+    except Exception as exc:
+        _debug(f"background_guard:end_error:{reason}:{exc}")
+        return False
 
 
 def _export_task_result(result, output_path):
@@ -5188,6 +5379,7 @@ def _run_zip_task_with_core(app, input_folder):
 
 def _run_remove_wm_pdf_roundtrip(app, pdf_files, input_folder, output_folder, mode=None):
     failed_list = []
+    skipped_count = 0
     preserve_mine = False
     remove_mode = _coerce_remove_wm_mode(mode or _get_remove_wm_mode(app))
     tracker = _get_active_progress_tracker(app)
@@ -5221,6 +5413,21 @@ def _run_remove_wm_pdf_roundtrip(app, pdf_files, input_folder, output_folder, mo
             rel = os.path.relpath(src, input_folder)
             dst_pdf = os.path.join(output_folder, rel)
             os.makedirs(os.path.dirname(dst_pdf), exist_ok=True)
+            if is_nonempty_file(dst_pdf):
+                try:
+                    app.log(format_resume_skip_message("去水印断点续跑", src, dst_pdf))
+                except Exception:
+                    pass
+                _add_task_result_output(result, dst_pdf)
+                skipped_count += 1
+                if tracker is not None:
+                    tracker.complete_units(1)
+                else:
+                    try:
+                        app.progress_bar.set((index + 1) / total)
+                    except Exception:
+                        pass
+                continue
             stage_dir = temp_root / f"job_{index:03d}"
             stage_dir.mkdir(parents=True, exist_ok=True)
             stage_docx = stage_dir / "from_pdf.docx"
@@ -5305,7 +5512,7 @@ def _run_remove_wm_pdf_roundtrip(app, pdf_files, input_folder, output_folder, mo
     finally:
         pythoncom.CoUninitialize()
         shutil.rmtree(temp_root, ignore_errors=True)
-    _set_task_result_counts(result, processed=len(pdf_files), success=len(pdf_files) - len(failed_list), failed=len(failed_list), skipped=0)
+    _set_task_result_counts(result, processed=len(pdf_files), success=len(pdf_files) - len(failed_list), failed=len(failed_list), skipped=skipped_count)
     if failed_list:
         result["failed_items"] = list(failed_list)
     return failed_list
@@ -5412,6 +5619,26 @@ def _run_remove_wm_task(app, input_folder, original_run_process):
 
         failed_list = []
 
+        if is_single_input and not overwrite_original:
+            resume_output = _build_single_remove_wm_base_output_path(normalized_input)
+            if is_nonempty_file(resume_output):
+                try:
+                    app.log(format_resume_skip_message("去水印断点续跑", normalized_input, resume_output))
+                except Exception:
+                    pass
+                result["outputs"] = []
+                result["failed_items"] = []
+                _add_task_result_output(result, resume_output)
+                _set_task_result_output_root(result, os.path.dirname(resume_output))
+                _set_task_result_counts(result, processed=max(1, total_items), success=1, failed=0, skipped=1)
+                _set_task_result_finished(
+                    result,
+                    "success",
+                    message="单文件去水印已复用已有结果",
+                    detail=f"输出: {resume_output}",
+                )
+                return
+
         if other_files:
             staging_root = Path(tempfile.mkdtemp(prefix="fx_rm_mix_"))
             staging_output = staging_root / RESULT_FOLDER_NAME
@@ -5438,6 +5665,7 @@ def _run_remove_wm_task(app, input_folder, original_run_process):
 
         if pdf_files:
             failed_list.extend(_run_remove_wm_pdf_roundtrip(app, pdf_files, input_root, output_folder, mode=remove_mode))
+        skipped_count = int(result.get("skipped_count") or 0)
 
         if is_single_input:
             rel = os.path.relpath(normalized_input, input_root)
@@ -5516,7 +5744,7 @@ def _run_remove_wm_task(app, input_folder, original_run_process):
             app.log("完成 (含错误)")
             app.log(f"去水印任务结束，但有 {len(deduped_failed)} 个文件处理失败。")
             result["failed_items"] = list(deduped_failed)
-            _set_task_result_counts(result, processed=total_items, success=max(0, total_items - len(deduped_failed)), failed=len(deduped_failed), skipped=0)
+            _set_task_result_counts(result, processed=total_items, success=max(0, total_items - len(deduped_failed)), failed=len(deduped_failed), skipped=skipped_count)
             _set_task_result_finished(
                 result,
                 "failed",
@@ -5526,7 +5754,7 @@ def _run_remove_wm_task(app, input_folder, original_run_process):
             )
         elif not getattr(app, "stop_event", False):
             app.log("\n🎉 [完成] 去水印已全部处理完成！")
-            _set_task_result_counts(result, processed=total_items, success=total_items, failed=0, skipped=0)
+            _set_task_result_counts(result, processed=total_items, success=total_items, failed=0, skipped=skipped_count)
             _set_task_result_finished(
                 result,
                 "success",
@@ -5534,7 +5762,7 @@ def _run_remove_wm_task(app, input_folder, original_run_process):
                 detail=f"成功处理 {len(pdf_files) + len(other_files)} 个文件",
             )
         else:
-            _set_task_result_counts(result, processed=total_items, success=max(0, total_items - len(failed_list)), failed=len(failed_list), skipped=0)
+            _set_task_result_counts(result, processed=total_items, success=max(0, total_items - len(failed_list)), failed=len(failed_list), skipped=skipped_count)
             _set_task_result_finished(result, "stopped", message="用户停止去水印任务", detail="用户停止去水印任务", stopped=True)
     finally:
         _pop_remove_wm_runtime_mode(previous_remove_mode)
@@ -5721,10 +5949,11 @@ def _run_pdf_ocr_task(app, input_folder):
     failed_list = list(core_result.get("failed_items") or [])
     success_count = int(core_result.get("success_count") or 0)
     processed_count = int(core_result.get("processed_count") or 0)
+    skipped_count = int(core_result.get("skipped_count") or 0)
 
     if failed_list:
         result["failed_items"] = list(failed_list)
-        _set_task_result_counts(result, processed=len(pdf_files), success=success_count, failed=len(failed_list), skipped=0)
+        _set_task_result_counts(result, processed=len(pdf_files), success=success_count, failed=len(failed_list), skipped=skipped_count)
         app.log("\n========= ❌ 失败清单 =========")
         for item in failed_list:
             app.log(f"• {item}")
@@ -5742,7 +5971,7 @@ def _run_pdf_ocr_task(app, input_folder):
             error=f"失败 {len(failed_list)} 个文件",
         )
     elif not app.stop_event:
-        _set_task_result_counts(result, processed=len(pdf_files), success=success_count, failed=0, skipped=0)
+        _set_task_result_counts(result, processed=len(pdf_files), success=success_count, failed=0, skipped=skipped_count)
         app.log("\n🎉 [完成] OCR 搜索版 PDF 已全部生成！")
         _set_task_result_finished(
             result,
@@ -5751,7 +5980,7 @@ def _run_pdf_ocr_task(app, input_folder):
             detail=f"成功处理 {success_count} 个文件",
         )
     else:
-        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=len(failed_list), skipped=0)
+        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=len(failed_list), skipped=skipped_count)
         _set_task_result_finished(result, "stopped", message="用户停止 OCR 任务", detail="用户停止 OCR 任务", stopped=True)
 
 
@@ -5808,6 +6037,11 @@ def _build_pdf_compress_output_path(src, output_folder):
     return _pdf_compress_core_build_output_path(src, output_folder)
 
 
+def _build_pdf_compress_resume_output_path(src, output_folder):
+    source = Path(src)
+    return str(Path(output_folder) / f"{source.stem}_压缩{source.suffix}")
+
+
 def compress_pdf_file(src, dst, compress_level="标准", image_level="标准", password=""):
     return _pdf_compress_core_compress_pdf_file(src, dst, compress_level, image_level, password=password)
 
@@ -5843,14 +6077,22 @@ def _run_pdf_compress_task(app, input_folder):
     tracker = _get_active_progress_tracker(app)
     failed_list = []
     success_count = 0
+    resumed_count = 0
     total = len(pdf_files)
     app.log(f"📉 [PDF 压缩] 共 {total} 个 PDF，压缩程度：{compress_level}，图片压缩：{image_level}")
 
     reserved_outputs = set()
-    jobs = [
-        (src, _reserve_unique_output_path(src, output_folder, _build_pdf_compress_output_path, reserved_outputs))
-        for src in pdf_files
-    ]
+    stem_counts = {}
+    for src in pdf_files:
+        stem = Path(src).stem.lower()
+        stem_counts[stem] = stem_counts.get(stem, 0) + 1
+    jobs = []
+    for src in pdf_files:
+        resume_output = _build_pdf_compress_resume_output_path(src, output_folder)
+        if stem_counts.get(Path(src).stem.lower(), 0) == 1 and is_nonempty_file(resume_output):
+            jobs.append((src, resume_output))
+        else:
+            jobs.append((src, _reserve_unique_output_path(src, output_folder, _build_pdf_compress_output_path, reserved_outputs)))
     should_delete_source = False
     if getattr(app, "pdf_delete_var", None) is not None:
         try:
@@ -5860,6 +6102,8 @@ def _run_pdf_compress_task(app, input_folder):
 
     def process_one_pdf_compress(job):
         src, dst = job
+        if is_nonempty_file(dst):
+            return {"src": src, "dst": dst, "ok": True, "status": "RESUME", "ratio": 0, "image_changes": "0", "resumed": True}
         before_size = os.path.getsize(src)
         status = compress_pdf_file(src, dst, compress_level, image_level, password=password)
         if not status.startswith("SUCCESS"):
@@ -5905,8 +6149,10 @@ def _run_pdf_compress_task(app, input_folder):
                         f"✅ [PDF 压缩] {os.path.basename(dst)} | 减少 {item.get('ratio', 0)}% | 图片 {item.get('image_changes', '0')} 项"
                     )
                     success_count += 1
+                    if item.get("resumed"):
+                        resumed_count += 1
                     _add_task_result_output(result, dst)
-                    if should_delete_source:
+                    if should_delete_source and not item.get("resumed"):
                         try:
                             os.remove(item["src"])
                             app.log(f"🗑️ 已删除源文件：{os.path.basename(item['src'])}")
@@ -5934,8 +6180,10 @@ def _run_pdf_compress_task(app, input_folder):
                     f"✅ [PDF 压缩] {os.path.basename(dst)} | 减少 {item.get('ratio', 0)}% | 图片 {item.get('image_changes', '0')} 项"
                 )
                 success_count += 1
+                if item.get("resumed"):
+                    resumed_count += 1
                 _add_task_result_output(result, dst)
-                if should_delete_source:
+                if should_delete_source and not item.get("resumed"):
                     try:
                         os.remove(src)
                         app.log(f"🗑️ 已删除源文件：{os.path.basename(src)}")
@@ -5952,7 +6200,7 @@ def _run_pdf_compress_task(app, input_folder):
 
     if failed_list:
         result["failed_items"] = list(failed_list)
-        _set_task_result_counts(result, processed=total, success=success_count, failed=len(failed_list), skipped=0)
+        _set_task_result_counts(result, processed=total, success=success_count, failed=len(failed_list), skipped=resumed_count)
         app.log("\n========= ❌ 失败清单 =========")
         for item in failed_list:
             app.log(f"• {item}")
@@ -5969,7 +6217,7 @@ def _run_pdf_compress_task(app, input_folder):
             error=f"失败 {len(failed_list)} 个文件",
         )
     elif not getattr(app, "stop_event", False):
-        _set_task_result_counts(result, processed=total, success=success_count, failed=0, skipped=0)
+        _set_task_result_counts(result, processed=total, success=success_count, failed=0, skipped=resumed_count)
         app.log("\n🎉 [完成] PDF 压缩已全部完成！")
         _set_task_result_finished(
             result,
@@ -5978,7 +6226,7 @@ def _run_pdf_compress_task(app, input_folder):
             detail=f"成功处理 {success_count} 个文件",
         )
     else:
-        _set_task_result_counts(result, processed=success_count + len(failed_list), success=success_count, failed=len(failed_list), skipped=0)
+        _set_task_result_counts(result, processed=success_count + len(failed_list), success=success_count, failed=len(failed_list), skipped=resumed_count)
         _set_task_result_finished(result, "stopped", message="用户停止 PDF 压缩任务", detail="用户停止 PDF 压缩任务", stopped=True)
 
 
@@ -6095,7 +6343,7 @@ def _run_convert_imgs_to_pdf_task(app, input_folder):
         _set_task_result_finished(result, "skipped", message=message, detail=message, skipped=True)
     elif failed_list:
         result["failed_items"] = list(failed_list)
-        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=len(failed_list), skipped=0)
+        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=len(failed_list), skipped=skipped_count)
         app.log("\n========= ❌ 失败清单 =========")
         for item in failed_list:
             app.log(f"• {item}")
@@ -6111,10 +6359,10 @@ def _run_convert_imgs_to_pdf_task(app, input_folder):
             error=f"失败 {len(failed_list)} 个文件",
         )
     elif getattr(app, "stop_event", False):
-        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=0, skipped=0)
+        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=0, skipped=skipped_count)
         _set_task_result_finished(result, "stopped", message="用户停止多图合并 PDF 任务", detail="用户停止多图合并 PDF 任务", stopped=True)
     else:
-        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=0, skipped=0)
+        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=0, skipped=skipped_count)
         app.log("\n🎉 [完成] 格式转换多图合并 PDF 已全部完成！")
         _set_task_result_finished(
             result,
@@ -6216,10 +6464,11 @@ def _run_image_to_pdf_task(app, input_folder, merge=False):
     failed_list = list(core_result.get("failed_items") or [])
     success_count = int(core_result.get("success_count") or 0)
     processed_count = int(core_result.get("processed_count") or 0)
+    skipped_count = int(core_result.get("skipped_count") or 0)
 
     if failed_list:
         result["failed_items"] = list(failed_list)
-        _set_task_result_counts(result, processed=len(image_files), success=success_count, failed=len(failed_list), skipped=0)
+        _set_task_result_counts(result, processed=len(image_files), success=success_count, failed=len(failed_list), skipped=skipped_count)
         app.log("\n========= ❌ 失败清单 =========")
         for item in failed_list:
             app.log(f"• {item}")
@@ -6236,7 +6485,7 @@ def _run_image_to_pdf_task(app, input_folder, merge=False):
             error=f"失败 {len(failed_list)} 个文件",
         )
     elif not getattr(app, "stop_event", False):
-        _set_task_result_counts(result, processed=len(image_files), success=success_count, failed=0, skipped=0)
+        _set_task_result_counts(result, processed=len(image_files), success=success_count, failed=0, skipped=skipped_count)
         app.log("\n🎉 [完成] 图片 PDF 任务已全部完成！")
         _set_task_result_finished(
             result,
@@ -6245,7 +6494,7 @@ def _run_image_to_pdf_task(app, input_folder, merge=False):
             detail=f"成功处理 {success_count} 个文件",
         )
     else:
-        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=len(failed_list), skipped=0)
+        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=len(failed_list), skipped=skipped_count)
         _set_task_result_finished(result, "stopped", message="用户停止图片 PDF 任务", detail="用户停止图片 PDF 任务", stopped=True)
 
 
@@ -6799,6 +7048,68 @@ def _patch_pdf_ocr_mode():
 
 
 _patch_pdf_ocr_mode()
+
+
+def _patch_pdf_merge_resume():
+    try:
+        original_run_process = FengxiToolboxApp.run_process
+    except Exception as exc:
+        _debug(f"patch_pdf_merge_resume:missing:{exc}")
+        return
+
+    if getattr(original_run_process, "__fx_pdf_merge_resume_patch__", False):
+        return
+
+    def patched_run_process(self, input_folder, task_type):
+        if task_type == "pdf":
+            try:
+                pdf_mode = self.pdf_mode_var.get() if getattr(self, "pdf_mode_var", None) is not None else ""
+            except Exception:
+                pdf_mode = ""
+            if pdf_mode == "merge":
+                normalized_input, _input_root, output_folder, resolved_strategy = _resolve_output_root_for_task(
+                    input_folder,
+                    "pdf",
+                    _get_task_output_strategy(self, "pdf"),
+                )
+                merged_output = os.path.join(output_folder, "Merged_All.pdf")
+                if is_nonempty_file(merged_output):
+                    result = _get_last_task_result(self)
+                    if result is None:
+                        result = _start_task_result(self, normalized_input, "pdf")
+                    _set_task_result_output_strategy(result, "pdf", resolved_strategy)
+                    _set_task_result_output_root(result, output_folder)
+                    _add_task_result_output(result, merged_output)
+                    try:
+                        all_files = self.collect_input_files(normalized_input, "pdf")
+                    except Exception:
+                        all_files = []
+                    pdf_count = sum(1 for item in all_files if str(item).lower().endswith(".pdf"))
+                    count = max(1, pdf_count)
+                    _set_task_result_counts(result, processed=count, success=count, failed=0, skipped=count)
+                    _set_task_result_finished(
+                        result,
+                        "success",
+                        message="PDF 合并已复用已有结果",
+                        detail=f"输出: {merged_output}",
+                    )
+                    try:
+                        self.log(format_resume_skip_message("PDF 合并断点续跑", normalized_input, merged_output))
+                    except Exception:
+                        pass
+                    try:
+                        self.reset_ui()
+                    except Exception:
+                        pass
+                    return
+        return original_run_process(self, input_folder, task_type)
+
+    patched_run_process.__fx_pdf_merge_resume_patch__ = True
+    FengxiToolboxApp.run_process = patched_run_process
+    _debug("patch_pdf_merge_resume:installed")
+
+
+_patch_pdf_merge_resume()
 
 
 def _patch_image_pdf_modes():
@@ -8831,6 +9142,75 @@ def _watermark_status_kind(status):
     return "failed"
 
 
+def _watermark_should_preserve_original(status, suffix=""):
+    text = str(status or "").strip().lower()
+    if text.startswith("skip:protected") or "protected pdf requires password" in text:
+        return True
+    if text.startswith("skip:damaged word source") or "damaged word source" in text:
+        return True
+    suffix_text = str(suffix or "").strip().lower()
+    if suffix_text in WATERMARK_WORD_EXTS:
+        unreadable_markers = [
+            "word 无法读取",
+            "文档可能已损坏",
+            "文件似乎已经损坏",
+            "cannot read",
+            "may be corrupted",
+            "appears to be corrupted",
+        ]
+        return any(marker in text for marker in unreadable_markers)
+    return False
+
+
+def _watermark_normalize_path_part(value):
+    return str(value or "").strip().rstrip(" .").casefold()
+
+
+def _resolve_watermark_source_path(src, input_root):
+    src_path = Path(src)
+    if src_path.exists():
+        return src_path
+    root = Path(input_root)
+    if not root.exists():
+        return src_path
+    try:
+        rel = Path(os.path.relpath(str(src_path), str(root)))
+        if str(rel) not in {"", "."} and not str(rel).startswith(".."):
+            stripped_candidate = root / Path(*[str(part).strip().rstrip(" .") for part in rel.parts])
+            if stripped_candidate.exists():
+                return stripped_candidate
+    except Exception:
+        rel = None
+
+    try:
+        wanted_parts = []
+        if rel is not None and str(rel) not in {"", "."} and not str(rel).startswith(".."):
+            wanted_parts = [_watermark_normalize_path_part(part) for part in rel.parts]
+        wanted_name = _watermark_normalize_path_part(src_path.name)
+        for candidate in root.rglob("*"):
+            try:
+                if not candidate.is_file():
+                    continue
+                if _watermark_normalize_path_part(candidate.name) != wanted_name:
+                    continue
+                if wanted_parts:
+                    try:
+                        candidate_rel_parts = [
+                            _watermark_normalize_path_part(part)
+                            for part in candidate.relative_to(root).parts
+                        ]
+                        if candidate_rel_parts[-len(wanted_parts) :] != wanted_parts:
+                            continue
+                    except Exception:
+                        pass
+                return candidate
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return src_path
+
+
 def _unique_watermark_path(path_value):
     path = Path(path_value)
     if not path.exists():
@@ -9335,6 +9715,40 @@ def _copy_watermark_skipped_files(app, skipped_files, input_root, output_root, a
     return copied, failed
 
 
+def _normalize_watermark_file_key(path_value):
+    normalized = _normalize_input_path_value(path_value)
+    if not normalized:
+        return ""
+    try:
+        return os.path.normcase(str(Path(normalized).resolve()))
+    except Exception:
+        try:
+            return os.path.normcase(os.path.abspath(normalized))
+        except Exception:
+            return os.path.normcase(str(normalized))
+
+
+def _collect_watermark_input_files(input_value):
+    normalized_input = _normalize_input_path_value(input_value)
+    if not normalized_input:
+        return []
+    input_path = Path(normalized_input)
+    if input_path.is_file():
+        return [str(input_path)]
+    if not input_path.is_dir():
+        return []
+
+    collected = []
+    result_folder_name = str(RESULT_FOLDER_NAME).strip()
+    for root, dirnames, filenames in os.walk(str(input_path)):
+        current_root = Path(root)
+        if current_root == input_path:
+            dirnames[:] = [name for name in dirnames if str(name).strip() != result_folder_name]
+        for filename in filenames:
+            collected.append(str(Path(root) / filename))
+    return collected
+
+
 def _run_watermark_task(app, input_value):
     normalized_input = _normalize_input_path_value(input_value)
     is_single_input = bool(normalized_input and os.path.isfile(normalized_input))
@@ -9364,6 +9778,7 @@ def _run_watermark_task(app, input_value):
     previous_skip_value = None
     restore_skip_value = False
     previous_rule_loading = getattr(app, "_fx_wm_filename_rule_loading", False)
+    input_files = _collect_watermark_input_files(normalized_input)
     try:
         app._fx_wm_filename_rule_runtime = filename_rule
         app._fx_wm_filename_rule_skipped_files = []
@@ -9387,24 +9802,39 @@ def _run_watermark_task(app, input_value):
             except Exception:
                 pass
         app._fx_wm_filename_rule_loading = previous_rule_loading
+    known_file_keys = set()
+    for item in list(all_files) + list(rule_skipped_files):
+        item_key = _normalize_watermark_file_key(item)
+        if item_key:
+            known_file_keys.add(item_key)
+    unsupported_skipped_files = []
+    for item in input_files:
+        item_key = _normalize_watermark_file_key(item)
+        if item_key and item_key not in known_file_keys:
+            unsupported_skipped_files.append(str(Path(_normalize_input_path_value(item))))
     total = len(all_files)
-    if total <= 0 and not rule_skipped_files:
+    overall_total = total + len(rule_skipped_files) + len(unsupported_skipped_files)
+    if total <= 0 and not rule_skipped_files and not unsupported_skipped_files:
         _watermark_log(app, logs, "[批量水印] 未找到可处理文件")
         _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=1)
         _set_task_result_finished(result, "skipped", message="未找到可处理文件", detail="未找到可处理文件", skipped=True)
         return result
 
-    if actual_strategy == "result_folder" or (rule_skipped_files and _get_watermark_copy_skipped_to_output(app)):
+    if actual_strategy == "result_folder" or ((rule_skipped_files or unsupported_skipped_files) and _get_watermark_copy_skipped_to_output(app)):
         os.makedirs(output_root, exist_ok=True)
 
     _watermark_log(app, logs, f"[批量水印] 将处理 {total} 个文件 | 输出策略：{_get_output_strategy_label(actual_strategy)}")
     if rule_skipped_files:
         copy_hint = "会复制到输出文件夹" if _get_watermark_copy_skipped_to_output(app) else "仅跳过不复制"
         _watermark_log(app, logs, f"[批量水印] 文件名规则跳过 {len(rule_skipped_files)} 个文件 | {copy_hint}")
+    if unsupported_skipped_files:
+        copy_hint = "浼氬鍒跺埌杈撳嚭鏂囦欢澶?" if _get_watermark_copy_skipped_to_output(app) else "浠呰烦杩囦笉澶嶅埗"
+        _watermark_log(app, logs, f"[鎵归噺姘村嵃] 闈炴按鍗板彲澶勭悊鏂囦欢璺宠繃 {len(unsupported_skipped_files)} 涓枃浠?| {copy_hint}")
     success_outputs = []
     failed_items = []
     skipped_items = []
     copied_skipped_outputs = []
+    deferred_skipped_copy_items = []
     processed_count = 0
     word_app = None
     ppt_app = None
@@ -9437,6 +9867,22 @@ def _run_watermark_task(app, input_value):
             if getattr(app, "stop_event", False):
                 break
             src = Path(_normalize_input_path_value(file_path))
+            resolved_src = _resolve_watermark_source_path(src, input_root)
+            if resolved_src != src:
+                _watermark_log(app, logs, f"[批量水印] 已修正源文件路径: {src} -> {resolved_src}")
+                src = resolved_src
+            if not src.exists():
+                failed_items.append(str(src))
+                processed_count += 1
+                _watermark_log(app, logs, f"[批量水印] 失败: {src.name} | 源文件不存在")
+                _watermark_update_progress(
+                    app,
+                    current_file=str(src),
+                    stage="添加水印",
+                    completed=processed_count,
+                    total=max(overall_total, 1),
+                )
+                continue
             suffix = src.suffix.lower()
             convert_to_pdf = settings["convert_pdf"] and suffix in WATERMARK_WORD_EXTS | WATERMARK_PPT_EXTS
             target_path = Path(
@@ -9460,7 +9906,7 @@ def _run_watermark_task(app, input_value):
                     current_file=str(src),
                     stage="添加水印",
                     completed=processed_count,
-                    total=total,
+                    total=max(overall_total, 1),
                 )
                 continue
             output_path = target_path
@@ -9497,7 +9943,7 @@ def _run_watermark_task(app, input_value):
                         current_file=str(src),
                         stage="添加水印",
                         completed=processed_count,
-                        total=total,
+                        total=max(overall_total, 1),
                     )
                     continue
                 output_path = target_path
@@ -9509,8 +9955,26 @@ def _run_watermark_task(app, input_value):
                 current_file=str(src),
                 stage="添加水印",
                 completed=index - 1,
-                total=total,
+                total=max(overall_total, 1),
             )
+            try:
+                same_file_output = output_path.resolve() == src.resolve()
+            except Exception:
+                same_file_output = False
+            if not same_file_output and is_nonempty_file(output_path):
+                success_outputs.append(str(output_path))
+                skipped_items.append(str(src))
+                _add_task_result_output(result, str(output_path))
+                _watermark_log(app, logs, f"[批量水印] 断点续跑：已存在结果，跳过处理: {src.name} -> {output_path}")
+                processed_count += 1
+                _watermark_update_progress(
+                    app,
+                    current_file=str(src),
+                    stage="断点续跑",
+                    completed=processed_count,
+                    total=max(overall_total, 1),
+                )
+                continue
             try:
                 if suffix in WATERMARK_PDF_EXTS:
                     status = _watermark_process_pdf(src, stage_path, settings)
@@ -9574,6 +10038,18 @@ def _run_watermark_task(app, input_value):
                     _add_task_result_output(result, str(output_path))
                     _watermark_log(app, logs, f"[批量水印] 成功: {src.name} -> {output_path}")
                 elif kind == "skipped":
+                    if _watermark_should_preserve_original(status) and not same_file_output:
+                        try:
+                            output_path.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(str(src), str(output_path))
+                            copied_skipped_outputs.append(str(output_path))
+                            _add_task_result_output(result, str(output_path))
+                            _watermark_log(app, logs, f"[批量水印] 受保护文件无法加水印，已保留原文件: {src.name} -> {output_path}")
+                        except Exception as copy_exc:
+                            failed_items.append(str(src))
+                            _watermark_log(app, logs, f"[批量水印] 保留受保护文件失败: {src.name} | {copy_exc}")
+                    elif _get_watermark_copy_skipped_to_output(app):
+                        deferred_skipped_copy_items.append(str(src))
                     skipped_items.append(str(src))
                     _watermark_log(app, logs, f"[批量水印] 跳过: {src.name} | {status}")
                 else:
@@ -9594,7 +10070,7 @@ def _run_watermark_task(app, input_value):
                     current_file=str(src),
                     stage="添加水印",
                     completed=processed_count,
-                    total=total,
+                    total=max(overall_total, 1),
                 )
 
         if rule_skipped_files:
@@ -9609,6 +10085,31 @@ def _run_watermark_task(app, input_value):
             )
             copied_skipped_outputs.extend(copied_skipped)
             skipped_items.extend(str(Path(_normalize_input_path_value(item))) for item in rule_skipped_files)
+            failed_items.extend(failed_copies)
+        if deferred_skipped_copy_items:
+            copied_skipped, failed_copies = _copy_watermark_skipped_files(
+                app,
+                deferred_skipped_copy_items,
+                input_root,
+                output_root,
+                actual_strategy,
+                logs,
+                result,
+            )
+            copied_skipped_outputs.extend(copied_skipped)
+            failed_items.extend(failed_copies)
+        if unsupported_skipped_files:
+            copied_skipped, failed_copies = _copy_watermark_skipped_files(
+                app,
+                unsupported_skipped_files,
+                input_root,
+                output_root,
+                actual_strategy,
+                logs,
+                result,
+            )
+            copied_skipped_outputs.extend(copied_skipped)
+            skipped_items.extend(str(Path(_normalize_input_path_value(item))) for item in unsupported_skipped_files)
             failed_items.extend(failed_copies)
 
         if failed_items:
@@ -9632,7 +10133,7 @@ def _run_watermark_task(app, input_value):
         result["failed_items"] = list(failed_items)
         _set_task_result_counts(
             result,
-            processed=processed_count + len(rule_skipped_files),
+            processed=processed_count + len(rule_skipped_files) + len(unsupported_skipped_files),
             success=len(success_outputs),
             failed=len(failed_items),
             skipped=len(skipped_items),
@@ -12360,6 +12861,8 @@ def _patch_runtime_progress_reporting():
         _start_task_result(self, input_folder, task_type)
         tracker = None
         result = None
+        guard_reason = f"run_process:{task_type}"
+        _fx_background_guard_begin(self, guard_reason)
         try:
             tracker = _install_run_progress_tracker(
                 self,
@@ -12399,6 +12902,7 @@ def _patch_runtime_progress_reporting():
                 )
             except Exception as exc:
                 _debug(f"patch_runtime_progress:finalize_result_error:{exc}")
+            _fx_background_guard_end(self, guard_reason)
 
     patched_run_process.__fx_runtime_progress_patch__ = True
     FengxiToolboxApp.run_process = patched_run_process

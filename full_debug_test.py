@@ -48,6 +48,10 @@ from tools.fx_queue_history import (
     queue_status_text as queue_status_text_module,
     save_queue_history as save_queue_history_module,
 )
+from tools.fx_resume import (
+    is_nonempty_file as is_nonempty_file_module,
+    outputs_are_complete as outputs_are_complete_module,
+)
 from tools.fx_watermark_core import (
     add_watermark_to_pdf as add_watermark_to_pdf_module,
     add_watermark_to_word as add_watermark_to_word_module,
@@ -579,6 +583,45 @@ def main():
     app.withdraw()
     app._fx_disable_fast_close_force_exit = True
     record("app_init", True, "current_task=" + str(getattr(app, "current_task", None)))
+
+    resume_probe = root / "resume_probe.txt"
+    resume_probe.write_text("done", encoding="utf-8")
+    record(
+        "resume_helper_outputs_complete",
+        is_nonempty_file_module(resume_probe)
+        and outputs_are_complete_module([resume_probe])
+        and not outputs_are_complete_module([resume_probe, root / "missing_resume_probe.txt"]),
+        resume_probe,
+    )
+
+    background_calls = []
+
+    def fake_guard_begin(self, reason):
+        background_calls.append(("begin", reason))
+        self._fx_background_guard_count = int(getattr(self, "_fx_background_guard_count", 0) or 0) + 1
+        return True
+
+    def fake_guard_end(self, reason):
+        background_calls.append(("end", reason))
+        self._fx_background_guard_count = max(0, int(getattr(self, "_fx_background_guard_count", 0) or 0) - 1)
+        return True
+
+    original_guard_begin = mod._fx_background_guard_begin
+    original_guard_end = mod._fx_background_guard_end
+    mod._fx_background_guard_begin = fake_guard_begin
+    mod._fx_background_guard_end = fake_guard_end
+    try:
+        app.current_task = "meta"
+        app.run_process(str(root / "empty_meta_probe"), "meta")
+    finally:
+        mod._fx_background_guard_begin = original_guard_begin
+        mod._fx_background_guard_end = original_guard_end
+    record(
+        "background_guard_wrapped_run_process",
+        background_calls == [("begin", "run_process:meta"), ("end", "run_process:meta")]
+        and getattr(app, "_fx_background_guard_count", None) == 0,
+        background_calls,
+    )
 
     expected_feature_tasks = {
         "watermark",
@@ -1561,6 +1604,47 @@ def main():
         },
     )
 
+    wm_unsupported_copy_root = root / "watermark_unsupported_copy"
+    wm_unsupported_copy_root.mkdir()
+    wm_unsupported_pdf = wm_unsupported_copy_root / "normal.pdf"
+    wm_unsupported_txt = wm_unsupported_copy_root / "notes.txt"
+    wm_unsupported_zip = wm_unsupported_copy_root / "data.zip"
+    make_pdf(wm_unsupported_pdf, ["normal unsupported-copy target"])
+    wm_unsupported_txt.write_text("plain text should be copied\n", encoding="utf-8")
+    with zipfile.ZipFile(wm_unsupported_zip, "w") as zf:
+        zf.writestr("inside.txt", "zip payload")
+    mod._safe_named_widget_set(app, "wm_text", "UNSUPPORTED COPY WATERMARK")
+    mod._safe_var_set(app, "output_strategy_var", mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["result_folder"])
+    mod._safe_var_set(app, "wm_delete_var", False)
+    mod._safe_var_set(app, "wm_convert_pdf", False)
+    mod._safe_var_set(app, "wm_skip_hyphen_var", False)
+    mod._safe_var_set(app, "wm_skip_name_position_var", "缁撳熬")
+    mod._safe_var_set(app, "wm_skip_name_text_var", "")
+    mod._safe_var_set(app, "wm_copy_skipped_var", True)
+    mod._safe_var_set(app, "wm_range_var", "all")
+    mod._safe_var_set(app, "wm_overwrite_var", "force")
+    app.run_process(str(wm_unsupported_copy_root), "watermark")
+    wm_unsupported_copy_result = mod._get_last_task_result(app)
+    wm_unsupported_copy_folder = wm_unsupported_copy_root / mod.RESULT_FOLDER_NAME
+    wm_unsupported_copied_txt = wm_unsupported_copy_folder / "notes.txt"
+    wm_unsupported_copied_zip = wm_unsupported_copy_folder / "data.zip"
+    record(
+        "watermark_copy_unsupported_files_to_result_folder",
+        wm_unsupported_copy_result.get("status") == "success"
+        and wm_unsupported_copy_result.get("success_count") == 1
+        and wm_unsupported_copy_result.get("skipped_count") == 2
+        and wm_unsupported_copied_txt.exists()
+        and wm_unsupported_copied_txt.read_bytes() == wm_unsupported_txt.read_bytes()
+        and wm_unsupported_copied_zip.exists()
+        and wm_unsupported_copied_zip.read_bytes() == wm_unsupported_zip.read_bytes(),
+        {
+            "result": wm_unsupported_copy_result,
+            "copied_txt": str(wm_unsupported_copied_txt),
+            "copied_zip": str(wm_unsupported_copied_zip),
+            "outputs": list(wm_unsupported_copy_result.get("outputs", [])),
+        },
+    )
+
     wm_suffix_skip_root = root / "watermark_suffix_skip"
     wm_suffix_skip_root.mkdir()
     wm_suffix_keep_pdf = wm_suffix_skip_root / "normal.pdf"
@@ -1649,6 +1733,142 @@ def main():
         and "系解人体结构神经系统资料试卷" in wm_trailing_space_out.parts
         and wm_trailing_space_out.name == "试题.pdf",
         str(wm_trailing_space_out),
+    )
+
+    wm_resolve_root = root / "watermark_resolve_spaces"
+    wm_resolve_dir = wm_resolve_root / "数字逻辑期中卷"
+    wm_resolve_dir.mkdir(parents=True)
+    wm_resolve_pdf = wm_resolve_dir / "space.pdf"
+    make_pdf(wm_resolve_pdf, ["resolve spaces"])
+    wm_resolved = mod._resolve_watermark_source_path(wm_resolve_root / " 数字逻辑期中卷 " / " space.pdf ", wm_resolve_root)
+    record(
+        "watermark_resolves_trimmed_retry_paths",
+        wm_resolved == wm_resolve_pdf,
+        str(wm_resolved),
+    )
+
+    import tools.fx_watermark_core as wm_core_module
+
+    wm_repair_pdf = root / "watermark_repair_source.pdf"
+    wm_repair_out = root / "watermark_repair_output.pdf"
+    make_pdf(wm_repair_pdf, ["repair fallback target"])
+    wm_repair_pkt = mod.create_watermark_packet("REPAIR TEST", "SmileySans-Oblique", 28, 0.2, 45)
+    original_core_reader = wm_core_module.PdfReader
+    original_core_repair = wm_core_module._repair_pdf_for_watermark
+
+    def fake_broken_pdf_reader(target, *args, **kwargs):
+        if str(target) == str(wm_repair_pdf):
+            raise RuntimeError("Could not read Boolean object")
+        return original_core_reader(target, *args, **kwargs)
+
+    def fake_pdf_repair(src_path):
+        repaired = Path(tempfile.mkstemp(prefix="fx_repair_probe_", suffix=".pdf", dir=root)[1])
+        shutil.copy2(src_path, repaired)
+        return repaired, ""
+
+    wm_core_module.PdfReader = fake_broken_pdf_reader
+    wm_core_module._repair_pdf_for_watermark = fake_pdf_repair
+    try:
+        repair_status = mod.add_watermark_to_pdf(
+            str(wm_repair_pdf),
+            str(wm_repair_out),
+            wm_repair_pkt,
+            page_range="all",
+            check_text="REPAIR TEST",
+            force_mode=True,
+        )
+    finally:
+        wm_core_module.PdfReader = original_core_reader
+        wm_core_module._repair_pdf_for_watermark = original_core_repair
+    record(
+        "pdf_watermark_repair_fallback",
+        repair_status == "SUCCESS"
+        and wm_repair_out.exists()
+        and "REPAIR TEST" in "\n".join(page.extract_text() or "" for page in PdfReader(str(wm_repair_out)).pages),
+        repair_status,
+    )
+
+    class FakeRepairDocuments:
+        def __init__(self):
+            self.calls = []
+            self.doc = object()
+
+        def Open(self, *args):
+            self.calls.append(args)
+            if len(args) >= 14 and bool(args[13]):
+                return self.doc
+            raise RuntimeError("open failed")
+
+    fake_repair_docs = FakeRepairDocuments()
+    fake_repair_word = type("FakeRepairWord", (), {"Documents": fake_repair_docs})()
+    repair_doc = wm_core_module.open_word_document_safely(fake_repair_word, root / "repair_probe.docx")
+    record(
+        "word_open_repair_fallback",
+        repair_doc is fake_repair_docs.doc
+        and len(fake_repair_docs.calls) >= 3
+        and len(fake_repair_docs.calls[0]) == 4
+        and len(fake_repair_docs.calls[1]) == 1
+        and len(fake_repair_docs.calls[2]) >= 14
+        and bool(fake_repair_docs.calls[2][13]),
+        [len(args) for args in fake_repair_docs.calls],
+    )
+
+    wm_protected_root = root / "watermark_protected_preserve"
+    wm_protected_root.mkdir()
+    wm_protected_pdf = wm_protected_root / "protected.pdf"
+    make_pdf(wm_protected_pdf, ["protected original"])
+    mod._safe_named_widget_set(app, "wm_text", "PROTECTED WATERMARK")
+    mod._safe_var_set(app, "output_strategy_var", mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["result_folder"])
+    mod._safe_var_set(app, "wm_delete_var", False)
+    mod._safe_var_set(app, "wm_convert_pdf", False)
+    mod._safe_var_set(app, "wm_skip_hyphen_var", False)
+    mod._safe_var_set(app, "wm_range_var", "all")
+    mod._safe_var_set(app, "wm_overwrite_var", "force")
+    original_process_pdf = mod._watermark_process_pdf
+    mod._watermark_process_pdf = lambda src, dst, settings: "SKIP:protected pdf requires password"
+    try:
+        app.run_process(str(wm_protected_root), "watermark")
+    finally:
+        mod._watermark_process_pdf = original_process_pdf
+    wm_protected_result = mod._get_last_task_result(app)
+    wm_protected_copy = wm_protected_root / mod.RESULT_FOLDER_NAME / "protected.pdf"
+    record(
+        "watermark_protected_pdf_preserves_original",
+        wm_protected_result.get("status") == "success"
+        and wm_protected_result.get("failed_count") == 0
+        and wm_protected_result.get("skipped_count") == 1
+        and wm_protected_copy.exists()
+        and wm_protected_copy.read_bytes() == wm_protected_pdf.read_bytes(),
+        {"result": wm_protected_result, "copy": str(wm_protected_copy)},
+    )
+
+    wm_damaged_word_root = root / "watermark_damaged_word_preserve"
+    wm_damaged_word_root.mkdir()
+    wm_damaged_word_docx = wm_damaged_word_root / "damaged.docx"
+    wm_damaged_word_docx.write_bytes(b"not-a-real-docx")
+    mod._safe_named_widget_set(app, "wm_text", "DAMAGED WORD WATERMARK")
+    mod._safe_var_set(app, "output_strategy_var", mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["result_folder"])
+    mod._safe_var_set(app, "wm_delete_var", False)
+    mod._safe_var_set(app, "wm_convert_pdf", False)
+    mod._safe_var_set(app, "wm_skip_hyphen_var", False)
+    mod._safe_var_set(app, "wm_range_var", "all")
+    mod._safe_var_set(app, "wm_overwrite_var", "force")
+    original_process_word = mod._watermark_process_word
+    mod._watermark_process_word = lambda src, dst, settings, word_app: "SKIP:damaged word source"
+    try:
+        app.run_process(str(wm_damaged_word_root), "watermark")
+    finally:
+        mod._watermark_process_word = original_process_word
+    wm_damaged_word_result = mod._get_last_task_result(app)
+    wm_damaged_word_copy = wm_damaged_word_root / mod.RESULT_FOLDER_NAME / "damaged.docx"
+    record(
+        "watermark_damaged_word_preserves_original",
+        wm_damaged_word_result.get("status") == "success"
+        and wm_damaged_word_result.get("failed_count") == 0
+        and wm_damaged_word_result.get("skipped_count") == 1
+        and wm_damaged_word_copy.exists()
+        and wm_damaged_word_copy.read_bytes() == wm_damaged_word_docx.read_bytes(),
+        {"result": wm_damaged_word_result, "copy": str(wm_damaged_word_copy)},
     )
 
     wm_progress_values = []
@@ -2114,6 +2334,11 @@ def main():
             "log": len(fail_log_ranges),
         },
     )
+    if detail_window is not None:
+        try:
+            detail_window.destroy()
+        except Exception:
+            pass
     classified_failed_source = dict(failed_source)
     classified_failed_source["error"] = "路径不存在: probe.pdf"
     classified_failed_source["task_result"] = dict(failed_source["task_result"])
@@ -2243,6 +2468,33 @@ def main():
             "report": ocr_task_report,
         },
     )
+    Path(ocr_task_output).parent.mkdir(parents=True, exist_ok=True)
+    Path(ocr_task_output).write_bytes(b"%PDF-resume-probe")
+
+    class RaisingOcrEngine:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("OCR engine should not load for completed resume outputs")
+
+    original_resume_ocr_engine = pdf_ocr_task_module.FengxiPdfOcrEngine
+    pdf_ocr_task_module.FengxiPdfOcrEngine = RaisingOcrEngine
+    try:
+        ocr_resume_result = run_pdf_ocr_task_core(
+            [str(ocr_task_src)],
+            root / "ocr_task_module",
+            ocr_task_out_root,
+            PdfOcrTaskOptions(model_root=root, profile_key="general", backend_key="auto"),
+            PdfOcrTaskCallbacks(),
+        )
+    finally:
+        pdf_ocr_task_module.FengxiPdfOcrEngine = original_resume_ocr_engine
+    record(
+        "pdf_ocr_resume_skips_existing_output",
+        ocr_resume_result.get("status") == "success"
+        and ocr_resume_result.get("success_count") == 1
+        and ocr_resume_result.get("skipped_count") == 1
+        and ocr_resume_result.get("outputs") == [str(ocr_task_output)],
+        ocr_resume_result,
+    )
 
     img1 = root / "1.png"
     img2 = root / "2.png"
@@ -2286,6 +2538,26 @@ def main():
             "single": str(image_task_single_out),
         },
     )
+    image_resume_out = root / "image_task_resume_out"
+    image_resume_pdf = image_resume_out / "probe.pdf"
+    image_resume_pdf.parent.mkdir(parents=True)
+    image_resume_pdf.write_bytes(b"existing-image-pdf")
+    image_resume_result = run_image_pdf_task_core(
+        [str(image_task_probe_dir / "probe.png")],
+        image_task_probe_dir,
+        image_task_probe_dir,
+        image_resume_out,
+        ImagePdfTaskOptions(image_to_pdf=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("image pdf should resume"))),
+        ImagePdfTaskCallbacks(),
+    )
+    record(
+        "image_pdf_resume_skips_existing_output",
+        image_resume_result.get("status") == "success"
+        and image_resume_result.get("success_count") == 1
+        and image_resume_result.get("skipped_count") == 1
+        and image_resume_result.get("outputs") == [str(image_resume_pdf)],
+        image_resume_result,
+    )
 
     src = root / "stamp.txt"
     dst = root / "stamp_out.txt"
@@ -2302,6 +2574,17 @@ def main():
     mod.FengxiToolboxApp.process_single_file(dummy, str(src), str(inp), str(out), "pdf", ("split", "", False), [])
     split_folder = out / "multi"
     record("pdf_split", split_folder.exists() and len(list(split_folder.glob("*.pdf"))) == 2, "ok")
+    split_outputs = sorted(split_folder.glob("*.pdf"))
+    if split_outputs:
+        split_outputs[0].write_bytes(b"existing split resume marker")
+    mod.FengxiToolboxApp.process_single_file(dummy, str(src), str(inp), str(out), "pdf", ("split", "", False), [])
+    record(
+        "pdf_split_resume_skips_complete_outputs",
+        bool(split_outputs)
+        and split_outputs[0].read_bytes() == b"existing split resume marker"
+        and any("resume skip existing output" in str(item) or "断点续跑" in str(item) for item in dummy.logs),
+        dummy.logs[-4:],
+    )
 
     inp = root / "pdf_enc_in"
     out = root / "pdf_enc_out"
@@ -2498,6 +2781,30 @@ def main():
         src.write_text("x", encoding="utf-8")
         mod.FengxiToolboxApp.process_single_file(dummy, str(src), str(inp), str(out), "file", args, [])
         record(name, (out / expected).exists(), expected)
+
+    resume_rename_in = root / "file_rename_resume_in"
+    resume_rename_out = root / "file_rename_resume_out"
+    resume_rename_in.mkdir()
+    resume_rename_out.mkdir()
+    resume_rename_src = resume_rename_in / "demo.txt"
+    resume_rename_dst = resume_rename_out / "pre_demo_suf.txt"
+    resume_rename_src.write_text("new-source", encoding="utf-8")
+    resume_rename_dst.write_text("existing-output", encoding="utf-8")
+    mod.FengxiToolboxApp.process_single_file(
+        dummy,
+        str(resume_rename_src),
+        str(resume_rename_in),
+        str(resume_rename_out),
+        "file",
+        ("rename", "add", "pre_", "_suf"),
+        [],
+    )
+    record(
+        "process_single_file_resume_rename",
+        resume_rename_dst.read_text(encoding="utf-8") == "existing-output"
+        and any("resume skip existing output" in str(item) or "断点续跑" in str(item) for item in dummy.logs),
+        dummy.logs[-3:],
+    )
 
     file_core_out = root / "file_core_out"
     file_core_out.mkdir()
@@ -3065,6 +3372,46 @@ def main():
         transcribe_module_progress,
     )
 
+    audio_resume_out = audio_module_root / "transcribe_resume"
+    audio_resume_txt = audio_resume_out / "one.txt"
+    audio_resume_txt.parent.mkdir(parents=True)
+    audio_resume_txt.write_text("existing transcript\n", encoding="utf-8")
+    audio_resume_result = run_audio_task_core_module(
+        object(),
+        str(audio_module_root),
+        normalized_input=str(audio_module_root),
+        input_root=str(audio_module_root),
+        output_folder=str(audio_resume_out),
+        audio_files=[str(audio_module_root / "one.wav")],
+        result={"outputs": [], "failed_items": []},
+        tracker=MiniAudioTracker(),
+        is_parallel_enabled=lambda *_args, **_kwargs: False,
+        get_parallel_worker_count=lambda total: 1,
+        convert_audio_format=fake_module_convert,
+        copy_file_safe=fake_module_copy,
+        set_task_result_counts=set_audio_module_counts,
+        set_task_result_finished=lambda result, status, **kwargs: result.update({"status": status, **kwargs}) or result,
+        set_task_result_output_root=lambda result, value: result.update({"output_root": value}),
+        add_task_result_output=lambda result, value: result.setdefault("outputs", []).append(str(value)),
+        write_failed_report=lambda *_args, **_kwargs: "",
+        log=lambda *_args, **_kwargs: None,
+        progress_bar=type("Bar", (), {"set": lambda self, value: None})(),
+        stop_requested=lambda: False,
+        executor_factory=mod.concurrent.futures.ThreadPoolExecutor,
+        get_audio_task_args=lambda _app: ("transcribe", "txt", "192k", False),
+        get_audio_transcribe_args=lambda _app: {"model_name": "base", "language": "中文", "output_format": "txt"},
+        transcribe_media_file=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("audio transcribe should resume")),
+        callbacks=AudioTaskCallbacksModule(log=lambda *_args, **_kwargs: None, stop_requested=lambda: False),
+    )
+    record(
+        "audio_transcribe_resume_skips_existing_output",
+        audio_resume_result.get("status") == "success"
+        and audio_resume_result.get("success_count") == 1
+        and audio_resume_result.get("skipped_count") == 1
+        and audio_resume_result.get("outputs") == [str(audio_resume_txt)],
+        audio_resume_result,
+    )
+
     audio_parallel_root = root / "audio_parallel"
     audio_parallel_root.mkdir()
     (audio_parallel_root / "a.wav").write_bytes(b"fake-audio-a")
@@ -3368,6 +3715,15 @@ def main():
             "result": zip_core_run,
         },
     )
+    zip_resume_result = run_zip_task_module(zip_core_root, "smart_recursive")
+    record(
+        "zip_resume_skips_existing_archive",
+        zip_resume_result.get("status") == "success"
+        and zip_resume_result.get("success_count") == 1
+        and zip_resume_result.get("skipped_count") == 1
+        and zip_resume_result.get("outputs") == [str(zip_core_output.resolve())],
+        zip_resume_result,
+    )
 
     zip_smart_mix_root = root / "zip_smart_mix_semantics"
     (zip_smart_mix_root / "child_a").mkdir(parents=True)
@@ -3583,6 +3939,20 @@ def main():
         and not (rm_single_root / mod.RESULT_FOLDER_NAME).exists(),
         single_cleaned_pdf,
     )
+    single_cleaned_pdf.write_bytes(b"existing remove watermark result")
+    app.current_task = "remove_wm"
+    app.rm_wm_preserve_mine.set(False)
+    app.rm_wm_overwrite_original.set(False)
+    app.run_process(str(single_wm), "remove_wm")
+    single_resume_result = dict(getattr(app, "_fx_last_task_result", {}) or {})
+    record(
+        "pdf_remove_wm_single_resume_existing_output",
+        single_cleaned_pdf.read_bytes() == b"existing remove watermark result"
+        and single_resume_result.get("status") == "success"
+        and single_resume_result.get("skipped_count") == 1
+        and str(single_cleaned_pdf) in list(single_resume_result.get("outputs") or []),
+        single_resume_result,
+    )
 
     rm_single_overwrite_root = root / "pdf_remove_single_overwrite"
     rm_single_overwrite_root.mkdir()
@@ -3614,6 +3984,19 @@ def main():
     app.run_process(str(pm_root), "pdf")
     merged_pdf = pm_root / mod.RESULT_FOLDER_NAME / "Merged_All.pdf"
     record("pdf_merge_workflow", wait_for(lambda: merged_pdf.exists()), merged_pdf)
+    merged_pdf.write_bytes(b"existing merged pdf result")
+    app.current_task = "pdf"
+    app.pdf_mode_var.set("merge")
+    app.run_process(str(pm_root), "pdf")
+    merge_resume_result = dict(getattr(app, "_fx_last_task_result", {}) or {})
+    record(
+        "pdf_merge_resume_existing_output",
+        merged_pdf.read_bytes() == b"existing merged pdf result"
+        and merge_resume_result.get("status") == "success"
+        and merge_resume_result.get("skipped_count", 0) >= 1
+        and str(merged_pdf) in list(merge_resume_result.get("outputs") or []),
+        merge_resume_result,
+    )
 
     ocr_root = root / "pdf_ocr"
     ocr_root.mkdir()

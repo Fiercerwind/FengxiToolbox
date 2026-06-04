@@ -386,3 +386,12 @@
 - 	ools/fx_zip_core.py and 	ools/fx_pdf_compress_core.py may be modified when necessary, but must preserve stable processing behavior, output placement, archive naming, smart/recursive semantics, max-depth behavior, PDF/image compression options, and task result semantics unless the user explicitly asks for behavior changes.
 - Any core change must include regression coverage and validation notes. Prefer minimal, explainable patches over broad rewrites.
 - This supersedes older notes saying compression business/core code should not be changed by default.
+
+## 2026-06-03 PDF/File/Meta/ZIP Resume Rules
+- Shared helper: `tools/fx_resume.py` for nonempty-file checks, ZIP validity checks, output completeness checks, and resume-skip log messages.
+- Generic `process_single_file` resume covers file rename, metadata/privacy, ordinary conversion, image convert/compress, PDF encrypt, and PDF split.
+- PDF split resumes only when the existing split folder contains at least the source page count of nonempty PDFs.
+- ZIP resume uses `zipfile.is_zipfile`; valid existing archives are reused, while invalid/corrupt archives are replaced by normal processing.
+- PDF OCR skips engine loading when every planned output already exists, and also skips individual files whose searchable-PDF output already exists.
+- PDF compression reuses existing nonempty `<stem>_压缩.pdf` and does not delete the source for resumed items.
+- PDF merge reuses existing nonempty `Merged_All.pdf` in the result folder.

@@ -333,3 +333,43 @@
 - Important: do not rename or delete source files/folders. Only generated result-folder paths are normalized for Windows safety.
 - Regressions: watermark_result_path_strips_trailing_space_dirs, watermark_output_path_failure_does_not_abort_batch, watermark_progress_bar_syncs_with_status.
 - Validation: smoke_test 14/14; full_debug_test 188/188.
+
+## 2026-06-03 Watermark And Remove-Watermark Resume Rules
+- Batch watermark: if the planned output already exists and is nonempty, skip that file, reuse the output, and count it as success + skipped. Do not delete the source for resumed items.
+- Folder PDF remove-watermark: `_run_remove_wm_pdf_roundtrip(...)` skips a PDF when the planned output in `【处理完成】结果文件夹` already exists and is nonempty.
+- Single-file remove-watermark: same-directory resume checks the base `*_去水印.pdf` path only.
+- Do not use `_build_single_remove_wm_output_path(...)` for resume detection, because it intentionally returns a unique new name such as `*_去水印_2.pdf` when the base output exists.
+- Actual new single-file processing still uses `_finalize_single_remove_wm_output(...)` and the unique-output helper, preserving no-overwrite behavior.
+- Regression: `pdf_remove_wm_single_resume_existing_output`.
+## 2026-06-04 Batch watermark real-world failure sweep
+- Request: fix a real Archive failure list where batch watermark previously failed on path-mismatched PDFs, protected PDFs, damaged PDFs, and damaged Office files.
+- Fix:
+  - `tools/fx_watermark_core.py` now has `open_word_document_safely(...)` and uses repair-style open attempts before giving up on Word sources.
+  - Damaged/unreadable Word sources now return `SKIP:damaged word source` instead of hard failure.
+  - Loader-layer preserve-original logic now treats `SKIP:damaged word source` the same way as protected PDFs: copy the original into output and continue the batch.
+- Real-file validation:
+  - Mixed Archive probe with 7 representative files finished as `success`, with `4 success / 3 skipped / 0 failed / no failure report`.
+  - Skip cases were:
+    - protected PDF copied through unchanged;
+    - broken `.doc` copied through unchanged;
+    - broken `.docx` copied through unchanged.
+- Regression:
+  - `word_open_repair_fallback`
+  - `watermark_damaged_word_preserves_original`
+- Rule going forward:
+  - If a Word source is unreadable/corrupted and cannot be safely opened even with repair fallback, batch watermark must not mark the whole run failed. Preserve the original file in output, count it as skipped, and keep processing the rest.
+## 2026-06-04 批量水印“未处理文件复制”补齐
+- 用户需求：
+  - 之前 `跳过文件复制到输出文件夹` 只稳定覆盖了“按文件名规则跳过”的文件。
+  - 现在需要把所有“未处理文件”也纳入复制范围，例如 `txt`、`zip` 这类不会加水印的文件。
+- 当前规则：
+  - 文件名规则跳过文件继续沿用 `_copy_watermark_skipped_files(...)`，按原相对路径复制。
+  - 主循环里被判定为 `SKIP:*` 的未处理文件，只要开启 `wm_copy_skipped_var`，也会在任务结束后统一复制到输出/结果目录。
+  - 受保护 PDF、损坏 Word 这类本来就会保留原文件的跳过项，仍按原保留逻辑走，不重复改写。
+  - 额外保留 `_collect_watermark_input_files(...)` + `unsupported_skipped_files` 兜底，用来覆盖收集阶段就被排除的未来边界情况。
+- 关键实现边界：
+  - 只改 `Fengxi_Toolbox.py` 的批量水印任务调度层和 `full_debug_test.py` 回归。
+  - 不改 `tools/fx_watermark_core.py` 渲染核心。
+- 新增回归：
+  - `watermark_copy_unsupported_files_to_result_folder`
+  - 场景：`normal.pdf` 正常加水印，`notes.txt` 和 `data.zip` 作为未处理文件被计入 `skipped_count`，并复制到 `【处理完成】结果文件夹`。

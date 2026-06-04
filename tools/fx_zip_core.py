@@ -7,6 +7,8 @@ import time
 import zipfile
 from pathlib import Path
 
+from tools.fx_resume import is_valid_zip
+
 
 ZIP_MODE_TOTAL = "total"
 ZIP_MODE_RECURSIVE = "recursive"
@@ -263,6 +265,7 @@ def run_zip_task(
     stop_requested=None,
     log=None,
     overwrite=True,
+    resume=True,
 ):
     """Execute a ZIP task and return a structured result dictionary."""
 
@@ -306,6 +309,8 @@ def run_zip_task(
     if overwrite:
         for output in output_paths:
             if output.exists():
+                if resume and is_valid_zip(output):
+                    continue
                 try:
                     output.unlink()
                 except Exception as exc:
@@ -327,6 +332,12 @@ def run_zip_task(
         _log(log, f"[ZIP] {source_path} -> {output_path}")
         _emit_progress(progress, index - 1, total, source_path, "compressing")
         try:
+            if resume and is_valid_zip(output_path):
+                _log(log, f"[ZIP] resume skip existing archive: {output_path}")
+                result["outputs"].append(str(output_path))
+                result["success_count"] += 1
+                result["skipped_count"] += 1
+                continue
             if job["kind"] == "file":
                 _write_file_zip(source_path, output_path)
             else:

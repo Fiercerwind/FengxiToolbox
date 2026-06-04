@@ -1107,3 +1107,11 @@
 - User preference: after completing implementation or bug fixes, package the release build and open `dist_release_ascii\fx_toolbox\fx_toolbox.exe` automatically unless the user explicitly says not to.
 - Packaging pre-step remains scoped: only stop the existing packaged EXE process whose executable path is this repository's `dist_release_ascii\fx_toolbox\fx_toolbox.exe`; do not touch project-external files or unrelated processes.
 - Keep source validation first when code changed, then run `package.bat`, then open the packaged EXE for manual testing.
+
+## 2026-06-03 Task Resume And Background Guard
+- Shared resume helper module: `tools/fx_resume.py`.
+- Long-running tasks should reuse completed outputs when the expected output already exists and passes the task-specific validator. Log this as `断点续跑`, count it as `success_count += 1` and `skipped_count += 1`, and do not reprocess the item.
+- Generic `process_single_file` resume currently covers rename/meta/convert/image convert+compress/PDF encrypt/PDF split. PDF split resumes only when the split folder has at least the source page count of nonempty PDFs.
+- Dedicated adapters own resume checks for ZIP, PDF OCR, image PDF, audio conversion/transcription, PDF compression, batch watermark, remove-watermark, and PDF merge.
+- Background execution guard wraps patched `run_process` with Windows `SetThreadExecutionState`, preventing long jobs from being paused by idle/sleep while the app is in the background.
+- Future feature adapters should join this model instead of inventing separate already-processed logic.
