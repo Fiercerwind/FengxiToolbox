@@ -373,3 +373,32 @@
 - 新增回归：
   - `watermark_copy_unsupported_files_to_result_folder`
   - 场景：`normal.pdf` 正常加水印，`notes.txt` 和 `data.zip` 作为未处理文件被计入 `skipped_count`，并复制到 `【处理完成】结果文件夹`。
+
+## 2026-06-05 批量水印按文件类型跳过
+- 用户需求：
+  - 在现有“按文件名规则跳过”基础上，再增加“按文件类型不加水印”的选择。
+  - 需要支持至少 `PDF`、`Word`、`PPT` 三类。
+  - 如果用户没有勾选任何类型，行为必须与旧版完全一致，不能误改稳定工作流。
+  - 如果开启了 `跳过文件复制到输出文件夹`，这些按类型跳过的文件也要进入输出/结果目录。
+- 当前实现：
+  - `Fengxi_Toolbox.py`
+    - 新增 `wm_skip_pdf_type_var`、`wm_skip_word_type_var`、`wm_skip_ppt_type_var`。
+    - 在批量水印右侧参数区、“按文件名规则跳过”区域下方，增加 `不添加水印的文件类型` 复选项：`PDF` / `Word` / `PPT`。
+    - `_run_watermark_task(...)` 在正式处理前先按类型过滤输入文件；被选中的类型不进入加水印主循环。
+    - 这类文件计入 `skipped_count`，并在日志中以 `按文件类型跳过` 说明。
+    - 若 `wm_copy_skipped_var` 开启，则按原有 skipped-copy 出口复制到输出位置，保持与文件名规则跳过一致的相对路径行为。
+  - 上次设置记忆：
+    - 三个类型开关已接入 watermark last-settings 自动保存/恢复。
+- 关键兼容规则：
+  - 未勾选任何类型时，批量水印行为必须与旧逻辑完全一致。
+  - 该功能只影响 batch watermark 的 loader/UI/task-runner 层，不应改变 `tools/fx_watermark_core.py` 的渲染逻辑。
+  - 类型跳过与文件名规则跳过、未处理文件复制、受保护 PDF / 损坏 Word 保留原文件逻辑可以并存，最终统一体现在 `skipped_count` 和 `outputs`。
+- 新增/增强回归：
+  - `watermark_type_skip_options_visible`
+  - `watermark_type_skip_pdf_copies_and_word_processes`
+  - `watermark_parameters_auto_memory`
+  - `last_settings_watermark_save_restore`
+- 验证：
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` 通过。
+  - `python smoke_test.py` 14/14 通过。
+  - `python full_debug_test.py` 207/207 通过。

@@ -395,3 +395,32 @@
 - PDF OCR skips engine loading when every planned output already exists, and also skips individual files whose searchable-PDF output already exists.
 - PDF compression reuses existing nonempty `<stem>_压缩.pdf` and does not delete the source for resumed items.
 - PDF merge reuses existing nonempty `Merged_All.pdf` in the result folder.
+## 2026-06-04 ZIP 压缩层级范围
+- 用户需求：把原来的 `最多压缩层数` 改为可选择压缩层级范围，例如 `2-4`。
+- 当前语义：
+  - 留空：不限层级。
+  - 单个数字如 `4`：兼容旧逻辑，表示 `1-4`，即从根目录第 1 层压到第 4 层。
+  - 范围如 `2-4` / `2~4`：只生成第 2 到第 4 层的压缩包，不生成第 1 层根目录包。
+- 适用范围：`recursive` 全层级递归和 `smart_recursive` 智能混合；`total` 总包模式不受层级范围限制。
+- 智能混合细节：若当前层低于选择范围，例如选择 `2-4` 时第 1 层只是路过层，即使第 1 层有普通文件，也不会因为混合层规则阻止继续下钻；进入被选择的层级后才应用“普通文件 + 子文件夹则整体打包并停止下钻”的规则。
+- 实现：
+  - `tools/fx_zip_core.py` 新增 `normalize_zip_depth_range(...)`，并让计划/执行内部按 `(min_depth, max_depth)` 判断。
+  - `Fengxi_Toolbox.py` UI 改为“压缩层级范围”，占位提示为 `留空=不限，4=1-4，2-4=只压第2到4层`。
+  - 继续沿用 `zip_max_depth_var` 做上次设置记忆，避免破坏旧配置。
+- 回归：`zip_depth_range_recursive_and_smart` 覆盖 `2-3` 范围；`last_settings_zip_save_restore` 覆盖 `2-4` 记忆恢复。
+
+## 2026-06-04 ZIP depth range two-box UI
+- User correction: the ZIP depth range UI must not require manually typing `2-4`.
+- Current UI:
+  - There are two separate inputs: start layer and end layer.
+  - A fixed `-` label is displayed between them.
+  - Example: start `2`, end `4` internally becomes `2-4`.
+  - Leaving both blank means unlimited.
+- Compatibility:
+  - The ZIP core still accepts legacy single-string ranges such as `2-4`.
+  - Old saved settings with `zip_max_depth_var = "2-4"` are split into the two new fields on restore.
+  - New saved settings include `zip_min_depth_var`, `zip_max_depth_var`, and combined `zip_depth_range_var`.
+- Regression:
+  - `zip_depth_range_uses_two_inputs` verifies two entries and the fixed dash.
+  - `last_settings_zip_save_restore` verifies start `2`, end `4`, and internal combined range `2-4`.
+  - Validation passed: `py_compile`, `smoke_test.py` 14/14, `full_debug_test.py` 205/205.

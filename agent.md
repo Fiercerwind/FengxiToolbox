@@ -52,3 +52,11 @@
 - After completing implementation or bug fixes, default to running the release package flow and opening `dist_release_ascii\fx_toolbox\fx_toolbox.exe` for the user.
 - Skip automatic packaging/opening only when the user explicitly says not to package, not to open, or asks for analysis only.
 - Before packaging, stop only the existing project-packaged `fx_toolbox.exe` process from this repository's `dist_release_ascii\fx_toolbox` path so the build output is not locked.
+
+## Watermark Type-Skip Rule
+- Batch watermark now supports a second skip dimension by file type: `PDF`, `Word`, and `PPT`.
+- These type-skip options are loader/task-runner behavior, not a rendering-core rule change.
+- If none of the type checkboxes are selected, batch watermark behavior must remain exactly as before.
+- If one or more type checkboxes are selected, matching files must be skipped from watermark processing, counted in `skipped_count`, and logged as `按文件类型跳过`.
+- If `跳过文件复制到输出文件夹` is enabled, type-skipped files must also be copied into the output/result folder just like filename-rule skipped files and other unprocessed skipped files.
+- The selected type-skip options must participate in last-settings memory so the next session restores them.

@@ -1813,3 +1813,45 @@
 - 边界：
   - 未修改 `tools/fx_watermark_core.py`。
   - 未删除任何项目外文件。
+## 2026-06-04 ZIP 压缩层级范围调试状态
+- 已将 ZIP 控件从“最多压缩层数”升级为“压缩层级范围”。
+- 兼容旧输入：`4` 等价 `1-4`；新输入 `2-4` 只压第 2 到第 4 层。
+- 验证：
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_zip_core.py full_debug_test.py` 通过。
+  - ZIP 探针确认 `2-4` 对递归/智能混合都只生成第 2/3/4 层输出。
+  - `python smoke_test.py` 14/14 通过。
+  - `python full_debug_test.py` 204/204 通过。
+- 边界：未删除任何项目外文件；未改水印渲染核心。
+
+## 2026-06-04 ZIP depth range two-box UI validation
+- Change: ZIP layer range is now entered with two boxes, start and end, with a fixed `-` label between them.
+- Probe: start `2` + end `4` returns internal range `2-4`; start entry column is `1`, end entry column is `3`, dash label is visible.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_zip_core.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 205/205.
+
+## 2026-06-05 Batch watermark type-skip options
+- Request:
+  - Add a way to choose file types that should not receive watermark in batch watermark mode.
+  - At minimum support `PDF`, `Word`, `PPT`.
+  - Keep old behavior unchanged when no type is selected.
+  - If skipped-copy is enabled, type-skipped files must still be copied into the output/result folder.
+- Implemented:
+  - `Fengxi_Toolbox.py`
+    - added `wm_skip_pdf_type_var`, `wm_skip_word_type_var`, `wm_skip_ppt_type_var`;
+    - added visible `不添加水印的文件类型` controls under the watermark skip-rule block;
+    - added loader helpers to normalize/filter type-skipped files before the watermark processing loop;
+    - integrated type-skipped files into preview skip counting, `skipped_count`, logs, and skipped-copy output behavior;
+    - wired the three type flags into watermark last-settings capture/apply/install.
+  - `full_debug_test.py`
+    - added `watermark_type_skip_options_visible`;
+    - added `watermark_type_skip_pdf_copies_and_word_processes`;
+    - strengthened existing watermark auto-memory regressions to include the new type flags.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 207/207.
+- Important rule:
+  - Do not change watermark rendering core for this feature.
+  - With zero type checkboxes selected, runtime behavior must stay identical to the previous stable batch watermark flow.

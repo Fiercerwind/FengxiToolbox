@@ -59,6 +59,7 @@ from tools.fx_watermark_core import (
 )
 from tools.fx_zip_core import (
     estimate_zip_progress_units as estimate_zip_progress_units_module,
+    normalize_zip_depth_range as normalize_zip_depth_range_module,
     normalize_zip_max_depth as normalize_zip_max_depth_module,
     normalize_zip_mode as normalize_zip_mode_module,
     plan_zip_archives as plan_zip_archives_module,
@@ -1099,6 +1100,9 @@ def main():
     app.wm_skip_name_position_var.set("开头")
     app.wm_skip_name_text_var.set("AUTO")
     app.wm_copy_skipped_var.set(True)
+    app.wm_skip_pdf_type_var.set(True)
+    app.wm_skip_word_type_var.set(False)
+    app.wm_skip_ppt_type_var.set(True)
     app.wm_color_var.set("#336699")
     for slider_name, slider_value in (("slider_size", 66), ("slider_opacity", 0.31), ("slider_angle", 27)):
         mod._safe_named_widget_set(app, slider_name, slider_value)
@@ -1122,6 +1126,9 @@ def main():
         and auto_watermark_settings.get("wm_skip_name_position_var") == "开头"
         and auto_watermark_settings.get("wm_skip_name_text_var") == "AUTO"
         and auto_watermark_settings.get("wm_copy_skipped_var") is True
+        and auto_watermark_settings.get("wm_skip_pdf_type_var") is True
+        and auto_watermark_settings.get("wm_skip_word_type_var") is False
+        and auto_watermark_settings.get("wm_skip_ppt_type_var") is True
         and auto_watermark_settings.get("wm_color_var") == "#336699"
         and abs(float(auto_watermark_settings.get("slider_size", 0)) - float(app.slider_size.get())) < 0.01
         and abs(float(auto_watermark_settings.get("slider_opacity", 0)) - float(app.slider_opacity.get())) < 0.01
@@ -1137,6 +1144,9 @@ def main():
     app.wm_skip_name_position_var.set("开头")
     app.wm_skip_name_text_var.set("FX")
     app.wm_copy_skipped_var.set(True)
+    app.wm_skip_pdf_type_var.set(False)
+    app.wm_skip_word_type_var.set(True)
+    app.wm_skip_ppt_type_var.set(False)
     app.wm_color_var.set("#2A7FFF")
     mod._safe_named_widget_set(app, "slider_size", 72)
     mod._safe_named_widget_set(app, "slider_opacity", 0.22)
@@ -1147,6 +1157,9 @@ def main():
     app.wm_range_var.set("all")
     app.wm_skip_name_text_var.set("ZZ")
     app.wm_copy_skipped_var.set(False)
+    app.wm_skip_pdf_type_var.set(True)
+    app.wm_skip_word_type_var.set(False)
+    app.wm_skip_ppt_type_var.set(True)
     app.wm_color_var.set("#C0C0C0")
     mod._safe_named_widget_set(app, "slider_size", 20)
     apply_ok, apply_message = mod._restore_last_settings_category(app, "watermark")
@@ -1159,6 +1172,9 @@ def main():
         and app.wm_range_var.get() == "first"
         and app.wm_skip_name_text_var.get() == "FX"
         and app.wm_copy_skipped_var.get() is True
+        and app.wm_skip_pdf_type_var.get() is False
+        and app.wm_skip_word_type_var.get() is True
+        and app.wm_skip_ppt_type_var.get() is False
         and app.wm_color_var.get() == "#2A7FFF"
         and abs(float(app.slider_size.get()) - saved_slider_size) < 0.01,
         {
@@ -1563,6 +1579,24 @@ def main():
             ],
         },
     )
+    active_type_skip_controls = None
+    try:
+        for child in getattr(active_controls_row, "master", None).winfo_children():
+            if getattr(child, "_fx_wm_type_skip_controls", False):
+                active_type_skip_controls = child
+                break
+    except Exception:
+        active_type_skip_controls = None
+    type_skip_texts = collect_widget_texts(active_type_skip_controls) if active_type_skip_controls is not None else []
+    record(
+        "watermark_type_skip_options_visible",
+        active_type_skip_controls is not None
+        and getattr(active_type_skip_controls, "master", None) is getattr(active_controls_row, "master", None)
+        and "PDF" in type_skip_texts
+        and "Word" in type_skip_texts
+        and "PPT" in type_skip_texts,
+        {"texts": type_skip_texts, "controls": str(active_type_skip_controls)},
+    )
 
     wm_skip_copy_root = root / "watermark_skip_copy"
     wm_skip_copy_root.mkdir()
@@ -1644,6 +1678,54 @@ def main():
             "outputs": list(wm_unsupported_copy_result.get("outputs", [])),
         },
     )
+
+    wm_type_skip_root = root / "watermark_type_skip"
+    wm_type_skip_root.mkdir()
+    wm_type_pdf = wm_type_skip_root / "skip_pdf.pdf"
+    wm_type_word = wm_type_skip_root / "keep_word.docx"
+    make_pdf(wm_type_pdf, ["pdf should be copied without watermark"])
+    from docx import Document
+
+    doc = Document()
+    doc.add_paragraph("word should still receive watermark")
+    doc.save(wm_type_word)
+    mod._safe_named_widget_set(app, "wm_text", "TYPE SKIP WATERMARK")
+    mod._safe_var_set(app, "output_strategy_var", mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["result_folder"])
+    mod._safe_var_set(app, "wm_delete_var", False)
+    mod._safe_var_set(app, "wm_convert_pdf", False)
+    mod._safe_var_set(app, "wm_skip_hyphen_var", False)
+    mod._safe_var_set(app, "wm_copy_skipped_var", True)
+    mod._safe_var_set(app, "wm_skip_pdf_type_var", True)
+    mod._safe_var_set(app, "wm_skip_word_type_var", False)
+    mod._safe_var_set(app, "wm_skip_ppt_type_var", False)
+    mod._safe_var_set(app, "wm_range_var", "all")
+    mod._safe_var_set(app, "wm_overwrite_var", "force")
+    app.run_process(str(wm_type_skip_root), "watermark")
+    wm_type_skip_result = mod._get_last_task_result(app)
+    wm_type_skip_folder = wm_type_skip_root / mod.RESULT_FOLDER_NAME
+    wm_type_copied_pdf = wm_type_skip_folder / "skip_pdf.pdf"
+    wm_type_word_outputs = [
+        Path(item)
+        for item in wm_type_skip_result.get("outputs", [])
+        if Path(item).suffix.lower() == ".docx" and "keep_word" in Path(item).name
+    ]
+    record(
+        "watermark_type_skip_pdf_copies_and_word_processes",
+        wm_type_skip_result.get("status") == "success"
+        and wm_type_skip_result.get("success_count") == 1
+        and wm_type_skip_result.get("skipped_count") == 1
+        and wm_type_copied_pdf.exists()
+        and wm_type_copied_pdf.read_bytes() == wm_type_pdf.read_bytes()
+        and any(path.exists() for path in wm_type_word_outputs),
+        {
+            "result": wm_type_skip_result,
+            "copied_pdf": str(wm_type_copied_pdf),
+            "word_outputs": [str(path) for path in wm_type_word_outputs],
+        },
+    )
+    mod._safe_var_set(app, "wm_skip_pdf_type_var", False)
+    mod._safe_var_set(app, "wm_skip_word_type_var", False)
+    mod._safe_var_set(app, "wm_skip_ppt_type_var", False)
 
     wm_suffix_skip_root = root / "watermark_suffix_skip"
     wm_suffix_skip_root.mkdir()
@@ -3644,10 +3726,15 @@ def main():
     mod._refresh_visible_tab_layout(app, "zip")
     record(
         "zip_depth_control_visible",
-        getattr(app, "zip_max_depth_var", None) is not None
+        getattr(app, "zip_min_depth_var", None) is not None
+        and getattr(app, "zip_min_depth_entry", None) is not None
+        and getattr(app, "zip_max_depth_var", None) is not None
         and getattr(app, "zip_max_depth_entry", None) is not None
-        and "留空=不限" in str(app.zip_max_depth_entry.cget("placeholder_text")),
-        getattr(app, "zip_max_depth_entry", None),
+        and app.zip_min_depth_entry is not app.zip_max_depth_entry,
+        {
+            "start": getattr(app, "zip_min_depth_entry", None),
+            "end": getattr(app, "zip_max_depth_entry", None),
+        },
     )
     try:
         zip_tab = getattr(app, mod.TAB_LAYOUT_ATTRS["zip"])
@@ -3668,11 +3755,33 @@ def main():
         and getattr(app, "_fx_zip_depth_frame").winfo_manager() == "grid",
         {"mode_grid": zip_mode_grid, "depth_grid": zip_depth_grid},
     )
+    try:
+        zip_min_grid = app.zip_min_depth_entry.grid_info()
+        zip_max_grid = app.zip_max_depth_entry.grid_info()
+        zip_dash_visible = any(
+            isinstance(child, mod.customtkinter.CTkLabel)
+            and str(child.cget("text") or "") == "-"
+            and child.grid_info().get("column") == 2
+            for child in getattr(app, "_fx_zip_depth_frame").winfo_children()
+        )
+    except Exception as exc:
+        zip_min_grid = {"error": str(exc)}
+        zip_max_grid = {}
+        zip_dash_visible = False
+    record(
+        "zip_depth_range_uses_two_inputs",
+        zip_min_grid.get("column") == 1
+        and zip_max_grid.get("column") == 3
+        and zip_dash_visible
+        and mod._get_zip_max_depth(app) == "",
+        {"start_grid": zip_min_grid, "end_grid": zip_max_grid, "dash": zip_dash_visible},
+    )
 
     zip_preview_root = root / "zip_preview_subfolders_only"
     (zip_preview_root / "child").mkdir(parents=True)
     app.current_task = "zip"
     app.zip_mode_var.set("smart_recursive")
+    app.zip_min_depth_var.set("")
     app.zip_max_depth_var.set("")
     zip_preview = mod._build_start_preview(app, str(zip_preview_root), "zip")
     record(
@@ -3757,20 +3866,39 @@ def main():
         Path(item["output"]).relative_to(zip_depth_root).as_posix()
         for item in plan_zip_archives_module(zip_depth_root, "smart_recursive", max_depth=2)
     }
+    recursive_range_outputs = {
+        Path(item["output"]).relative_to(zip_depth_root).as_posix()
+        for item in plan_zip_archives_module(zip_depth_root, "recursive", max_depth="2-3")
+    }
+    smart_range_outputs = {
+        Path(item["output"]).relative_to(zip_depth_root).as_posix()
+        for item in plan_zip_archives_module(zip_depth_root, "smart_recursive", max_depth="2-3")
+    }
     record(
-        "zip_max_depth_recursive_and_smart",
+        "zip_depth_range_recursive_and_smart",
         normalize_zip_max_depth_module("2") == 2
+        and normalize_zip_depth_range_module("2-3") == (2, 3)
+        and normalize_zip_depth_range_module("4") == (1, 4)
         and normalize_zip_max_depth_module("") is None
         and recursive_depth_outputs == {"zip_depth_limit.zip", "level2.zip"}
         and smart_depth_outputs == {"zip_depth_limit.zip", "level2.zip"}
+        and recursive_range_outputs == {"level2.zip", "level2/level3.zip"}
+        and smart_range_outputs == {"level2.zip", "level2/level3.zip"}
         and estimate_zip_progress_units_module(zip_depth_root, "smart_recursive", max_depth=2) == 2,
-        {"recursive": sorted(recursive_depth_outputs), "smart": sorted(smart_depth_outputs)},
+        {
+            "recursive": sorted(recursive_depth_outputs),
+            "smart": sorted(smart_depth_outputs),
+            "recursive_range": sorted(recursive_range_outputs),
+            "smart_range": sorted(smart_range_outputs),
+        },
     )
 
     app.zip_mode_var.set("smart_recursive")
-    app.zip_max_depth_var.set("2")
+    app.zip_min_depth_var.set("2")
+    app.zip_max_depth_var.set("4")
     zip_last = mod._save_last_settings_category(app, "zip")
     app.zip_mode_var.set("total")
+    app.zip_min_depth_var.set("")
     app.zip_max_depth_var.set("")
     zip_apply_ok, _zip_apply_message = mod._restore_last_settings_category(app, "zip")
     record(
@@ -3778,14 +3906,22 @@ def main():
         zip_apply_ok
         and isinstance(zip_last, dict)
         and app.zip_mode_var.get() == "smart_recursive"
-        and app.zip_max_depth_var.get() == "2",
-        {"saved": zip_last, "mode": app.zip_mode_var.get(), "depth": app.zip_max_depth_var.get()},
+        and app.zip_min_depth_var.get() == "2"
+        and app.zip_max_depth_var.get() == "4"
+        and mod._get_zip_max_depth(app) == "2-4",
+        {
+            "saved": zip_last,
+            "mode": app.zip_mode_var.get(),
+            "start": app.zip_min_depth_var.get(),
+            "end": app.zip_max_depth_var.get(),
+            "depth": mod._get_zip_max_depth(app),
+        },
     )
 
-    zip_smart_notice_messages = mod._build_zip_plan_messages(zip_smart_mix_root, "smart_recursive", max_depth=2)
+    zip_smart_notice_messages = mod._build_zip_plan_messages(zip_smart_mix_root, "smart_recursive", max_depth="2-4")
     record(
         "zip_smart_plan_notice",
-        any("最多压缩层数：2" in item for item in zip_smart_notice_messages)
+        any("2-4" in item for item in zip_smart_notice_messages)
         and any("智能混合" in item for item in zip_smart_notice_messages)
         and any("本次预计生成" in item for item in zip_smart_notice_messages)
         and any("child_a.zip" in item for item in zip_smart_notice_messages),

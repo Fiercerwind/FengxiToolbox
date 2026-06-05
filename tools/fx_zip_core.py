@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 import zipfile
 from pathlib import Path
@@ -14,6 +15,9 @@ ZIP_MODE_TOTAL = "total"
 ZIP_MODE_RECURSIVE = "recursive"
 ZIP_MODE_SMART_RECURSIVE = "smart_recursive"
 ZIP_MODES = {ZIP_MODE_TOTAL, ZIP_MODE_RECURSIVE, ZIP_MODE_SMART_RECURSIVE}
+ZIP_ARCHIVE_POLICY_REUSE = "reuse_existing"
+ZIP_ARCHIVE_POLICY_REBUILD = "rebuild_existing"
+ZIP_ARCHIVE_POLICIES = {ZIP_ARCHIVE_POLICY_REUSE, ZIP_ARCHIVE_POLICY_REBUILD}
 ARCHIVE_FILE_EXTS = {
     ".zip",
     ".rar",
@@ -33,6 +37,27 @@ def normalize_zip_mode(mode):
     return ZIP_MODE_TOTAL
 
 
+def normalize_zip_archive_policy(value):
+    normalized = str(value or ZIP_ARCHIVE_POLICY_REUSE).strip()
+    aliases = {
+        "reuse": ZIP_ARCHIVE_POLICY_REUSE,
+        "copy": ZIP_ARCHIVE_POLICY_REUSE,
+        "copy_existing": ZIP_ARCHIVE_POLICY_REUSE,
+        "preserve": ZIP_ARCHIVE_POLICY_REUSE,
+        "skip": ZIP_ARCHIVE_POLICY_REUSE,
+        "resume": ZIP_ARCHIVE_POLICY_REUSE,
+        "rebuild": ZIP_ARCHIVE_POLICY_REBUILD,
+        "replace": ZIP_ARCHIVE_POLICY_REBUILD,
+        "delete": ZIP_ARCHIVE_POLICY_REBUILD,
+        "overwrite": ZIP_ARCHIVE_POLICY_REBUILD,
+        "recompress": ZIP_ARCHIVE_POLICY_REBUILD,
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized in ZIP_ARCHIVE_POLICIES:
+        return normalized
+    return ZIP_ARCHIVE_POLICY_REUSE
+
+
 def normalize_zip_max_depth(value):
     """Return a positive layer count, or None for unlimited."""
 
@@ -45,6 +70,54 @@ def normalize_zip_max_depth(value):
     except Exception:
         return None
     return depth if depth > 0 else None
+
+
+def normalize_zip_depth_range(value):
+    """Return (min_depth, max_depth), where max_depth None means unlimited.
+
+    Backward compatibility: a single number such as "4" keeps the previous
+    meaning of layers 1 through 4. A range such as "2-4" means only layers
+    2 through 4 are planned.
+    """
+
+    if value is None:
+        return 1, None
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        text = str(value).strip()
+    if not text:
+        return 1, None
+
+    parts = [part.strip() for part in re.split(r"[-~～—–,，\s]+", text) if part.strip()]
+    try:
+        if len(parts) >= 2:
+            min_depth = int(parts[0])
+            max_depth = int(parts[1])
+        else:
+            min_depth = 1
+            max_depth = int(parts[0])
+    except Exception:
+        return 1, None
+
+    min_depth = max(1, min_depth)
+    if max_depth <= 0:
+        return min_depth, None
+    if max_depth < min_depth:
+        min_depth, max_depth = max_depth, min_depth
+        min_depth = max(1, min_depth)
+    return min_depth, max_depth
+
+
+def _zip_depth_range_label(depth_range):
+    min_depth, max_depth = depth_range
+    if min_depth <= 1 and max_depth is None:
+        return "unlimited"
+    if max_depth is None:
+        return f"{min_depth}+"
+    if min_depth <= 1:
+        return str(max_depth)
+    return f"{min_depth}-{max_depth}"
 
 
 def _archive_output_for(source, mode, is_file=False, root_source=None):
@@ -80,14 +153,19 @@ def _is_archive_file(path):
     return Path(path).suffix.lower() in ARCHIVE_FILE_EXTS
 
 
-def _within_max_depth(depth, max_depth):
-    max_depth = normalize_zip_max_depth(max_depth)
-    return max_depth is None or depth <= max_depth
+def _within_depth_range(depth, depth_range):
+    min_depth, max_depth = depth_range
+    return depth >= min_depth and (max_depth is None or depth <= max_depth)
 
 
-def _can_descend(depth, max_depth):
-    max_depth = normalize_zip_max_depth(max_depth)
+def _can_descend(depth, depth_range):
+    _min_depth, max_depth = depth_range
     return max_depth is None or depth < max_depth
+
+
+def _depth_is_before_selected_range(depth, depth_range):
+    min_depth, _max_depth = depth_range
+    return depth < min_depth
 
 
 def plan_zip_archives(input_path, mode=ZIP_MODE_TOTAL, max_depth=None):
@@ -95,7 +173,7 @@ def plan_zip_archives(input_path, mode=ZIP_MODE_TOTAL, max_depth=None):
 
     source = Path(input_path).resolve()
     mode = normalize_zip_mode(mode)
-    max_depth = normalize_zip_max_depth(max_depth)
+    depth_range = normalize_zip_depth_range(max_depth)
     if source.is_file():
         return [
             {
@@ -129,12 +207,12 @@ def plan_zip_archives(input_path, mode=ZIP_MODE_TOTAL, max_depth=None):
                 current_depth = len(current_path.relative_to(source).parts) + 1
             except Exception:
                 current_depth = 1
-            if not _can_descend(current_depth, max_depth):
+            if not _can_descend(current_depth, depth_range):
                 dirs[:] = []
                 continue
             for dirname in dirs:
                 child_depth = current_depth + 1
-                if _within_max_depth(child_depth, max_depth):
+                if _within_depth_range(child_depth, depth_range):
                     folders.append((current_path / dirname, child_depth))
         return [
             {
@@ -145,29 +223,30 @@ def plan_zip_archives(input_path, mode=ZIP_MODE_TOTAL, max_depth=None):
                 "depth": depth,
             }
             for folder, depth in folders
-            if _within_max_depth(depth, max_depth)
+            if _within_depth_range(depth, depth_range)
         ]
 
     jobs = []
 
     def visit(folder, depth=1):
-        if not _within_max_depth(depth, max_depth):
+        if not _can_descend(depth - 1, depth_range):
             return
         child_dirs = _sorted_child_dirs(folder)
         child_files = _sorted_child_files(folder)
         meaningful_files = [item for item in child_files if not _is_archive_file(item)]
-        jobs.append(
-            {
-                "source": Path(folder),
-                "output": _archive_output_for(folder, mode, root_source=source),
-                "kind": "dir",
-                "mode": mode,
-                "depth": depth,
-            }
-        )
-        if not child_dirs or not _can_descend(depth, max_depth):
+        if _within_depth_range(depth, depth_range):
+            jobs.append(
+                {
+                    "source": Path(folder),
+                    "output": _archive_output_for(folder, mode, root_source=source),
+                    "kind": "dir",
+                    "mode": mode,
+                    "depth": depth,
+                }
+            )
+        if not child_dirs or not _can_descend(depth, depth_range):
             return
-        if meaningful_files:
+        if meaningful_files and not _depth_is_before_selected_range(depth, depth_range):
             return
         for child in child_dirs:
             visit(child, depth + 1)
@@ -261,6 +340,7 @@ def run_zip_task(
     mode=ZIP_MODE_TOTAL,
     *,
     max_depth=None,
+    archive_policy=ZIP_ARCHIVE_POLICY_REUSE,
     progress=None,
     stop_requested=None,
     log=None,
@@ -272,11 +352,16 @@ def run_zip_task(
     started_at = time.time()
     source = Path(input_path).resolve()
     mode = normalize_zip_mode(mode)
-    max_depth = normalize_zip_max_depth(max_depth)
+    archive_policy = normalize_zip_archive_policy(archive_policy)
+    effective_resume = bool(resume) and archive_policy == ZIP_ARCHIVE_POLICY_REUSE
+    depth_range = normalize_zip_depth_range(max_depth)
     result = {
         "status": "unknown",
         "mode": mode,
-        "max_depth": max_depth,
+        "archive_policy": archive_policy,
+        "max_depth": depth_range[1],
+        "min_depth": depth_range[0],
+        "depth_range": _zip_depth_range_label(depth_range),
         "input_path": str(source),
         "outputs": [],
         "failed_items": [],
@@ -309,7 +394,7 @@ def run_zip_task(
     if overwrite:
         for output in output_paths:
             if output.exists():
-                if resume and is_valid_zip(output):
+                if effective_resume and is_valid_zip(output):
                     continue
                 try:
                     output.unlink()
@@ -332,7 +417,7 @@ def run_zip_task(
         _log(log, f"[ZIP] {source_path} -> {output_path}")
         _emit_progress(progress, index - 1, total, source_path, "compressing")
         try:
-            if resume and is_valid_zip(output_path):
+            if effective_resume and is_valid_zip(output_path):
                 _log(log, f"[ZIP] resume skip existing archive: {output_path}")
                 result["outputs"].append(str(output_path))
                 result["success_count"] += 1

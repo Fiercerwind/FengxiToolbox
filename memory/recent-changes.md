@@ -1,5 +1,20 @@
 # 最近变更
 
+## 2026-06-05 06:09:29 | watermark
+- 摘要：batch watermark supports type-based skip options
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, agent.md, memory\categories\watermark-and-remove.md, memory\debug-status.md
+- 说明：Added PDF/Word/PPT type-skip options to batch watermark. When no type is selected, behavior stays unchanged. Selected type-skipped files are counted in skipped_count, logged as 按文件类型跳过, participate in last-settings memory, and are copied to the output/result folder when wm_copy_skipped_var is enabled. Validation: py_compile passed, smoke_test 14/14, full_debug_test 207/207.
+
+## 2026-06-04 23:27:28 | zip
+- 摘要：ZIP depth range uses two UI inputs
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory\categories\pdf-file-meta-zip.md, memory\debug-status.md
+- 说明：Changed batch compression depth range UI from one manual 2-4 text box to two inputs: start and end, with a fixed dash between them. The app combines start=2 and end=4 into internal range 2-4, preserves legacy saved settings, and validates with py_compile, smoke_test 14/14, full_debug_test 205/205.
+
+## 2026-06-04 23:07:32 | zip
+- 摘要：ZIP depth control now supports selectable layer ranges
+- 文件：Fengxi_Toolbox.py, tools\fx_zip_core.py, full_debug_test.py, memory\categories\pdf-file-meta-zip.md, memory\debug-status.md
+- 说明：Changed ZIP max-depth input into a layer range control. Blank is unlimited, single number keeps old 1-N behavior, and ranges like 2-4 only plan selected layers. Smart mode descends through pre-range layers before applying mixed-layer stop rules. Validation: py_compile, ZIP probe, smoke_test 14/14, full_debug_test 204/204.
+
 ## 2026-06-04 01:06:31 | watermark
 - 摘要：batch watermark now copies all unprocessed skipped files
 - 文件：Fengxi_Toolbox.py, full_debug_test.py, memory\categories\watermark-and-remove.md, memory\debug-status.md
