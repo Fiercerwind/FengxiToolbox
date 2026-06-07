@@ -424,3 +424,24 @@
   - `zip_depth_range_uses_two_inputs` verifies two entries and the fixed dash.
   - `last_settings_zip_save_restore` verifies start `2`, end `4`, and internal combined range `2-4`.
   - Validation passed: `py_compile`, `smoke_test.py` 14/14, `full_debug_test.py` 205/205.
+## 2026-06-05 ZIP existing archive policy
+- Request: recursive ZIP and smart ZIP need a user-selectable policy for same-name existing zip files.
+- Semantics:
+  - `reuse_existing` is the default and preserves existing behavior: if a planned output zip already exists and is valid, reuse it as a breakpoint/resume result and count it as skipped.
+  - `rebuild_existing` deletes only the planned output zip files and regenerates them.
+  - This does not delete unrelated `.zip/.rar/.7z` files discovered inside the input tree, and it does not extract/rewrite arbitrary archive source files.
+- UI:
+  - ZIP page has a new `已有压缩包` dropdown with `复用已有压缩包（断点续跑）` and `删除旧包并重新压缩`.
+  - The setting applies to recursive and smart modes; total mode keeps its normal behavior.
+- Implementation:
+  - `tools/fx_zip_core.py` adds `normalize_zip_archive_policy(...)` and `archive_policy` support in `run_zip_task(...)`.
+  - `Fengxi_Toolbox.py` adds `zip_archive_policy_var`, passes the normalized policy into ZIP execution, logs it in plan messages, and saves/restores it through ZIP last-settings.
+- Regression:
+  - `zip_archive_policy_control_visible`
+  - `zip_rebuild_existing_archive_policy`
+  - `last_settings_zip_save_restore` now checks `zip_archive_policy_var`.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_zip_core.py full_debug_test.py` passed.
+  - Lightweight ZIP probe confirmed reuse keeps old zip contents and rebuild replaces them with newly compressed contents.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 209/209.

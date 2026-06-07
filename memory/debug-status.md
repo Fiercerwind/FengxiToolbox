@@ -1855,3 +1855,23 @@
 - Important rule:
   - Do not change watermark rendering core for this feature.
   - With zero type checkboxes selected, runtime behavior must stay identical to the previous stable batch watermark flow.
+## 2026-06-05 ZIP existing archive policy validation
+- Goal:
+  - Recursive ZIP and smart ZIP can choose how to handle same-name existing output archives.
+- Behavior:
+  - Default `reuse_existing`: valid planned output zip files are reused for breakpoint/resume and counted as skipped.
+  - Optional `rebuild_existing`: planned output zip files are deleted and regenerated.
+  - The rebuild policy is limited to planned output paths only; it must not delete unrelated archive files inside the source tree.
+- Files changed:
+  - `tools/fx_zip_core.py`
+  - `Fengxi_Toolbox.py`
+  - `full_debug_test.py`
+- New/updated regressions:
+  - `zip_archive_policy_control_visible`
+  - `zip_rebuild_existing_archive_policy`
+  - `last_settings_zip_save_restore`
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_zip_core.py full_debug_test.py` passed.
+  - Lightweight ZIP probe passed: reuse kept `old.txt` inside an existing zip; rebuild removed it and wrote the fresh `a.txt` content.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 209/209.

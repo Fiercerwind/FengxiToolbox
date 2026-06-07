@@ -59,6 +59,7 @@ from tools.fx_watermark_core import (
 )
 from tools.fx_zip_core import (
     estimate_zip_progress_units as estimate_zip_progress_units_module,
+    normalize_zip_archive_policy as normalize_zip_archive_policy_module,
     normalize_zip_depth_range as normalize_zip_depth_range_module,
     normalize_zip_max_depth as normalize_zip_max_depth_module,
     normalize_zip_mode as normalize_zip_mode_module,
@@ -3776,6 +3777,22 @@ def main():
         and mod._get_zip_max_depth(app) == "",
         {"start_grid": zip_min_grid, "end_grid": zip_max_grid, "dash": zip_dash_visible},
     )
+    try:
+        zip_policy_combo = getattr(app, "zip_archive_policy_combo", None)
+        zip_policy_values = list(zip_policy_combo.cget("values") or []) if zip_policy_combo is not None else []
+    except Exception:
+        zip_policy_combo = None
+        zip_policy_values = []
+    record(
+        "zip_archive_policy_control_visible",
+        getattr(app, "zip_archive_policy_var", None) is not None
+        and zip_policy_combo is not None
+        and zip_policy_combo.winfo_manager() == "grid"
+        and "复用已有压缩包（断点续跑）" in zip_policy_values
+        and "删除旧包并重新压缩" in zip_policy_values
+        and mod._get_zip_archive_policy(app) == "reuse_existing",
+        {"values": zip_policy_values, "policy": mod._get_zip_archive_policy(app)},
+    )
 
     zip_preview_root = root / "zip_preview_subfolders_only"
     (zip_preview_root / "child").mkdir(parents=True)
@@ -3832,6 +3849,24 @@ def main():
         and zip_resume_result.get("skipped_count") == 1
         and zip_resume_result.get("outputs") == [str(zip_core_output.resolve())],
         zip_resume_result,
+    )
+    with zipfile.ZipFile(zip_core_output, "w") as archive:
+        archive.writestr("old.txt", "old archive")
+    zip_rebuild_result = run_zip_task_module(zip_core_root, "smart_recursive", archive_policy="rebuild_existing")
+    try:
+        with zipfile.ZipFile(zip_core_output) as archive:
+            rebuilt_names = set(archive.namelist())
+    except Exception:
+        rebuilt_names = set()
+    record(
+        "zip_rebuild_existing_archive_policy",
+        normalize_zip_archive_policy_module("replace") == "rebuild_existing"
+        and zip_rebuild_result.get("status") == "success"
+        and zip_rebuild_result.get("archive_policy") == "rebuild_existing"
+        and zip_rebuild_result.get("skipped_count") == 0
+        and "old.txt" not in rebuilt_names
+        and "a.txt" in rebuilt_names,
+        {"result": zip_rebuild_result, "names": sorted(rebuilt_names)},
     )
 
     zip_smart_mix_root = root / "zip_smart_mix_semantics"
@@ -3896,10 +3931,12 @@ def main():
     app.zip_mode_var.set("smart_recursive")
     app.zip_min_depth_var.set("2")
     app.zip_max_depth_var.set("4")
+    app.zip_archive_policy_var.set("删除旧包并重新压缩")
     zip_last = mod._save_last_settings_category(app, "zip")
     app.zip_mode_var.set("total")
     app.zip_min_depth_var.set("")
     app.zip_max_depth_var.set("")
+    app.zip_archive_policy_var.set("复用已有压缩包（断点续跑）")
     zip_apply_ok, _zip_apply_message = mod._restore_last_settings_category(app, "zip")
     record(
         "last_settings_zip_save_restore",
@@ -3908,22 +3945,25 @@ def main():
         and app.zip_mode_var.get() == "smart_recursive"
         and app.zip_min_depth_var.get() == "2"
         and app.zip_max_depth_var.get() == "4"
-        and mod._get_zip_max_depth(app) == "2-4",
+        and mod._get_zip_max_depth(app) == "2-4"
+        and mod._get_zip_archive_policy(app) == "rebuild_existing",
         {
             "saved": zip_last,
             "mode": app.zip_mode_var.get(),
             "start": app.zip_min_depth_var.get(),
             "end": app.zip_max_depth_var.get(),
             "depth": mod._get_zip_max_depth(app),
+            "archive_policy": mod._get_zip_archive_policy(app),
         },
     )
 
-    zip_smart_notice_messages = mod._build_zip_plan_messages(zip_smart_mix_root, "smart_recursive", max_depth="2-4")
+    zip_smart_notice_messages = mod._build_zip_plan_messages(zip_smart_mix_root, "smart_recursive", max_depth="2-4", archive_policy="rebuild_existing")
     record(
         "zip_smart_plan_notice",
         any("2-4" in item for item in zip_smart_notice_messages)
         and any("智能混合" in item for item in zip_smart_notice_messages)
         and any("本次预计生成" in item for item in zip_smart_notice_messages)
+        and any("重新压缩" in item for item in zip_smart_notice_messages)
         and any("child_a.zip" in item for item in zip_smart_notice_messages),
         zip_smart_notice_messages,
     )

@@ -60,3 +60,9 @@
 - If one or more type checkboxes are selected, matching files must be skipped from watermark processing, counted in `skipped_count`, and logged as `按文件类型跳过`.
 - If `跳过文件复制到输出文件夹` is enabled, type-skipped files must also be copied into the output/result folder just like filename-rule skipped files and other unprocessed skipped files.
 - The selected type-skip options must participate in last-settings memory so the next session restores them.
+## ZIP Existing-Archive Policy
+- Recursive ZIP and smart ZIP now have an existing same-name archive policy.
+- Default policy is `reuse_existing`: valid existing planned output zip files are reused as breakpoint/resume results and counted as skipped.
+- Optional policy is `rebuild_existing`: only planned output zip files are deleted and regenerated. Do not delete unrelated archive files found inside the input tree.
+- This policy is about same-name planned output archives, not about extracting or rewriting arbitrary `.zip/.rar/.7z` source files.
+- The policy must be saved/restored in ZIP last-settings as `zip_archive_policy_var`.

@@ -1,5 +1,10 @@
 # 最近变更
 
+## 2026-06-05 22:00:25 | zip
+- 摘要：ZIP existing archive policy
+- 文件：Fengxi_Toolbox.py, tools\fx_zip_core.py, full_debug_test.py, agent.md, memory\categories\pdf-file-meta-zip.md, memory\debug-status.md
+- 说明：Added a ZIP existing-archive policy for recursive and smart modes. Default reuse_existing preserves breakpoint/resume behavior by reusing valid planned output zips; rebuild_existing deletes only planned output zips and regenerates them. Added UI dropdown, last-settings memory, plan logs, and regressions. Validation: py_compile passed, lightweight ZIP probe passed, smoke_test 14/14, full_debug_test 209/209.
+
 ## 2026-06-05 06:09:29 | watermark
 - 摘要：batch watermark supports type-based skip options
 - 文件：Fengxi_Toolbox.py, full_debug_test.py, agent.md, memory\categories\watermark-and-remove.md, memory\debug-status.md

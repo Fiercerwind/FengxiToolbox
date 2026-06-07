@@ -7841,7 +7841,7 @@ def _install_zip_last_settings_memory(app):
         _schedule_zip_last_settings_persistence(target)
 
     trace_ids = []
-    for name in ("zip_mode_var", "zip_min_depth_var", "zip_max_depth_var"):
+    for name in ("zip_mode_var", "zip_min_depth_var", "zip_max_depth_var", "zip_archive_policy_var"):
         var = getattr(app, name, None)
         if not isinstance(var, tkinter.Variable):
             continue
@@ -10970,6 +10970,7 @@ def _apply_preset_settings(app, preset, switch_task=True):
             _safe_var_set(app, "zip_max_depth_var", settings.get("zip_max_depth_var", ""))
         else:
             _set_zip_depth_fields(app, settings.get("zip_depth_range_var", settings.get("zip_max_depth_var", "")))
+        _set_zip_archive_policy(app, settings.get("zip_archive_policy_var", settings.get("zip_existing_archive_policy", "reuse_existing")))
     else:
         return False, "暂不支持该设置类型。"
 
@@ -11004,6 +11005,7 @@ def _last_settings_category_ready(app, category):
             getattr(app, "zip_mode_var", None) is not None
             and getattr(app, "zip_min_depth_var", None) is not None
             and getattr(app, "zip_max_depth_var", None) is not None
+            and getattr(app, "zip_archive_policy_var", None) is not None
         )
     return False
 
