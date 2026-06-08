@@ -402,3 +402,10 @@
   - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` 通过。
   - `python smoke_test.py` 14/14 通过。
   - `python full_debug_test.py` 207/207 通过。
+## 2026-06-07 Word first-page-only watermark scope fix
+- Symptom: direct Word watermark ignored the UI option `????` / `page_range=first`; generated `.docx` files showed the watermark on every page.
+- Root cause: Word direct watermark is implemented through headers. The previous core code stopped after adding one shape, but it added that shape to the normal primary header, and Word repeats primary headers across all pages in the section.
+- Fix: `tools/fx_watermark_core.py` now maps `page_range=first` to Word's first-page header semantics: enable `DifferentFirstPageHeaderFooter` on the first section and add the watermark to header index `2` only. `page_range=all` still uses the existing all-header behavior.
+- Regression: `word_watermark_first_page_only_scope` creates a two-page Word document, applies `page_range=first`, exports the result to PDF, and asserts page 1 has visible watermark pixels while page 2 has none.
+- Validation: `python -m py_compile Fengxi_Toolbox.py tools\fx_watermark_core.py full_debug_test.py` passed; `python smoke_test.py` passed 14/14; `python full_debug_test.py` passed 210/210. In the new regression, page 1 pixels were 29205 and page 2 pixels were 0.
+- Boundary: no UI/task-runner behavior changed; PDF watermark behavior unchanged; batch compression untouched.

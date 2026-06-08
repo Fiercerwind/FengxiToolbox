@@ -388,6 +388,45 @@ def _iter_word_headers(doc):
                 continue
 
 
+def _select_word_header(section, header_index):
+    try:
+        return _call_collection_item(section.Headers, header_index)
+    except Exception:
+        return None
+
+
+def _prepare_first_page_word_header(section):
+    try:
+        section.PageSetup.DifferentFirstPageHeaderFooter = True
+    except Exception:
+        pass
+    header = _select_word_header(section, 2)
+    try:
+        if header is not None and hasattr(header, "Exists") and not bool(header.Exists):
+            return None
+    except Exception:
+        pass
+    return header
+
+
+def _iter_word_first_page_headers(doc):
+    try:
+        sections = doc.Sections
+        section_count = int(sections.Count)
+    except Exception:
+        return
+
+    if section_count <= 0:
+        return
+    try:
+        section = _call_collection_item(sections, 1)
+    except Exception:
+        return
+    header = _prepare_first_page_word_header(section)
+    if header is not None:
+        yield header, section
+
+
 def _word_has_marker(doc):
     for header, _section in _iter_word_headers(doc):
         try:
@@ -564,12 +603,11 @@ def add_watermark_to_word(
             compatible_font = _resolve_word_font(raw_font_name, word_font_resolver=word_font_resolver)
             added = 0
             only_first = str(page_range or "all").lower() in {"first", "first_page", "1"}
-            for header, section in _iter_word_headers(doc):
+            header_iter = _iter_word_first_page_headers(doc) if only_first else _iter_word_headers(doc)
+            for header, section in header_iter:
                 try:
                     _add_word_header_watermark(header, section, text, compatible_font, font_size, opacity, angle, color=color)
                     added += 1
-                    if only_first:
-                        break
                 except Exception:
                     continue
 

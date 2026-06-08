@@ -179,6 +179,17 @@ def rendered_pdf_nonwhite_pixels(path):
     return sum(1 for red, green, blue in crop.getdata() if min(red, green, blue) < 245)
 
 
+def rendered_pdf_page_nonwhite_pixels(path, page_index):
+    import fitz
+
+    with fitz.open(str(path)) as document:
+        pixmap = document[page_index].get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+    image = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
+    width, height = image.size
+    crop = image.crop((int(width * 0.05), int(height * 0.15), int(width * 0.95), int(height * 0.9)))
+    return sum(1 for red, green, blue in crop.getdata() if min(red, green, blue) < 245)
+
+
 def rendered_pdf_redish_pixels(path):
     import fitz
 
@@ -4468,6 +4479,47 @@ def main():
                     "word_watermark_visible_when_exported",
                     wm_visible_pdf.exists() and wm_visible_pixels > 8000,
                     {"pixels": wm_visible_pixels, "pdf": str(wm_visible_pdf)},
+                )
+
+                wm_first_src = root / "office_word_first_page_src.docx"
+                doc = word.Documents.Add()
+                doc.Content.Text = "first page watermark body\r"
+                doc.Content.InsertAfter("\fsecond page should stay clean")
+                doc.SaveAs2(str(wm_first_src.resolve()), FileFormat=16)
+                doc.Close(False)
+                wm_first_docx = root / "office_word_first_page_wm.docx"
+                status = mod.add_watermark_to_word(
+                    word,
+                    str(wm_first_src.resolve()),
+                    str(wm_first_docx.resolve()),
+                    "FIRST PAGE ONLY",
+                    "SmileySans-Oblique",
+                    60,
+                    0.3,
+                    45,
+                    page_range="first",
+                    force_mode=True,
+                )
+                wm_first_pdf = root / "office_word_first_page_wm.pdf"
+                wm_first_doc = word.Documents.Open(str(wm_first_docx.resolve()))
+                try:
+                    wm_first_doc.ExportAsFixedFormat(str(wm_first_pdf.resolve()), 17)
+                finally:
+                    wm_first_doc.Close(False)
+                first_page_pixels = rendered_pdf_page_nonwhite_pixels(wm_first_pdf, 0)
+                second_page_pixels = rendered_pdf_page_nonwhite_pixels(wm_first_pdf, 1)
+                record(
+                    "word_watermark_first_page_only_scope",
+                    status == "SUCCESS"
+                    and wm_first_docx.exists()
+                    and wm_first_pdf.exists()
+                    and first_page_pixels > second_page_pixels + 5000,
+                    {
+                        "status": status,
+                        "first_page_pixels": first_page_pixels,
+                        "second_page_pixels": second_page_pixels,
+                        "pdf": str(wm_first_pdf),
+                    },
                 )
 
                 cleaned_docx = root / "office_word_clean.docx"

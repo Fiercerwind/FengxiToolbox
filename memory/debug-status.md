@@ -1875,3 +1875,8 @@
   - Lightweight ZIP probe passed: reuse kept `old.txt` inside an existing zip; rebuild removed it and wrote the fresh `a.txt` content.
   - `python smoke_test.py` passed 14/14.
   - `python full_debug_test.py` passed 209/209.
+## 2026-06-07 Word watermark first-page-only regression
+- Fixed direct Word batch watermark scope for `page_range=first`.
+- Correct behavior: only the first rendered page receives the watermark; normal subsequent pages remain clean.
+- Key regression: `word_watermark_first_page_only_scope` exports a two-page DOCX to PDF and verifies first-page watermark visibility with second-page zero watermark pixels.
+- Validation: py_compile passed; smoke_test 14/14; full_debug_test 210/210.

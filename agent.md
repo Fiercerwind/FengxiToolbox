@@ -66,3 +66,8 @@
 - Optional policy is `rebuild_existing`: only planned output zip files are deleted and regenerated. Do not delete unrelated archive files found inside the input tree.
 - This policy is about same-name planned output archives, not about extracting or rewriting arbitrary `.zip/.rar/.7z` source files.
 - The policy must be saved/restored in ZIP last-settings as `zip_archive_policy_var`.
+## Word Watermark First-Page Rule
+- For direct Word batch watermark, `page_range="first"` must mean only the document's first page is watermarked after Word renders/exports the file.
+- Implement this through Word first-page header semantics: enable `DifferentFirstPageHeaderFooter` on the first section and write the watermark to header index `2` only.
+- Do not implement `first` by adding one shape to the normal primary header; Word will repeat that header on every page.
+- Regression to preserve: `word_watermark_first_page_only_scope` must export the watermarked DOCX to PDF and verify page 1 has the watermark while page 2 stays clean.
