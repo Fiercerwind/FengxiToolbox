@@ -1,3 +1,11 @@
 # 最近变更
 
-- 当前尚无未蒸馏的变更记录。
+## 2026-06-08 20:54:32 | pdf_file
+- 摘要：Improve PDF image compression quality for long scanned pages
+- 文件：tools/fx_pdf_compress_core.py, full_debug_test.py, memory/categories/pdf-file-meta-zip.md
+- 说明：PDF image compression now preserves readable width for scanned long-image PDFs. Added 高清 and 极限小体积 profiles; 标准 keeps 1080px width, 强力 keeps 900px width. Real user PDF probe compressed 19.6MB to about 6.2MB while preserving 1080px width. full_debug_test 214/214.
+
+## 2026-06-08 16:21:16 | watermark
+- 摘要：Add first page plus one random page watermark range
+- 文件：Fengxi_Toolbox.py, tools/fx_watermark_core.py, full_debug_test.py, memory/categories/watermark-and-remove.md
+- 说明：Batch watermark now supports page_range=first_random: watermark page 1 plus exactly one random non-first page when available. Covered by UI, PDF, and Word regressions; full_debug_test 213/213.

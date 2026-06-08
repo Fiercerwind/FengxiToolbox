@@ -445,3 +445,31 @@
   - Lightweight ZIP probe confirmed reuse keeps old zip contents and rebuild replaces them with newly compressed contents.
   - `python smoke_test.py` passed 14/14.
   - `python full_debug_test.py` passed 209/209.
+
+## 2026-06-08 PDF image compression quality fix
+- User-provided comparison:
+  - Original scanned/long-image PDF: about 19.6 MB.
+  - Website-compressed PDF: about 5.1 MB, still clear.
+  - Fengxi old compressed PDF: about 1.34 MB, blurry.
+- Diagnosis:
+  - The PDF is 13 pages, each page is one long JPEG image.
+  - Original and website-compressed versions keep each image at width `1080px`.
+  - Old Fengxi `标准` image compression used `max_side=1800`; for long screenshots this shrank page 1 from `1080x6976` to about `279x1800`, then the PDF viewer stretched it back to page size, causing unreadable blurry text.
+- New rule:
+  - Do not let normal PDF image compression collapse long screenshot width to a few hundred pixels.
+  - Add `高清` as a clear, website-like recompression option.
+  - `轻度` and `高清` keep original dimensions and only re-encode JPEG.
+  - `标准` uses JPEG quality 76 and protects `min_width=1080`.
+  - `强力` uses JPEG quality 66 and protects `min_width=900`.
+  - `极限小体积` is the only intentionally aggressive option, allowing width down to `480`; this is for smallest downloads and may reduce clarity.
+- Real probe on the user PDF after the fix:
+  - `高清`: about 6.9 MB, first image kept `1080x6976`.
+  - `标准`: about 6.2 MB, first image kept `1080x6976`.
+  - `强力`: about 4.1 MB, first image `900x5813`.
+  - `极限小体积`: about 1.56 MB, first image `480x3100`.
+- Regression:
+  - `pdf_compress_long_scan_keeps_readable_width` creates a long-image PDF and verifies normal `标准` compression preserves readable width, while `极限小体积` is the only path that clearly downsamples.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_pdf_compress_core.py full_debug_test.py smoke_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 214/214.

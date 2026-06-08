@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path
 
 from PIL import Image
+from reportlab.lib.utils import ImageReader
 from pypdf import PdfReader
 from reportlab.pdfgen import canvas
 from tools.fx_task_history_exports import (
@@ -56,6 +57,7 @@ from tools.fx_watermark_core import (
     add_watermark_to_pdf as add_watermark_to_pdf_module,
     add_watermark_to_word as add_watermark_to_word_module,
     create_watermark_packet as create_watermark_packet_module,
+    normalize_watermark_page_range as normalize_watermark_page_range_module,
 )
 from tools.fx_zip_core import (
     estimate_zip_progress_units as estimate_zip_progress_units_module,
@@ -166,6 +168,24 @@ def make_pdf(path, lines):
         if index != len(lines) - 1:
             pdf.showPage()
     pdf.save()
+
+
+def make_long_image_pdf(path, image_path, width=1080, height=6976):
+    pdf = canvas.Canvas(str(path), pagesize=(width, height))
+    pdf.drawImage(ImageReader(str(image_path)), 0, 0, width=width, height=height)
+    pdf.save()
+
+
+def first_pdf_image_size(path):
+    import fitz
+
+    with fitz.open(str(path)) as document:
+        for page in document:
+            images = page.get_images(full=True)
+            if images:
+                info = document.extract_image(images[0][0])
+                return int(info.get("width", 0)), int(info.get("height", 0))
+    return 0, 0
 
 
 def rendered_pdf_nonwhite_pixels(path):
@@ -1248,6 +1268,31 @@ def main():
             "text_index": text_index,
             "preview_before_text": preview_before_text,
             "preview_count": len(preview_frames),
+        },
+    )
+    wm_range_random_radio = getattr(app, "_fx_wm_range_random_radio", None)
+    try:
+        wm_range_random_text = wm_range_random_radio.cget("text") if wm_range_random_radio is not None else ""
+    except Exception:
+        wm_range_random_text = ""
+    random_range_label = getattr(mod, "WATERMARK_RANGE_UI_LABELS", {}).get("first_random", "")
+    if wm_range_random_radio is not None:
+        try:
+            wm_range_random_radio.invoke()
+        except Exception:
+            mod._set_watermark_range_var(app, "first_random")
+    record(
+        "watermark_range_first_random_option_visible",
+        wm_range_random_radio is not None
+        and str(wm_range_random_radio.cget("value")) == "first_random"
+        and wm_range_random_text == random_range_label
+        and app.wm_range_var.get() == "first_random"
+        and mod._watermark_core_normalize_page_range(random_range_label) == "first_random",
+        {
+            "text": wm_range_random_text,
+            "value": str(wm_range_random_radio.cget("value")) if wm_range_random_radio is not None else None,
+            "label": random_range_label,
+            "range": app.wm_range_var.get(),
         },
     )
 
@@ -2519,11 +2564,39 @@ def main():
         red_status == "SUCCESS" and red_pixels > 1000,
         {"status": red_status, "red_pixels": red_pixels},
     )
+    pdf_random_src = root / "sample_first_random.pdf"
+    make_pdf(pdf_random_src, ["page one", "page two", "page three"])
+    pdf_random_out = root / "sample_first_random_wm.pdf"
+    random_pkt = mod.create_watermark_packet("FIRST RANDOM", "SmileySans-Oblique", 42, 0.45, 35)
+    import tools.fx_watermark_core as wm_core_for_random
+
+    original_random_randint = wm_core_for_random.random.randint
+    wm_core_for_random.random.randint = lambda start, end: 2
+    try:
+        random_status = mod.add_watermark_to_pdf(
+            str(pdf_random_src),
+            str(pdf_random_out),
+            random_pkt,
+            page_range="first_random",
+            check_text="FIRST RANDOM",
+            force_mode=True,
+        )
+    finally:
+        wm_core_for_random.random.randint = original_random_randint
+    random_page_pixels = [rendered_pdf_page_nonwhite_pixels(pdf_random_out, index) for index in range(3)]
+    record(
+        "pdf_watermark_first_random_two_pages",
+        random_status == "SUCCESS"
+        and random_page_pixels[0] > random_page_pixels[1] + 5000
+        and random_page_pixels[2] > random_page_pixels[1] + 5000,
+        {"status": random_status, "pixels": random_page_pixels},
+    )
     record(
         "watermark_core_module_exports",
         callable(create_watermark_packet_module)
         and callable(add_watermark_to_pdf_module)
         and callable(add_watermark_to_word_module)
+        and callable(normalize_watermark_page_range_module)
         and getattr(mod._watermark_core_create_watermark_packet, "__module__", "") == "tools.fx_watermark_core",
         {
             "packet_module": getattr(create_watermark_packet_module, "__module__", ""),
@@ -2537,6 +2610,8 @@ def main():
         and callable(build_pdf_compress_output_path_module)
         and "标准" in PDF_COMPRESS_LEVELS_MODULE
         and "标准" in PDF_IMAGE_COMPRESS_LEVELS_MODULE
+        and "高清" in PDF_IMAGE_COMPRESS_LEVELS_MODULE
+        and "极限小体积" in PDF_IMAGE_COMPRESS_LEVELS_MODULE
         and getattr(mod.compress_pdf_file, "__module__", "") == "fengxi_toolbox",
         {
             "module": getattr(compress_pdf_file_module, "__module__", ""),
@@ -2713,6 +2788,39 @@ def main():
         "pdf_compress_core_helper",
         compress_pdf_file_module(str(src), str(root / "pdf_compress_out_core.pdf"), "强力", "保留原图").startswith("SUCCESS"),
         "core_helper",
+    )
+    long_image = inp / "long_scan.jpg"
+    long_img = Image.new("RGB", (1080, 6976), "white")
+    for y in range(80, 6900, 180):
+        for x in range(80, 1000, 24):
+            long_img.putpixel((x, y), (0, 0, 0))
+            long_img.putpixel((x + 1, y), (0, 0, 0))
+            long_img.putpixel((x, y + 1), (0, 0, 0))
+    long_img.save(long_image, "JPEG", quality=96)
+    long_pdf = inp / "long_scan.pdf"
+    make_long_image_pdf(long_pdf, long_image)
+    long_standard = out / "long_scan_standard.pdf"
+    long_tiny = out / "long_scan_tiny.pdf"
+    standard_status = mod.compress_pdf_file(str(long_pdf), str(long_standard), "标准", "标准")
+    tiny_status = mod.compress_pdf_file(str(long_pdf), str(long_tiny), "标准", "极限小体积")
+    standard_image_size = first_pdf_image_size(long_standard)
+    tiny_image_size = first_pdf_image_size(long_tiny)
+    record(
+        "pdf_compress_long_scan_keeps_readable_width",
+        standard_status.startswith("SUCCESS")
+        and long_standard.exists()
+        and standard_image_size[0] >= 1080
+        and standard_image_size[1] >= 6000
+        and tiny_status.startswith("SUCCESS")
+        and tiny_image_size[0] < standard_image_size[0],
+        {
+            "standard_status": standard_status,
+            "tiny_status": tiny_status,
+            "standard_size": standard_image_size,
+            "tiny_size": tiny_image_size,
+            "standard_bytes": long_standard.stat().st_size if long_standard.exists() else 0,
+            "tiny_bytes": long_tiny.stat().st_size if long_tiny.exists() else 0,
+        },
     )
 
     single_pdf = root / "single_input_encrypt.pdf"
@@ -4519,6 +4627,54 @@ def main():
                         "first_page_pixels": first_page_pixels,
                         "second_page_pixels": second_page_pixels,
                         "pdf": str(wm_first_pdf),
+                    },
+                )
+
+                wm_first_random_src = root / "office_word_first_random_src.docx"
+                doc = word.Documents.Add()
+                doc.Content.Text = "first random page one\r"
+                doc.Content.InsertAfter("\fsecond page should stay clean")
+                doc.Content.InsertAfter("\fthird page should receive watermark")
+                doc.SaveAs2(str(wm_first_random_src.resolve()), FileFormat=16)
+                doc.Close(False)
+                wm_first_random_docx = root / "office_word_first_random_wm.docx"
+                import tools.fx_watermark_core as wm_core_word_random
+
+                original_word_random_randint = wm_core_word_random.random.randint
+                wm_core_word_random.random.randint = lambda start, end: 2
+                try:
+                    status = mod.add_watermark_to_word(
+                        word,
+                        str(wm_first_random_src.resolve()),
+                        str(wm_first_random_docx.resolve()),
+                        "FIRST RANDOM WORD",
+                        "SmileySans-Oblique",
+                        60,
+                        0.3,
+                        45,
+                        page_range="first_random",
+                        force_mode=True,
+                    )
+                finally:
+                    wm_core_word_random.random.randint = original_word_random_randint
+                wm_first_random_pdf = root / "office_word_first_random_wm.pdf"
+                wm_first_random_doc = word.Documents.Open(str(wm_first_random_docx.resolve()))
+                try:
+                    wm_first_random_doc.ExportAsFixedFormat(str(wm_first_random_pdf.resolve()), 17)
+                finally:
+                    wm_first_random_doc.Close(False)
+                word_random_pixels = [rendered_pdf_page_nonwhite_pixels(wm_first_random_pdf, index) for index in range(3)]
+                record(
+                    "word_watermark_first_random_two_pages",
+                    status == "SUCCESS"
+                    and wm_first_random_docx.exists()
+                    and wm_first_random_pdf.exists()
+                    and word_random_pixels[0] > word_random_pixels[1] + 5000
+                    and word_random_pixels[2] > word_random_pixels[1] + 5000,
+                    {
+                        "status": status,
+                        "pixels": word_random_pixels,
+                        "pdf": str(wm_first_random_pdf),
                     },
                 )
 

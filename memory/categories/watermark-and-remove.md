@@ -409,3 +409,28 @@
 - Regression: `word_watermark_first_page_only_scope` creates a two-page Word document, applies `page_range=first`, exports the result to PDF, and asserts page 1 has visible watermark pixels while page 2 has none.
 - Validation: `python -m py_compile Fengxi_Toolbox.py tools\fx_watermark_core.py full_debug_test.py` passed; `python smoke_test.py` passed 14/14; `python full_debug_test.py` passed 210/210. In the new regression, page 1 pixels were 29205 and page 2 pixels were 0.
 - Boundary: no UI/task-runner behavior changed; PDF watermark behavior unchanged; batch compression untouched.
+
+## 2026-06-08 Watermark page range: first page plus one random page
+- User request: add a third watermark page-range option next to `all pages` and `first page only`.
+- New mode: `first_random`.
+- Behavior:
+  - For a one-page document, watermark page 1 only.
+  - For documents with at least two pages, watermark page 1 plus exactly one randomly selected non-first page.
+  - Total watermarked pages should therefore be 2 at most.
+- UI:
+  - Batch watermark page now shows `第一页 + 随机一页`.
+  - The option is wired into the same `wm_range_var` setting and participates in watermark last-settings persistence.
+- PDF implementation:
+  - `tools/fx_watermark_core.py` normalizes page ranges through `normalize_watermark_page_range(...)`.
+  - PDF watermarking now selects target page indexes with `_select_watermark_page_indexes(...)`.
+- Word implementation:
+  - `first` and `first_random` still use Word first-page header semantics for page 1.
+  - `first_random` adds the extra random non-first page via an anchored WordArt shape at that page range, instead of repeating through all headers.
+- Regression coverage:
+  - `watermark_range_first_random_option_visible`
+  - `pdf_watermark_first_random_two_pages`
+  - `word_watermark_first_random_two_pages`
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_watermark_core.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 213/213.

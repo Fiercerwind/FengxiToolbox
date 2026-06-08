@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import os
+import random
 import tempfile
 from contextlib import nullcontext
 from pathlib import Path
@@ -26,6 +27,9 @@ WORD_WATERMARK_GRAY_RGB = 0xC0C0C0
 WORD_WATERMARK_DEFAULT_RGB = (192, 192, 192)
 WORD_WATERMARK_MIN_VISIBLE_OPACITY = 0.18
 WORD_WATERMARK_MAX_VISIBLE_OPACITY = 0.85
+WATERMARK_RANGE_ALL = "all"
+WATERMARK_RANGE_FIRST = "first"
+WATERMARK_RANGE_FIRST_RANDOM = "first_random"
 
 
 def _safe_float(value, default):
@@ -97,6 +101,38 @@ def watermark_color_to_hex(value, default=PDF_WATERMARK_DEFAULT_RGB):
 def _word_rgb_value(value):
     red, green, blue = normalize_watermark_color(value, default=WORD_WATERMARK_DEFAULT_RGB)
     return int(red) + (int(green) << 8) + (int(blue) << 16)
+
+
+def normalize_watermark_page_range(value):
+    text = str(value or "").strip().lower()
+    compact = text.replace(" ", "").replace("-", "_").replace("+", "_")
+    if compact in {"first_random", "first_and_random", "first_random_page", "firstplusrandom", "first_one_random", "1_random"}:
+        return WATERMARK_RANGE_FIRST_RANDOM
+    if compact in {"第一页+随机一页", "第一页_随机一页", "第一页随机一页", "首页+随机一页", "首页_随机一页", "首页随机一页", "仅第一页+随机一页", "仅第一页_随机一页"}:
+        return WATERMARK_RANGE_FIRST_RANDOM
+    if compact in {"first", "first_page", "1", "第一页", "仅第一页", "首页"}:
+        return WATERMARK_RANGE_FIRST
+    return WATERMARK_RANGE_ALL
+
+
+def _select_watermark_page_indexes(page_count, page_range):
+    try:
+        total = max(0, int(page_count))
+    except Exception:
+        total = 0
+    if total <= 0:
+        return set()
+
+    normalized = normalize_watermark_page_range(page_range)
+    if normalized == WATERMARK_RANGE_ALL:
+        return set(range(total))
+    if normalized == WATERMARK_RANGE_FIRST:
+        return {0}
+
+    selected = {0}
+    if total > 1:
+        selected.add(random.randint(1, total - 1))
+    return selected
 
 
 def _resolve_reportlab_font(font_name, font_path_resolver=None):
@@ -318,9 +354,9 @@ def add_watermark_to_pdf(src, dst, watermark_packet, page_range="all", check_tex
         watermark_page = watermark_reader.pages[0]
 
         writer = PdfWriter()
-        only_first = str(page_range or "all").lower() in {"first", "first_page", "1"}
+        target_pages = _select_watermark_page_indexes(len(reader.pages), page_range)
         for index, page in enumerate(reader.pages):
-            if not only_first or index == 0:
+            if index in target_pages:
                 try:
                     page.merge_page(watermark_page)
                 except AttributeError:
@@ -535,6 +571,116 @@ def _add_word_header_watermark(header, section, text, font_name, font_size, opac
     return shape
 
 
+def _add_word_range_watermark(doc, page_number, text, font_name, font_size, opacity, angle, color=None):
+    try:
+        anchor_range = doc.GoTo(1, 1, int(page_number))
+    except Exception:
+        return None
+    try:
+        shape = doc.Shapes.AddTextEffect(
+            0,
+            str(text or ""),
+            str(font_name or "Microsoft YaHei"),
+            max(1.0, _safe_float(font_size, 24.0)),
+            False,
+            False,
+            0,
+            0,
+            anchor_range,
+        )
+    except Exception:
+        try:
+            shape = anchor_range.ShapeRange.AddTextEffect(
+                0,
+                str(text or ""),
+                str(font_name or "Microsoft YaHei"),
+                max(1.0, _safe_float(font_size, 24.0)),
+                False,
+                False,
+                0,
+                0,
+            )
+        except Exception:
+            return None
+    try:
+        shape.Name = WATERMARK_MARKER
+    except Exception:
+        pass
+    try:
+        shape.Rotation = _safe_float(angle, 45.0)
+    except Exception:
+        pass
+    try:
+        shape.TextEffect.NormalizedHeight = False
+    except Exception:
+        pass
+    try:
+        shape.Fill.Visible = True
+    except Exception:
+        pass
+    try:
+        shape.Fill.Solid()
+    except Exception:
+        pass
+    try:
+        shape.Fill.ForeColor.RGB = _word_rgb_value(color if color is not None else WORD_WATERMARK_DEFAULT_RGB)
+    except Exception:
+        pass
+    try:
+        shape.Fill.Transparency = 1.0 - _word_visible_opacity(opacity)
+    except Exception:
+        pass
+    try:
+        shape.Line.Visible = False
+    except Exception:
+        pass
+    try:
+        page_setup = doc.Sections(1).PageSetup
+        page_width = float(page_setup.PageWidth)
+        page_height = float(page_setup.PageHeight)
+    except Exception:
+        page_width, page_height = 595.0, 842.0
+    try:
+        shape.RelativeHorizontalPosition = 1
+    except Exception:
+        pass
+    try:
+        shape.RelativeVerticalPosition = 1
+    except Exception:
+        pass
+    try:
+        shape.Left = (page_width - float(shape.Width)) / 2.0
+    except Exception:
+        pass
+    try:
+        shape.Top = (page_height - float(shape.Height)) / 2.0
+    except Exception:
+        pass
+    try:
+        shape.WrapFormat.AllowOverlap = True
+    except Exception:
+        pass
+    try:
+        shape.WrapFormat.Type = 3
+    except Exception:
+        pass
+    try:
+        shape.ZOrder(5)
+    except Exception:
+        pass
+    return shape
+
+
+def _get_word_page_count(doc):
+    try:
+        return int(doc.ComputeStatistics(2))
+    except Exception:
+        try:
+            return int(doc.BuiltInDocumentProperties("Number of Pages"))
+        except Exception:
+            return 1
+
+
 def open_word_document_safely(word_app, src_path):
     """Open a Word document with repair fallbacks for damaged files."""
 
@@ -602,14 +748,23 @@ def add_watermark_to_word(
 
             compatible_font = _resolve_word_font(raw_font_name, word_font_resolver=word_font_resolver)
             added = 0
-            only_first = str(page_range or "all").lower() in {"first", "first_page", "1"}
-            header_iter = _iter_word_first_page_headers(doc) if only_first else _iter_word_headers(doc)
+            normalized_range = normalize_watermark_page_range(page_range)
+            header_iter = _iter_word_first_page_headers(doc) if normalized_range in {WATERMARK_RANGE_FIRST, WATERMARK_RANGE_FIRST_RANDOM} else _iter_word_headers(doc)
             for header, section in header_iter:
                 try:
                     _add_word_header_watermark(header, section, text, compatible_font, font_size, opacity, angle, color=color)
                     added += 1
                 except Exception:
                     continue
+            if normalized_range == WATERMARK_RANGE_FIRST_RANDOM:
+                page_count = _get_word_page_count(doc)
+                target_pages = _select_watermark_page_indexes(page_count, normalized_range)
+                for page_index in sorted(index for index in target_pages if index > 0):
+                    try:
+                        if _add_word_range_watermark(doc, page_index + 1, text, compatible_font, font_size, opacity, angle, color=color) is not None:
+                            added += 1
+                    except Exception:
+                        continue
 
             if added <= 0:
                 return "ERROR:no writable Word header found"

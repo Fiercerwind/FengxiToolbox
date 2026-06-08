@@ -164,6 +164,7 @@ from tools.fx_watermark_core import (
     add_watermark_to_pdf as _watermark_core_add_watermark_to_pdf,
     add_watermark_to_word as _watermark_core_add_watermark_to_word,
     create_watermark_packet as _watermark_core_create_watermark_packet,
+    normalize_watermark_page_range as _watermark_core_normalize_page_range,
     open_word_document_safely as _watermark_core_open_word_document_safely,
     watermark_color_to_hex as _watermark_core_color_to_hex,
 )
@@ -3231,7 +3232,7 @@ def add_watermark_to_pdf(src, dst, watermark_packet, page_range="all", check_tex
         src,
         dst,
         watermark_packet,
-        page_range=page_range,
+        page_range=_watermark_core_normalize_page_range(page_range),
         check_text=check_text,
         force_mode=force_mode,
     )
@@ -3259,7 +3260,7 @@ def add_watermark_to_word(
         font_size,
         opacity,
         angle,
-        page_range=page_range,
+        page_range=_watermark_core_normalize_page_range(page_range),
         force_mode=force_mode,
         word_font_resolver=get_word_compatible_font_name,
         com_context_factory=_DisableWin32ComGenCache,
@@ -9871,6 +9872,151 @@ def _patch_watermark_color_preview_ui():
 _patch_watermark_color_preview_ui()
 
 
+WATERMARK_RANGE_UI_LABELS = {
+    "all": "\u6bcf\u4e00\u9875",
+    "first": "\u4ec5\u7b2c\u4e00\u9875",
+    "first_random": "\u7b2c\u4e00\u9875 + \u968f\u673a\u4e00\u9875",
+}
+WATERMARK_RANGE_UI_VALUE_BY_LABEL = {label: value for value, label in WATERMARK_RANGE_UI_LABELS.items()}
+
+
+def _watermark_range_ui_label(value):
+    return WATERMARK_RANGE_UI_LABELS.get(_watermark_core_normalize_page_range(value), WATERMARK_RANGE_UI_LABELS["all"])
+
+
+def _set_watermark_range_var(app, value):
+    normalized = WATERMARK_RANGE_UI_VALUE_BY_LABEL.get(str(value or "").strip())
+    if normalized is None:
+        normalized = _watermark_core_normalize_page_range(value)
+    var = getattr(app, "wm_range_var", None)
+    if isinstance(var, tkinter.Variable):
+        try:
+            var.set(normalized)
+            return normalized
+        except Exception:
+            pass
+    return normalized
+
+
+def _schedule_watermark_range_last_settings_save(app):
+    scheduler = globals().get("_schedule_watermark_last_settings_persistence")
+    if callable(scheduler):
+        try:
+            scheduler(app)
+        except Exception as exc:
+            _debug(f"watermark_range:last_settings_save_error:{exc}")
+
+
+def _iter_watermark_range_radios(app):
+    tab = getattr(app, "tab_wm", None)
+    target_var = getattr(app, "wm_range_var", None)
+    if tab is None or target_var is None:
+        return []
+    try:
+        target_name = str(target_var)
+    except Exception:
+        target_name = ""
+    radios = []
+    stack = list(tab.winfo_children())
+    while stack:
+        widget = stack.pop(0)
+        if isinstance(widget, customtkinter.CTkRadioButton):
+            try:
+                variable_name = str(widget.cget("variable"))
+            except Exception:
+                variable_name = ""
+            if variable_name and target_name and variable_name == target_name:
+                radios.append(widget)
+        try:
+            stack.extend(widget.winfo_children())
+        except Exception:
+            pass
+    return radios
+
+
+def _find_active_watermark_range_parent(app):
+    radios = _iter_watermark_range_radios(app)
+    if not radios:
+        return None
+    parent_groups = []
+    for radio in radios:
+        parent = getattr(radio, "master", None)
+        if parent is not None and parent not in parent_groups:
+            parent_groups.append(parent)
+    if not parent_groups:
+        return None
+    mapped_groups = []
+    for parent in parent_groups:
+        try:
+            if parent.winfo_ismapped():
+                mapped_groups.append(parent)
+        except Exception:
+            pass
+    return (mapped_groups or parent_groups)[-1]
+
+
+def _install_watermark_range_options(app):
+    if getattr(app, "_fx_wm_range_options_ready", False):
+        return
+    if getattr(app, "wm_range_var", None) is None:
+        return
+    try:
+        _set_watermark_range_var(app, _safe_var_get(app, "wm_range_var", "all"))
+        parent = _find_active_watermark_range_parent(app)
+        if parent is not None:
+            existing = [
+                child
+                for child in parent.winfo_children()
+                if isinstance(child, customtkinter.CTkRadioButton)
+                and str(child.cget("value")) == "first_random"
+            ]
+            if not existing:
+                style = {}
+                try:
+                    style = app._get_radio_style()
+                except Exception:
+                    style = {}
+                radio = customtkinter.CTkRadioButton(
+                    parent,
+                    text=WATERMARK_RANGE_UI_LABELS["first_random"],
+                    variable=app.wm_range_var,
+                    value="first_random",
+                    command=lambda target=app: _schedule_watermark_range_last_settings_save(target),
+                    **style,
+                )
+                radio.pack(anchor="w", pady=(0, 2))
+                app._fx_wm_range_random_radio = radio
+            else:
+                app._fx_wm_range_random_radio = existing[-1]
+        app._fx_wm_range_options_ready = True
+    except Exception as exc:
+        _debug(f"watermark_range:install_error:{exc}")
+
+
+def _patch_watermark_range_options_ui():
+    try:
+        original_init_watermark_ui = FengxiToolboxApp.init_watermark_ui
+    except Exception as exc:
+        _debug(f"patch_watermark_range_options:missing:{exc}")
+        return
+    if getattr(original_init_watermark_ui, "__fx_wm_range_options_patch__", False):
+        return
+
+    def patched_init_watermark_ui(self):
+        original_init_watermark_ui(self)
+        try:
+            _install_watermark_range_options(self)
+        except Exception as exc:
+            _debug(f"watermark_range:init_error:{exc}")
+
+    patched_init_watermark_ui.__fx_wm_range_options_patch__ = True
+    FengxiToolboxApp.init_watermark_ui = patched_init_watermark_ui
+    _debug("patch_watermark_range_options:installed")
+
+
+_patch_watermark_range_options_ui()
+
+
 def _get_watermark_settings(app):
     text = _read_watermark_text_widget(app) or str(_safe_named_widget_get(app, "wm_text", "") or "")
     font_name = str(_safe_var_get(app, "selected_font", "") or "").strip()
@@ -9882,7 +10028,7 @@ def _get_watermark_settings(app):
     font_size = _safe_float(_safe_named_widget_get(app, "slider_size", _safe_var_get(app, "wm_size", 60)), 60.0)
     opacity = _safe_float(_safe_named_widget_get(app, "slider_opacity", _safe_var_get(app, "wm_opacity", 0.08)), 0.08)
     angle = _safe_float(_safe_named_widget_get(app, "slider_angle", _safe_var_get(app, "wm_angle", 45)), 45.0)
-    page_range = str(_safe_var_get(app, "wm_range_var", "all") or "all")
+    page_range = _watermark_core_normalize_page_range(_safe_var_get(app, "wm_range_var", "all"))
     overwrite_mode = str(_safe_var_get(app, "wm_overwrite_var", "smart") or "smart").strip().lower()
     color = _get_watermark_color(app)
     return {
