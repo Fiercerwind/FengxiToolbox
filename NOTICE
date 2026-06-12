@@ -1,30 +1,38 @@
 Fengxi Toolbox Notice
 =====================
 
-1. Ownership
+1. Project License
 
-The source code, product design, bundled assets, interface layout, release
-packages, project icon, and documentation in this repository are proprietary
-works owned by the Fengxi Toolbox rights holder unless a file states otherwise.
+Fengxi Toolbox is free and open source software licensed under the GNU Affero
+General Public License version 3.0 only, as provided in the LICENSE file.
 
-2. Brand Protection
+You may use, study, modify, distribute, and commercially use the software under
+the terms of the AGPL-3.0 license. If you distribute modified versions or make
+the software available over a network, you must comply with the corresponding
+source and license obligations of AGPL-3.0.
 
-The names "风兮" and "Fengxi Toolbox", along with the associated logos, icons,
-application imagery, and other brand materials, are reserved. No trademark or
-branding license is granted by this repository.
+2. Brand And Official Release Identity
 
-3. Official Distribution
+The AGPL-3.0 license covers the software code, but it does not grant trademark
+or branding rights.
 
-Only release packages published by the official repository owner should be
-treated as official builds. Repacked, mirrored, modified, or renamed builds
-are not official and must not be presented as official releases.
+The names "风兮", "Fengxi Toolbox", official project logos, icons, release
+identity, screenshots, application imagery, and other brand identifiers are
+reserved by the project rights holder unless a file states otherwise.
 
-4. Third-Party Dependencies
+You may not present modified, repackaged, mirrored, or renamed builds as
+official Fengxi Toolbox releases. Forks and redistributed builds should use a
+different product name and clearly state that they are not official releases.
 
-This project uses third-party libraries and tools. Those components remain
-subject to their own licenses, notices, and attribution requirements.
+3. Third-Party Dependencies
 
-5. Contact
+This project uses third-party libraries and tools, including components under
+their own open source licenses. Those components remain subject to their own
+licenses, notices, and attribution requirements.
 
-For commercial licensing, redistribution, OEM use, branding permission, or
-other written authorization, contact the copyright owner before use.
+4. Commercial Use
+
+Commercial use of Fengxi Toolbox is allowed under AGPL-3.0, provided that all
+AGPL-3.0 obligations and third-party license obligations are followed. Separate
+written permission is still required for trademark, branding, OEM, sponsorship,
+or official co-branded distribution rights.

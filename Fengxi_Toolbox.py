@@ -186,6 +186,8 @@ BOOTSTRAP_STARTED_AT = time.perf_counter()
 RUNTIME_BIN = Path(__file__).with_name("fengxi_runtime.bin")
 DEBUG_LOG = Path(tempfile.gettempdir()) / "fx_toolbox_loader.log"
 DEFAULT_STARTUP_TAB = "watermark"
+STARTUP_LAYOUT_FIRST_DELAY_MS = 450
+STARTUP_LAYOUT_STAGE_DELAY_MS = 90
 LAZY_TAB_SPECS = {
     "watermark": {"init": "init_watermark_ui"},
     "remove_wm": {"init": "init_remove_wm_ui"},
@@ -13536,19 +13538,16 @@ def _run_startup_layout_refresh(app):
         pass
     started_at = time.perf_counter()
     try:
-        _tighten_layout(app)
         task_name = getattr(app, "current_task", DEFAULT_STARTUP_TAB)
-        if task_name in TAB_LAYOUT_ATTRS:
-            _refresh_visible_tab_layout(app, task_name)
-        try:
-            app.update_idletasks()
-        except Exception:
-            pass
-        _debug("startup:layout_refreshed")
+        if task_name not in TAB_LAYOUT_ATTRS:
+            task_name = DEFAULT_STARTUP_TAB
+        _schedule_startup_layout_stage(app, task_name, "shell", STARTUP_LAYOUT_FIRST_DELAY_MS)
+        _debug("startup:layout_refresh_scheduled")
         _record_performance(
             "startup_layout_refresh",
             started_at=started_at,
-            details={"status": "success"},
+            task_name=task_name,
+            details={"status": "scheduled"},
         )
     except Exception as exc:
         _debug(f"startup:layout_refresh_error:{exc}")
@@ -13557,6 +13556,49 @@ def _run_startup_layout_refresh(app):
             started_at=started_at,
             details={"status": "error"},
         )
+
+
+def _schedule_startup_layout_stage(app, task_name, stage, delay_ms=STARTUP_LAYOUT_STAGE_DELAY_MS):
+    try:
+        app.after(int(delay_ms), lambda target=app, current=task_name, current_stage=stage: _run_startup_layout_stage(target, current, current_stage))
+    except Exception:
+        _run_startup_layout_stage(app, task_name, stage)
+
+
+def _run_startup_layout_stage(app, task_name, stage):
+    stage = str(stage or "")
+    event_name = f"startup_layout_{stage}" if stage else "startup_layout_stage"
+    started_at = time.perf_counter()
+    status = "success"
+    try:
+        if stage == "shell":
+            _apply_shell_layout_tightening(app)
+            next_stage = "tab"
+        elif stage == "tab":
+            _tighten_single_tab_layout(app, task_name)
+            event_name = "startup_layout_tighten_visible"
+            next_stage = "refresh"
+        elif stage == "refresh":
+            if task_name in TAB_LAYOUT_ATTRS:
+                _refresh_visible_tab_layout(app, task_name)
+            event_name = "startup_layout_refresh_visible"
+            next_stage = ""
+            _debug("startup:layout_refreshed")
+        else:
+            return
+    except Exception as exc:
+        status = "error"
+        _debug(f"startup:layout_stage_error:{stage}:{exc}")
+        next_stage = ""
+    finally:
+        _record_performance(
+            event_name,
+            started_at=started_at,
+            task_name=task_name,
+            details={"status": status},
+        )
+    if next_stage:
+        _schedule_startup_layout_stage(app, task_name, next_stage, STARTUP_LAYOUT_STAGE_DELAY_MS)
 
 
 def _request_fast_close(app):

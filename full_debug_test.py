@@ -612,6 +612,52 @@ def main():
         },
     )
 
+    class StartupLayoutProbe:
+        current_task = "watermark"
+
+        def __init__(self):
+            self._fx_startup_layout_refreshed = False
+            self.tightened = []
+            self.refreshed = []
+            self.idle_count = 0
+
+        def after(self, _delay_ms, callback):
+            callback()
+
+        def update_idletasks(self):
+            self.idle_count += 1
+
+    layout_probe = StartupLayoutProbe()
+    original_apply_shell_layout_tightening = mod._apply_shell_layout_tightening
+    original_tighten_single_tab_layout = mod._tighten_single_tab_layout
+    original_refresh_visible = mod._refresh_visible_tab_layout
+    try:
+        mod._apply_shell_layout_tightening = lambda app_obj: app_obj.tightened.append("shell")
+        mod._tighten_single_tab_layout = lambda app_obj, task_name: app_obj.tightened.append(task_name)
+        mod._refresh_visible_tab_layout = lambda app_obj, task_name: app_obj.refreshed.append(task_name)
+        mod._run_startup_layout_refresh(layout_probe)
+    finally:
+        mod._apply_shell_layout_tightening = original_apply_shell_layout_tightening
+        mod._tighten_single_tab_layout = original_tighten_single_tab_layout
+        mod._refresh_visible_tab_layout = original_refresh_visible
+    record(
+        "startup_layout_refresh_current_tab_only",
+        layout_probe.tightened == ["shell", "watermark"]
+        and layout_probe.refreshed == ["watermark"]
+        and layout_probe.idle_count == 0,
+        {
+            "tightened": layout_probe.tightened,
+            "refreshed": layout_probe.refreshed,
+            "idle_count": layout_probe.idle_count,
+        },
+    )
+
+    record(
+        "startup_switch_tab_single_idle_refresh",
+        fake_startup_app.events.count("idle") == 1,
+        fake_startup_app.events,
+    )
+
     app = mod.FengxiToolboxApp()
     app.withdraw()
     app._fx_disable_fast_close_force_exit = True

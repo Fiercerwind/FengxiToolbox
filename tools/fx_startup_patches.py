@@ -120,7 +120,6 @@ def install_startup_performance_patch(context):
                 _call(context.set_help_action_state, self, False)
                 _call(context.refresh_output_strategy_hint, self)
                 _call(context.refresh_parallel_mode_hint, self)
-                self.update_idletasks()
                 _call(context.refresh_visible_tab_layout, self, task_name)
                 self.update_idletasks()
             except Exception as exc:

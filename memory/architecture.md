@@ -1115,3 +1115,12 @@
 - Dedicated adapters own resume checks for ZIP, PDF OCR, image PDF, audio conversion/transcription, PDF compression, batch watermark, remove-watermark, and PDF merge.
 - Background execution guard wraps patched `run_process` with Windows `SetThreadExecutionState`, preventing long jobs from being paused by idle/sleep while the app is in the background.
 - Future feature adapters should join this model instead of inventing separate already-processed logic.
+
+## 2026-06-09 Startup Layout Refresh Optimization
+- Startup layout refresh must stay scoped to the current visible tab. Do not call `_tighten_layout(app)` without `task_name` during startup; that can iterate hidden lazy tabs and initialize ZIP/PDF/audio pages before the user opens them.
+- `_run_startup_layout_refresh(app)` now resolves `current_task`, falls back to `DEFAULT_STARTUP_TAB`, then calls `_tighten_layout(app, task_name=task_name)` and `_refresh_visible_tab_layout(app, task_name)`.
+- Startup layout refresh should not call `app.update_idletasks()` afterward. On CustomTkinter this can synchronously flush heavy pending redraw/layout work and make the opened window feel frozen.
+- Switch-tab refresh keeps exactly one `update_idletasks()` after visible layout refresh; do not re-add the earlier duplicate idle flush in `tools/fx_startup_patches.py`.
+- Startup post-show layout is staged with `after(...)`: shell layout, current-tab layout, then current-tab visible refresh. Keep this staged shape so the first visible window stays responsive instead of doing all fine layout work in one long callback.
+- Performance events to watch after packaging: `startup_layout_refresh` should be `scheduled`; actual work is split into `startup_layout_shell`, `startup_layout_tighten_visible`, and `startup_layout_refresh_visible`.
+- Regression anchors: `startup_layout_refresh_current_tab_only` and `startup_switch_tab_single_idle_refresh` in `full_debug_test.py`.

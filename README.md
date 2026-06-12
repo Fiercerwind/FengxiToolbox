@@ -1,144 +1,89 @@
-# 风兮工具箱 FengxiToolbox
+# Fengxi Toolbox
 
-![风兮工具箱图标](assets/fengxi_app_icon.png)
+Fengxi Toolbox is a Windows desktop toolbox for local batch processing:
+watermarking, PDF/OCR tasks, image and audio processing, archive compression,
+metadata cleanup, batch rename, and file organization.
 
-风兮工具箱是一个面向 Windows 的本地批处理桌面工具箱，覆盖文档处理、PDF/OCR、图片、音频、压缩、文件整理与元数据修改等常见办公场景。项目以中文 GUI 为主，强调本地处理、可回看结果、可恢复修改和批量工作流效率。
+Current release baseline: `4.0.0` / `v4.0.0`
 
-当前正式版本：`4.0.0`
-当前正式标签：`v4.0.0`
+## Features
 
-## 功能概览
+- Batch watermarking and selected watermark cleanup workflows.
+- Word / PDF / PPT conversion workflows.
+- PDF compression, split, encrypt, and searchable PDF OCR.
+- Image-to-PDF, multi-image PDF merge, image conversion, and image compression.
+- Audio extraction and audio format conversion.
+- Batch archive compression.
+- File timestamp, author, metadata, rename, organize, and duplicate cleanup tools.
+- Task progress, history, resume support, diagnostics, and saved last settings.
 
-### 文档与 PDF
-
-- 批量添加水印
-- 去除部分固定样式水印
-- Word / PDF / PPT 相互转换
-- PDF 压缩、拆分、加密
-- OCR 搜索版 PDF
-- 图片转 PDF、多图合并 PDF
-
-### 图片与音频
-
-- 图片格式转换
-- 图片压缩
-- 音频提取
-- 音频格式转换
-
-### 文件与批处理
-
-- 批量压缩
-- 文件时间与作者等元数据修改
-- 批量重命名
-- 文件整理与去重
-
-## 项目特点
-
-- 本地优先：绝大多数处理流程在本机完成，不主动上传用户文件。
-- 文件与文件夹双入口：支持拖拽或选择单个文件，也支持处理整个目录。
-- 多后端 OCR：当前架构保留多后端切换能力，避免锁死单一路线。
-- 打包友好：仓库内已包含 PyInstaller 配置、打包脚本和 GitHub Actions 工作流。
-- 记忆驱动维护：仓库内置 `agent.md`、`memory.md`、分类记忆和蒸馏机制，便于后续会话快速恢复上下文。
-- 可发布可回退：支持本机定时同步、标签发布和 GitHub Release 自动构建。
-
-## 运行环境
-
-- 操作系统：Windows 10/11
-- Python：3.11.x
-- Office 相关功能依赖本机可用的 Microsoft Office / COM 环境
-
-## 源码运行
+## Run From Source
 
 ```powershell
 python -m pip install -r requirements.txt
 python Fengxi_Toolbox.py
 ```
 
-## 打包 EXE
+Windows 10/11 and Python 3.11 are the expected development environment.
+Office-related workflows require a working local Microsoft Office COM
+installation.
 
-项目默认使用 `onedir` 目录式发布，不走单文件模式。
+## Build EXE
 
 ```powershell
 set FX_NO_PAUSE=1
 package.bat
 ```
 
-默认产物目录：
+Default output:
 
 ```text
 dist_release_ascii\fx_toolbox\
-```
-
-主程序：
-
-```text
 dist_release_ascii\fx_toolbox\fx_toolbox.exe
 ```
 
-## 获取与发布
-
-- 源码仓库：`https://github.com/Fiercerwind/FengxiToolbox`
-- 正式发布页：`https://github.com/Fiercerwind/FengxiToolbox/releases`
-- 发布版包含 Windows 打包产物，不仅是源码快照。
-
-如需从源码自行构建，可直接运行 `package.bat`。
-
-## 版本文件
-
-- 当前版本文件：[VERSION](VERSION)
-- 变更记录：[CHANGELOG.md](CHANGELOG.md)
-- 当前正式版本基线：`4.0.0` / `v4.0.0`
-
-## 测试与回归
-
-快速回归：
+## Tests
 
 ```powershell
 python smoke_test.py
-```
-
-增强自检：
-
-```powershell
 python full_debug_test.py
 ```
 
-说明：
+Some Office, OCR, drag-and-drop, and GUI behavior depends on the local Windows
+environment.
 
-- 很多功能不能只测 helper，必须测真实 `FengxiToolboxApp.run_process()` 工作流。
-- Office、拖拽、窗口样式、OCR 等能力会受本机环境影响。
+## License
 
-## 主要文件
+Fengxi Toolbox is free and open source software licensed under the GNU Affero
+General Public License version 3.0 only. See [LICENSE](LICENSE).
 
-```text
-Fengxi_Toolbox.py                   # 加载器层、补丁层、UI 与调度增强
-fengxi_runtime.bin                  # 封装后的主体运行时逻辑
-tools/fx_pdf_ocr.py                 # OCR 搜索版 PDF 引擎与后端探测
-tools/fx_workspace_tools.py         # 备份、记忆、蒸馏与日志工具
-assets/                             # 图标、赞助码与其他 UI 资源
-memory/                             # 架构、约束、近期改动、分类记忆与研究记录
-.github/workflows/                  # 打包与发布工作流
-package.bat                         # Windows 打包入口
-fx_toolbox.spec                     # PyInstaller 发布配置
-smoke_test.py                       # 快速回归
-full_debug_test.py                  # 全功能增强自检
-```
+Commercial use is allowed under AGPL-3.0, provided that you follow AGPL-3.0 and
+all third-party license obligations. In particular, if you distribute modified
+versions or make the software available over a network, you must provide the
+corresponding source as required by AGPL-3.0.
 
-## 授权与权利声明
+## Brand And Official Release Identity
 
-本仓库不是开源仓库，默认不授予任何源码复用、再分发或商业化权利。详细条款见：
+The AGPL-3.0 license covers the software code, but it does not grant trademark
+or branding rights.
 
-- [LICENSE](LICENSE)
-- [NOTICE](NOTICE)
+The names "风兮", "Fengxi Toolbox", official logos, icons, release identity,
+screenshots, application imagery, and other brand identifiers are reserved by
+the project rights holder unless a file states otherwise.
 
-简要说明：
+Forks and redistributed builds should use a different product name and clearly
+state that they are not official Fengxi Toolbox releases. Do not present
+modified, repackaged, mirrored, or renamed builds as official releases.
 
-- 允许下载官方发布版并按许可条款在合法范围内使用未修改的官方构建产物。
-- 不允许未授权复制、修改、再分发、二次发布、商用售卖、套壳、去署名或使用本项目品牌素材。
-- `风兮`、`Fengxi Toolbox`、项目图标及相关品牌视觉均保留权利。
+See [NOTICE](NOTICE).
 
-如果需要商业授权、定制授权或合作，请联系权利人并取得书面许可。
+## Third-Party Components
 
-## 免责声明
+This project uses third-party libraries and tools. Those components remain
+subject to their own licenses, notices, and attribution requirements.
 
-本软件按“现状”提供。执行批量改名、去水印、覆盖原文件、删除源文件等操作前，请先用测试样本验证结果是否符合预期。
+## Disclaimer
+
+The software is provided as-is. Before running destructive or large batch
+operations such as overwrite, delete-source, metadata cleanup, or watermark
+removal, test with sample files first.

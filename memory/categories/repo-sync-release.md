@@ -57,3 +57,10 @@
 3. 更新 `VERSION` 与 `CHANGELOG.md`。
 4. 执行 `powershell -ExecutionPolicy Bypass -File tools\fx_release_version.ps1 -Version X.Y.Z`。
 5. 等待 `Publish Release` 工作流构建并生成 GitHub Release。
+
+## 2026-06-09 License model update
+- User explicitly changed the project license strategy from proprietary/source-available to AGPL-3.0-only open source.
+- Commercial use is allowed under AGPL-3.0 as long as AGPL obligations and third-party license obligations are followed.
+- Brand/trademark/release identity remains reserved separately in NOTICE: forks and redistributed builds must not present themselves as official Fengxi Toolbox releases and should use a different product name.
+- Do not reintroduce proprietary no-redistribution/no-modification restrictions into LICENSE/README because they conflict with AGPL.
+- Before this license-only edit, local code was restored from origin/main at commit faba1fc.

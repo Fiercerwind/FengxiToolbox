@@ -1880,3 +1880,21 @@
 - Correct behavior: only the first rendered page receives the watermark; normal subsequent pages remain clean.
 - Key regression: `word_watermark_first_page_only_scope` exports a two-page DOCX to PDF and verifies first-page watermark visibility with second-page zero watermark pixels.
 - Validation: py_compile passed; smoke_test 14/14; full_debug_test 210/210.
+
+## 2026-06-09 Startup performance debug status
+- Issue: opening the app often felt slow and startup/page loading lagged.
+- Diagnosis: startup deferred layout refresh still used global `_tighten_layout(app)`, which walked all tab layout attributes and could initialize hidden lazy pages such as ZIP/PDF/audio. It also ended with a synchronous `update_idletasks()`, making CustomTkinter flush pending redraw/layout work in one visible freeze.
+- Fix:
+  - `_run_startup_layout_refresh(app)` now tightens only the current visible task tab, falling back to `DEFAULT_STARTUP_TAB`.
+  - Startup layout refresh no longer forces `update_idletasks()`.
+  - `patched_switch_tab(...)` in `tools/fx_startup_patches.py` keeps only one idle refresh after visible layout refresh.
+  - Post-show layout refresh is staged through `after(...)`: shell layout, current-tab layout, then current-tab visible refresh. This avoids one long callback immediately after the window appears.
+- Performance evidence from existing source probes:
+  - Before fix, `startup_layout_refresh` samples reached about `11408 ms`.
+  - After current-tab scoping, the source probe dropped to about `4000 ms`.
+  - The final no-idle-flush patch is covered by regression; packaged manual timing should be checked from `%LOCALAPPDATA%\FengxiToolbox\performance.jsonl` after launch.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_startup_patches.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 216/216 twice after the no-idle and staged-refresh changes.
+- Boundaries: no `fengxi_runtime.bin` change, no watermark/compression/OCR algorithm change, no project-external files deleted.
