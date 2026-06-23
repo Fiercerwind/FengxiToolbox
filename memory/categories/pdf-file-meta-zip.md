@@ -473,3 +473,78 @@
   - `python -m py_compile Fengxi_Toolbox.py tools\fx_pdf_compress_core.py full_debug_test.py smoke_test.py` passed.
   - `python smoke_test.py` passed 14/14.
   - `python full_debug_test.py` passed 214/214.
+
+## 2026-06-20 PDF compression no-growth and profile-aware resume
+- Problem:
+  - User sample folder showed PDFs becoming much larger after compression, e.g. `01-热力学第一定律.pdf` about 3.95 MB became `01-热力学第一定律_压缩.pdf` about 12.44 MB under standard/strong settings.
+  - Root cause: PyMuPDF clean/object-stream rewrite can inflate already optimized/vector PDFs, and the old core accepted the larger output. PDF compression resume also reused an existing `<stem>_压缩.pdf` without checking whether compression/image levels matched the current run.
+- New rule:
+  - PDF compression must never keep a result larger than the source file.
+  - `tools/fx_pdf_compress_core.py` now writes candidates into a temp directory, tries the built-in PyMuPDF path, optionally tries Ghostscript when `gswin64c.exe`/`gswin32c.exe`/`gs` is available, then keeps only the smallest candidate that is smaller than the source.
+  - If no candidate is smaller, the output is a copy of the original PDF and status returns `SUCCESS:<image_changes>:kept_original`; UI logs this as `保留原大小，避免越压越大`.
+  - Ghostscript is an optional enhancement only; the app must remain usable when it is not installed.
+- Resume rule:
+  - PDF compression writes hidden sidecar metadata `.filename.pdf.fx-compress.json` beside the output.
+  - Resume reuse now requires source path, source size, source mtime, PDF compression level, image compression level, and password-used flag to match.
+  - Existing outputs without matching metadata are not reused, so changing levels reprocesses instead of silently keeping an old result.
+- Regression:
+  - `pdf_compress_never_outputs_larger_file`
+  - `pdf_compress_resume_requires_matching_profile`
+  - Existing `pdf_compress_long_scan_keeps_readable_width` remains the guard for long scanned pages.
+- Validation:
+  - Real user sample probe: every tested combination for `01-热力学第一定律.pdf` now produced output size <= source size; old 12.44 MB growth no longer appears.
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_pdf_compress_core.py full_debug_test.py smoke_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 218/218.
+
+## 2026-06-20 PDF compression PDF24-inspired multi-candidate fix
+- User symptom:
+  - The user retried the folder `D:\Users\CHEER\xwechat_files\wxid_3q9imbf73w2l32_f9cb\msg\file\2026-06\据说做完能成仙的物理化学题库\据说做完能成仙的物理化学题库\【处理完成】结果文件夹`.
+  - Compression still looked ineffective and the output folder contained many unrelated-looking hidden `.fx-compress.json` files.
+- Root cause:
+  - Previous profile-aware resume stored hidden sidecar metadata next to each compressed PDF. This polluted user output folders.
+  - Some already optimized/vector PDFs cannot be substantially shrunk by image recompression; PyMuPDF rewrites may only save a few KB or may grow unless guarded.
+- Current rule:
+  - New PDF compression must use safe multi-candidate selection inspired by PDF24-style strategy, not a single rewrite path.
+  - Candidate order in `tools/fx_pdf_compress_core.py`: PyMuPDF optimized/metadata-font cleanup, optional `pikepdf` object-stream optimization, existing PyMuPDF profile path, optional Ghostscript when locally installed.
+  - Always keep the smallest valid candidate smaller than source. If none is smaller, copy the original bytes and return `SUCCESS:<image_changes>:kept_original`.
+  - Resume metadata is stored in `%LOCALAPPDATA%\FengxiToolbox\cache\pdf_compress_cache.json`, or `FX_PDF_COMPRESS_CACHE_DIR` during tests.
+  - Legacy sidecar `.filename.pdf.fx-compress.json` is read for compatibility only; new runs must not create sidecars in result folders.
+  - Do not delete existing old sidecars in external user folders unless the user explicitly approves cleanup for that exact folder.
+- Real sample probe:
+  - `01-热力学第一定律.pdf` source size was about 3.95 MB.
+  - Previous bad output could become about 12.44 MB.
+  - Current outputs are never larger; tested profiles shrink slightly to about 3.94 MB when object/metadata optimization helps, or keep original when no smaller candidate exists.
+- Regression coverage:
+  - `pdf_compress_never_outputs_larger_file`
+  - `pdf_compress_resume_requires_matching_profile`
+  - `pdf_compress_meta_stored_outside_output_folder`
+  - `pdf_compress_reports_engine_candidate`
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_pdf_compress_core.py full_debug_test.py smoke_test.py` passed in this workstream.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 220/220.
+
+## 2026-06-21 PDF compression Ghostscript/TeX Live backend fix
+- User request: rebuild PDF compression because previous results were often tiny savings or ineffective; learn from PDF24 and `lixiaofei123/pdftoolbox` but keep Fengxi Toolbox independent.
+- Design rule:
+  - Do not copy third-party project code. The implementation uses Fengxi's own multi-candidate pipeline.
+  - Reference idea from PDF24: expose/optimize around image DPI, image quality, font subsetting, stream deduplication, metadata/structure cleanup, and accept that image-heavy PDFs compress more than text/vector PDFs.
+  - Reference idea from pdftoolbox: Ghostscript `pdfwrite` with `PDFSETTINGS` is a strong candidate, but it must be one candidate among several, not the whole product identity.
+- Core fix:
+  - `tools/fx_pdf_compress_core.py` now discovers Ghostscript from env overrides, normal PATH, Program Files installs, and TeX Live layouts such as `D:\texlive\2024\tlpkg\tlgs\bin\gswin64c.exe`.
+  - TeX Live Ghostscript requires `GS_LIB`; build it from `Resource\Init`, `lib`, `kanji`, and resource directories before launching `gswin64c.exe`.
+  - Ghostscript execution still uses Python `subprocess` argument lists, not shell command strings, to avoid Windows quoting problems.
+  - Compression remains safe: only the smallest valid candidate smaller than the source is kept; otherwise Fengxi copies the original bytes and returns `kept_original`.
+- Regression coverage:
+  - `pdf_compress_ghostscript_texlive_env` verifies TeX Live resource directories are included in `GS_LIB`.
+  - `pdf_compress_ghostscript_candidate_runs_when_available` runs a real Ghostscript candidate when the executable is available and skips gracefully otherwise.
+- Real sample validation:
+  - Source: `01-热力学第一定律.pdf`, size `3,947,231` bytes.
+  - Fengxi compression after the fix: `SUCCESS:2:ghostscript`, output `3,609,246` bytes, about `8.56%` smaller.
+  - More aggressive Ghostscript probe can reach about `3,577,082` bytes on that sample, but normal strong mode stays conservative to avoid unnecessary quality loss.
+  - A 5-file probe from the same folder showed most files now use `ghostscript`; image/scan-like PDFs shrink around `6%` to `10%`, while already optimized/vector PDFs may only shrink slightly.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_pdf_compress_core.py full_debug_test.py smoke_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 222/222.

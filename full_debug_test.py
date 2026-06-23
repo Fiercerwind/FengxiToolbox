@@ -1,6 +1,7 @@
 import io
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -71,8 +72,15 @@ from tools.fx_zip_core import (
 from tools.fx_pdf_compress_core import (
     PDF_COMPRESS_LEVELS as PDF_COMPRESS_LEVELS_MODULE,
     PDF_IMAGE_COMPRESS_LEVELS as PDF_IMAGE_COMPRESS_LEVELS_MODULE,
+    _build_ghostscript_env as build_ghostscript_env_module,
+    _find_ghostscript_executable as find_ghostscript_executable_module,
+    _run_ghostscript_candidate as run_ghostscript_candidate_module,
+    build_pdf_compress_meta_path as build_pdf_compress_meta_path_module,
+    build_pdf_compress_profile_stamp as build_pdf_compress_profile_stamp_module,
     build_pdf_compress_output_path as build_pdf_compress_output_path_module,
     compress_pdf_file as compress_pdf_file_module,
+    pdf_compress_meta_matches as pdf_compress_meta_matches_module,
+    write_pdf_compress_meta as write_pdf_compress_meta_module,
 )
 from tools.fx_file_manager_core import (
     apply_rename_to_file as apply_rename_to_file_module,
@@ -252,6 +260,7 @@ def office_available(progid, mod=None):
 def main():
     mod = load_module()
     root = Path(tempfile.mkdtemp(prefix="tmp_full_debug_", dir=Path.cwd())).resolve()
+    os.environ["FX_PDF_COMPRESS_CACHE_DIR"] = str(root / "pdf_compress_cache")
     original_pref_root = mod._get_user_pref_root
     mod._get_user_pref_root = lambda: root / "user_prefs"
     dummy = DummyApp()
@@ -2835,6 +2844,103 @@ def main():
         compress_pdf_file_module(str(src), str(root / "pdf_compress_out_core.pdf"), "强力", "保留原图").startswith("SUCCESS"),
         "core_helper",
     )
+    no_growth_src = inp / "no_growth_vector.pdf"
+    make_pdf(no_growth_src, ["vector text"] * 80)
+    no_growth_out = out / "no_growth_vector_compressed.pdf"
+    no_growth_status = compress_pdf_file_module(str(no_growth_src), str(no_growth_out), "标准", "保留原图")
+    record(
+        "pdf_compress_never_outputs_larger_file",
+        no_growth_status.startswith("SUCCESS")
+        and no_growth_out.exists()
+        and no_growth_out.stat().st_size <= no_growth_src.stat().st_size,
+        {
+            "status": no_growth_status,
+            "source_size": no_growth_src.stat().st_size,
+            "output_size": no_growth_out.stat().st_size if no_growth_out.exists() else 0,
+        },
+    )
+    resume_stamp = build_pdf_compress_profile_stamp_module(str(no_growth_src), "标准", "保留原图")
+    write_pdf_compress_meta_module(str(no_growth_out), resume_stamp, {"status": "probe"})
+    mismatched_stamp = build_pdf_compress_profile_stamp_module(str(no_growth_src), "强力", "保留原图")
+    record(
+        "pdf_compress_resume_requires_matching_profile",
+        pdf_compress_meta_matches_module(str(no_growth_out), resume_stamp)
+        and not pdf_compress_meta_matches_module(str(no_growth_out), mismatched_stamp),
+        {
+            "matching": pdf_compress_meta_matches_module(str(no_growth_out), resume_stamp),
+            "mismatched": pdf_compress_meta_matches_module(str(no_growth_out), mismatched_stamp),
+        },
+    )
+    cache_meta_path, cache_meta_key = build_pdf_compress_meta_path_module(str(no_growth_out))
+    legacy_sidecar = no_growth_out.with_name(f".{no_growth_out.name}.fx-compress.json")
+    record(
+        "pdf_compress_meta_stored_outside_output_folder",
+        Path(cache_meta_path).name == "pdf_compress_cache.json"
+        and Path(cache_meta_path).parent != no_growth_out.parent
+        and not legacy_sidecar.exists()
+        and bool(cache_meta_key),
+        {
+            "cache_meta_path": str(cache_meta_path),
+            "output_parent": str(no_growth_out.parent),
+            "legacy_sidecar_exists": legacy_sidecar.exists(),
+        },
+    )
+    record(
+        "pdf_compress_reports_engine_candidate",
+        any(token in no_growth_status for token in (":optimized", ":pikepdf", ":pymupdf", ":ghostscript", ":kept_original")),
+        no_growth_status,
+    )
+    fake_tlgs = root / "fake_texlive" / "2024" / "tlpkg" / "tlgs"
+    fake_gs = fake_tlgs / "bin" / "gswin64c.exe"
+    for rel in (
+        ("Resource", "Init"),
+        ("lib",),
+        ("kanji",),
+        ("Resource", "Font"),
+        ("Resource", "CMap"),
+        ("Resource", "CIDFont"),
+    ):
+        fake_tlgs.joinpath(*rel).mkdir(parents=True, exist_ok=True)
+    fake_gs.parent.mkdir(parents=True, exist_ok=True)
+    fake_gs.write_text("fake", encoding="utf-8")
+    old_gs_lib = os.environ.get("GS_LIB")
+    os.environ["GS_LIB"] = str(root / "already_in_gs_lib")
+    try:
+        gs_env = build_ghostscript_env_module(str(fake_gs))
+        gs_lib_parts = gs_env.get("GS_LIB", "").split(os.pathsep)
+    finally:
+        if old_gs_lib is None:
+            os.environ.pop("GS_LIB", None)
+        else:
+            os.environ["GS_LIB"] = old_gs_lib
+    record(
+        "pdf_compress_ghostscript_texlive_env",
+        str(fake_tlgs / "Resource" / "Init") in gs_lib_parts
+        and str(fake_tlgs / "lib") in gs_lib_parts
+        and str(fake_tlgs / "kanji") in gs_lib_parts
+        and str(root / "already_in_gs_lib") in gs_lib_parts,
+        {"GS_LIB": gs_env.get("GS_LIB", "")},
+    )
+    real_gs = find_ghostscript_executable_module()
+    if real_gs:
+        gs_probe = out / "ghostscript_probe.pdf"
+        gs_probe_status = run_ghostscript_candidate_module(
+            str(no_growth_src),
+            str(gs_probe),
+            "强力",
+            "强力",
+        )
+        record(
+            "pdf_compress_ghostscript_candidate_runs_when_available",
+            gs_probe_status.startswith("SUCCESS") and gs_probe.exists() and gs_probe.stat().st_size > 0,
+            {"status": gs_probe_status, "gs": real_gs, "size": gs_probe.stat().st_size if gs_probe.exists() else 0},
+        )
+    else:
+        record(
+            "pdf_compress_ghostscript_candidate_runs_when_available",
+            True,
+            "skipped: ghostscript unavailable",
+        )
     long_image = inp / "long_scan.jpg"
     long_img = Image.new("RGB", (1080, 6976), "white")
     for y in range(80, 6900, 180):

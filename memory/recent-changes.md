@@ -1,5 +1,20 @@
 # 最近变更
 
+## 2026-06-21 09:19:49 | pdf_file
+- 摘要：PDF compression Ghostscript TeX Live backend fix
+- 文件：tools\fx_pdf_compress_core.py, full_debug_test.py, memory\categories\pdf-file-meta-zip.md, memory\debug-status.md
+- 说明：PDF compression now discovers TeX Live bundled Ghostscript and builds GS_LIB with Resource Init, lib, kanji, and font/CMap/CID resource directories. Real sample 01-热力学第一定律.pdf compressed from 3947231 to 3609246 bytes with SUCCESS:2:ghostscript while keeping the no-growth guard. Added regressions for TeX Live GS_LIB env and real Ghostscript candidate execution. Validation: py_compile passed, smoke_test.py 14/14, full_debug_test.py 222/222.
+
+## 2026-06-20 23:24:12 | pdf_file
+- 摘要：PDF compression PDF24-inspired candidate optimization and clean cache metadata
+- 文件：tools\fx_pdf_compress_core.py, Fengxi_Toolbox.py, full_debug_test.py, memory\categories\pdf-file-meta-zip.md, memory\debug-status.md
+- 说明：PDF compression now uses multiple safe candidates inspired by PDF24-style strategy: PyMuPDF optimized save, optional pikepdf object stream optimization, existing PyMuPDF profile path, and optional Ghostscript when installed. The chosen output must be valid and smaller than the source; otherwise the original bytes are copied to avoid growth. Resume/profile metadata is now stored in a local cache file instead of hidden sidecar JSON files beside user outputs. Legacy sidecars are still read for compatibility, but new runs must not create .fx-compress.json files in result folders. Existing old sidecars in external user folders are not deleted without explicit permission. Real sample 01-热力学第一定律.pdf now shrinks slightly instead of growing from about 3.95MB to 12.44MB or producing visible sidecar clutter. Validation: py_compile passed, smoke_test.py 14/14, full_debug_test.py 220/220.
+
+## 2026-06-20 22:54:15 | pdf_file
+- 摘要：PDF compression no-growth and profile-aware resume
+- 文件：tools\fx_pdf_compress_core.py, Fengxi_Toolbox.py, full_debug_test.py, memory\categories\pdf-file-meta-zip.md, memory\debug-status.md
+- 说明：PDF compression now uses candidate selection and never keeps an output larger than the source. Optional Ghostscript is tried when locally available, otherwise PyMuPDF remains the built-in path. If no candidate is smaller, the output keeps the original bytes and logs kept_original. PDF compression resume now requires matching sidecar metadata for source and compression/image levels, so changing settings no longer reuses stale _压缩.pdf outputs. Real user sample no longer grows from 3.95MB to 12.44MB. Validation: py_compile passed, smoke_test.py 14/14, full_debug_test.py 218/218.
+
 ## 2026-06-09 09:15:30 | runtime
 - 摘要：Stage startup post-show layout refresh
 - 文件：Fengxi_Toolbox.py, full_debug_test.py, memory\architecture.md, memory\debug-status.md, memory\recent-changes.md

@@ -82,8 +82,11 @@ from tools.fx_performance import FxPerformanceRecorder, load_performance_entries
 from tools.fx_pdf_compress_core import (
     PDF_COMPRESS_LEVELS,
     PDF_IMAGE_COMPRESS_LEVELS,
+    build_pdf_compress_profile_stamp as _pdf_compress_core_build_profile_stamp,
     build_pdf_compress_output_path as _pdf_compress_core_build_output_path,
     compress_pdf_file as _pdf_compress_core_compress_pdf_file,
+    pdf_compress_meta_matches as _pdf_compress_core_meta_matches,
+    write_pdf_compress_meta as _pdf_compress_core_write_meta,
 )
 from tools.fx_queue_history import (
     QueueHistoryContext,
@@ -6246,6 +6249,10 @@ def _run_pdf_compress_task(app, input_folder):
     resumed_count = 0
     total = len(pdf_files)
     app.log(f"📉 [PDF 压缩] 共 {total} 个 PDF，压缩程度：{compress_level}，图片压缩：{image_level}")
+    profile_stamp_by_src = {
+        src: _pdf_compress_core_build_profile_stamp(src, compress_level, image_level, password=password)
+        for src in pdf_files
+    }
 
     reserved_outputs = set()
     stem_counts = {}
@@ -6255,7 +6262,11 @@ def _run_pdf_compress_task(app, input_folder):
     jobs = []
     for src in pdf_files:
         resume_output = _build_pdf_compress_resume_output_path(src, output_folder)
-        if stem_counts.get(Path(src).stem.lower(), 0) == 1 and is_nonempty_file(resume_output):
+        if (
+            stem_counts.get(Path(src).stem.lower(), 0) == 1
+            and is_nonempty_file(resume_output)
+            and _pdf_compress_core_meta_matches(resume_output, profile_stamp_by_src.get(src))
+        ):
             jobs.append((src, resume_output))
         else:
             jobs.append((src, _reserve_unique_output_path(src, output_folder, _build_pdf_compress_output_path, reserved_outputs)))
@@ -6276,7 +6287,21 @@ def _run_pdf_compress_task(app, input_folder):
             return {"src": src, "dst": dst, "ok": False, "status": status}
         after_size = os.path.getsize(dst)
         ratio = 0 if before_size <= 0 else max(0, round((1 - after_size / before_size) * 100, 1))
-        image_changes = status.split(":", 1)[1] if ":" in status else "0"
+        status_parts = status.split(":")
+        image_changes = status_parts[1] if len(status_parts) > 1 else "0"
+        engine = status_parts[2] if len(status_parts) > 2 else "pymupdf"
+        _pdf_compress_core_write_meta(
+            dst,
+            profile_stamp_by_src.get(src),
+            {
+                "status": status,
+                "engine": engine,
+                "source_size": before_size,
+                "output_size": after_size,
+                "ratio": ratio,
+                "image_changes": image_changes,
+            },
+        )
         return {
             "src": src,
             "dst": dst,
@@ -6284,7 +6309,27 @@ def _run_pdf_compress_task(app, input_folder):
             "status": status,
             "ratio": ratio,
             "image_changes": image_changes,
+            "engine": engine,
         }
+
+    def _log_pdf_compress_success(item):
+        dst = item["dst"]
+        engine = item.get("engine") or "pymupdf"
+        if engine in {"original", "kept_original"}:
+            suffix = " | 保留原大小，避免越压越大"
+        elif engine == "ghostscript":
+            suffix = " | 引擎 ghostscript"
+        elif engine == "optimized":
+            suffix = " | 引擎 内置优化"
+        elif engine == "pikepdf":
+            suffix = " | 引擎 对象流优化"
+        elif engine == "pymupdf":
+            suffix = " | 引擎 内置"
+        else:
+            suffix = f" | 引擎 {engine}"
+        app.log(
+            f"✅ [PDF 压缩] {os.path.basename(dst)} | 减少 {item.get('ratio', 0)}% | 图片 {item.get('image_changes', '0')} 项{suffix}"
+        )
 
     parallel_workers = _get_parallel_worker_count(total) if _is_parallel_enabled(app) else 1
     if parallel_workers > 1:
@@ -6310,10 +6355,7 @@ def _run_pdf_compress_task(app, input_folder):
                     failed_list.append(f"{item.get('src', src)}: {item.get('status')}")
                     app.log(f"❌ [失败] {os.path.basename(str(item.get('src', src)))}: {item.get('status')}")
                 else:
-                    dst = item["dst"]
-                    app.log(
-                        f"✅ [PDF 压缩] {os.path.basename(dst)} | 减少 {item.get('ratio', 0)}% | 图片 {item.get('image_changes', '0')} 项"
-                    )
+                    _log_pdf_compress_success(item)
                     success_count += 1
                     if item.get("resumed"):
                         resumed_count += 1
@@ -6342,9 +6384,7 @@ def _run_pdf_compress_task(app, input_folder):
                     failed_list.append(f"{src}: {item.get('status')}")
                     app.log(f"❌ [失败] {os.path.basename(src)}: {item.get('status')}")
                     continue
-                app.log(
-                    f"✅ [PDF 压缩] {os.path.basename(dst)} | 减少 {item.get('ratio', 0)}% | 图片 {item.get('image_changes', '0')} 项"
-                )
+                _log_pdf_compress_success(item)
                 success_count += 1
                 if item.get("resumed"):
                     resumed_count += 1

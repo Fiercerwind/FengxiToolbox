@@ -1898,3 +1898,46 @@
   - `python smoke_test.py` passed 14/14.
   - `python full_debug_test.py` passed 216/216 twice after the no-idle and staged-refresh changes.
 - Boundaries: no `fengxi_runtime.bin` change, no watermark/compression/OCR algorithm change, no project-external files deleted.
+
+## 2026-06-20 PDF compression no-growth validation
+- Fixed PDF compression enlarging already optimized/vector PDFs.
+- Real-world diagnosis: user sample `01-热力学第一定律.pdf` was about 3.95 MB, while the previous standard output was about 12.44 MB. The file had only a few small JPEGs, so the bloat came from PDF object rewriting rather than image compression.
+- Core behavior now chooses the smallest valid candidate below source size; if none is smaller, it keeps a same-size copy of the original instead of emitting a larger “compressed” PDF.
+- PDF compression resume now requires matching sidecar metadata, preventing stale `_压缩.pdf` outputs from being reused after changing compression/image levels.
+- Optional Ghostscript candidate support is present when a local `gswin64c.exe`/`gswin32c.exe`/`gs` is available; absence of Ghostscript is not an error.
+- Validation: real user sample probe passed for multiple PDF/image compression levels, py_compile passed, smoke_test.py passed 14/14, full_debug_test.py passed 218/218.
+
+## 2026-06-20 PDF compression sidecar cleanup and multi-candidate validation
+- Issue: user saw "many unrelated files" after PDF compression. Diagnosis found hidden `.fx-compress.json` sidecars generated beside compressed PDFs by the previous resume-metadata implementation.
+- Fix: PDF compression metadata now goes to a local cache file outside user output folders. New compression runs must not create hidden sidecar JSON files in result folders.
+- Compatibility: legacy sidecars are still readable for resume matching, but they are not generated anymore.
+- Safety boundary: do not delete old sidecars from external folders without explicit user approval.
+- Compression strategy now follows a PDF24-like multi-candidate approach while staying Fengxi-specific:
+  - PyMuPDF optimized cleanup candidate.
+  - Optional pikepdf object-stream candidate when the library is available.
+  - Existing PyMuPDF profile candidate.
+  - Optional Ghostscript candidate when a local Ghostscript executable is available.
+  - Keep only valid output smaller than source; otherwise keep original bytes to prevent growth.
+- Real sample probe: `01-热力学第一定律.pdf` now avoids the old 12.44 MB growth and can shrink slightly from about 3.95 MB to about 3.94 MB depending on profile/candidate.
+- Validation: `py_compile` passed, `smoke_test.py` passed 14/14, `full_debug_test.py` passed 220/220.
+
+## 2026-06-21 PDF compression Ghostscript backend validation
+- Issue: PDF compression was still weak on the user's physics chemistry PDF folder because the strongest Ghostscript candidate was not actually running on this machine.
+- Diagnosis:
+  - Local Ghostscript exists at `D:\texlive\2024\tlpkg\tlgs\bin\gswin64c.exe`.
+  - TeX Live bundled Ghostscript needs `GS_LIB`; without it, it cannot find files such as `gs_init.ps` and `kfwin32.ps`.
+  - The old finder only searched PATH and Program Files Ghostscript installs, so TeX Live Ghostscript was effectively invisible or unusable.
+- Fix:
+  - Added Ghostscript discovery for env overrides, PATH, Program Files, and TeX Live roots.
+  - Added `GS_LIB` construction for TeX Live layouts with `Resource\Init`, `lib`, `kanji`, and font/CMap/CID resource directories.
+  - Kept the no-growth guard and multi-candidate selection: Fengxi still only keeps a valid candidate smaller than the source.
+- Real sample:
+  - `01-热力学第一定律.pdf`: `3,947,231` bytes -> `3,609,246` bytes, status `SUCCESS:2:ghostscript`, about `8.56%` smaller.
+  - A direct extreme probe reached `3,577,082` bytes, but strong mode remains conservative to protect readability.
+- Regression:
+  - `pdf_compress_ghostscript_texlive_env`
+  - `pdf_compress_ghostscript_candidate_runs_when_available`
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_pdf_compress_core.py full_debug_test.py smoke_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 222/222.
