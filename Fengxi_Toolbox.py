@@ -6325,6 +6325,8 @@ def _run_pdf_compress_task(app, input_folder):
             suffix = " | 引擎 对象流优化"
         elif engine == "pymupdf":
             suffix = " | 引擎 内置"
+        elif engine == "rasterized":
+            suffix = " | 引擎 图片化"
         else:
             suffix = f" | 引擎 {engine}"
         app.log(
@@ -6951,7 +6953,7 @@ def _patch_pdf_ocr_mode():
             self.pdf_pwd_entry = self._fx_pdf_encrypt_pwd_entry
 
             compress_panel = create_detail_panel("compress", "PDF 压缩")
-            add_panel_note(compress_panel, "PDF 压缩程度控制对象清理、字体和数据流压缩；图片压缩程度控制内嵌图片的重压缩和降采样。")
+            add_panel_note(compress_panel, "PDF 压缩程度控制对象清理、字体和数据流压缩；图片压缩程度控制内嵌图片的重压缩和降采样。图片化压缩会把整页转成图片以换取更小体积。")
             compress_grid = customtkinter.CTkFrame(compress_panel, fg_color="transparent")
             compress_grid.pack(fill="x", padx=8, pady=(2, 10))
             compress_grid.grid_columnconfigure(0, weight=1)
@@ -6991,7 +6993,7 @@ def _patch_pdf_ocr_mode():
 
             add_panel_note(
                 compress_panel,
-                "提示：如果 PDF 主要由扫描图片组成，调高图片压缩更有效；如果 PDF 主要是文字，PDF 压缩程度通常更关键。",
+                "提示：如果 PDF 主要由扫描图片组成，调高图片压缩更有效；如果 PDF 主要是文字，PDF 压缩程度通常更关键。若选择“图片化压缩”，页面会转成图片，适合上传分享，不适合复制、搜索或编辑文本。",
             )
 
             ocr_panel = create_detail_panel("ocr", "OCR 配置")

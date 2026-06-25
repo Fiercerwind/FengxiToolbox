@@ -1,5 +1,10 @@
 # 最近变更
 
+## 2026-06-24 09:50:46 | pdf_file
+- 摘要：Add web-style raster PDF compression mode
+- 文件：tools\fx_pdf_compress_core.py, Fengxi_Toolbox.py, full_debug_test.py, memory\categories\pdf-file-meta-zip.md, memory\debug-status.md
+- 说明：Added a new opt-in PDF image compression profile named 网页式极限压缩. This mode rasterizes PDF pages to JPEG images and rebuilds the PDF, then participates in the normal smallest-valid-candidate selection alongside optimized, pikepdf, pymupdf, and ghostscript outputs. Existing compression profiles were left unchanged. UI help text now explains that this mode is best for upload/share and may lose searchable/editable/vector structure. Validation: py_compile passed, smoke_test.py 14/14, full_debug_test.py 223/223.
+
 ## 2026-06-21 09:19:49 | pdf_file
 - 摘要：PDF compression Ghostscript TeX Live backend fix
 - 文件：tools\fx_pdf_compress_core.py, full_debug_test.py, memory\categories\pdf-file-meta-zip.md, memory\debug-status.md

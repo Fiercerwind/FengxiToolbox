@@ -1941,3 +1941,15 @@
   - `python -m py_compile Fengxi_Toolbox.py tools\fx_pdf_compress_core.py full_debug_test.py smoke_test.py` passed.
   - `python smoke_test.py` passed 14/14.
   - `python full_debug_test.py` passed 222/222.
+
+
+## 2026-06-24 PDF web-style raster compression validation
+- Added a new opt-in PDF compression profile: `图片化压缩`.
+- This mode rasterizes PDF pages into JPEG images and rebuilds a new PDF, then lets the normal smallest-valid-candidate selection decide whether it wins.
+- Existing non-raster profiles remain unchanged; the new mode does not replace normal optimized/pikepdf/pymupdf/ghostscript behavior.
+- Safety rule preserved: if rasterization is not smaller, Fengxi still keeps a smaller non-raster candidate or the original bytes.
+- UI/help text now warns that this mode is suitable for upload/share but may lose searchable/editable/vector structure.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_pdf_compress_core.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 223/223.

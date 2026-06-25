@@ -14,6 +14,9 @@ from pathlib import Path
 from PIL import Image as PILImage
 
 
+WEB_RASTER_IMAGE_LEVEL = "图片化压缩"
+
+
 PDF_COMPRESS_LEVELS = {
     "轻度": {"garbage": 2, "clean": False, "deflate": True, "use_objstms": False, "compression_effort": 1},
     "标准": {"garbage": 3, "clean": True, "deflate": True, "use_objstms": True, "compression_effort": 6},
@@ -27,6 +30,13 @@ PDF_IMAGE_COMPRESS_LEVELS = {
     "标准": {"enabled": True, "quality": 76, "max_side": 3600, "min_width": 1080, "progressive": True},
     "强力": {"enabled": True, "quality": 66, "max_side": 2800, "min_width": 900, "progressive": True},
     "极限小体积": {"enabled": True, "quality": 55, "max_side": 1800, "min_width": 480, "progressive": True},
+    WEB_RASTER_IMAGE_LEVEL: {
+        "enabled": False,
+        "rasterize_pdf": True,
+        "raster_dpi": 150,
+        "raster_quality": 65,
+        "raster_progressive": True,
+    },
 }
 
 PDF_COMPRESS_META_VERSION = 1
@@ -325,6 +335,51 @@ def _save_pikepdf_candidate(src, dst):
     return "SUCCESS"
 
 
+def _save_rasterized_web_candidate(src, dst, raster_profile, password=""):
+    import fitz
+
+    dpi = int(raster_profile.get("raster_dpi") or 150)
+    quality = int(raster_profile.get("raster_quality") or 65)
+    progressive = bool(raster_profile.get("raster_progressive", True))
+    scale = max(0.5, float(dpi) / 72.0)
+
+    src_doc = fitz.open(src)
+    out_doc = fitz.open()
+    page_count = 0
+    try:
+        if src_doc.is_encrypted:
+            if not password or not src_doc.authenticate(password):
+                return "ERROR:PDF 已加密，密码不正确或未提供密码。", 0
+        for page in src_doc:
+            rect = page.rect
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            try:
+                image = PILImage.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+                buffer = io.BytesIO()
+                image.save(
+                    buffer,
+                    format="JPEG",
+                    quality=quality,
+                    optimize=True,
+                    progressive=progressive,
+                    subsampling=1,
+                )
+                new_page = out_doc.new_page(width=rect.width, height=rect.height)
+                new_page.insert_image(rect, stream=buffer.getvalue())
+                page_count += 1
+            finally:
+                pixmap = None
+        out_doc.save(dst, garbage=4, clean=True, deflate=True, use_objstms=True)
+    except Exception as exc:
+        return f"SKIP:rasterized failed {exc}", 0
+    finally:
+        out_doc.close()
+        src_doc.close()
+    if not os.path.exists(dst) or os.path.getsize(dst) <= 0:
+        return "SKIP:rasterized empty output", 0
+    return "SUCCESS", page_count
+
+
 def _iter_ghostscript_candidates():
     for env_name in _GHOSTSCRIPT_ENV_OVERRIDES:
         value = os.environ.get(env_name)
@@ -540,6 +595,24 @@ def compress_pdf_file(src, dst, compress_level="标准", image_level="标准", p
                 best_path = gs_candidate
                 best_size = size
                 best_engine = "ghostscript"
+
+        if image_profile.get("rasterize_pdf"):
+            raster_candidate = temp_root / "rasterized_web.pdf"
+            raster_status, raster_pages = _save_rasterized_web_candidate(
+                src,
+                str(raster_candidate),
+                image_profile,
+                password=password,
+            )
+            if raster_status.startswith("ERROR"):
+                return raster_status
+            if raster_status.startswith("SUCCESS") and raster_candidate.exists() and raster_candidate.stat().st_size > 0:
+                size = raster_candidate.stat().st_size
+                if size < best_size:
+                    best_path = raster_candidate
+                    best_size = size
+                    best_engine = "rasterized"
+                    image_changes = max(image_changes, raster_pages)
 
         if best_path is None:
             shutil.copy2(src, dst)

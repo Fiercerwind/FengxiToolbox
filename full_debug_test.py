@@ -2667,6 +2667,7 @@ def main():
         and "标准" in PDF_IMAGE_COMPRESS_LEVELS_MODULE
         and "高清" in PDF_IMAGE_COMPRESS_LEVELS_MODULE
         and "极限小体积" in PDF_IMAGE_COMPRESS_LEVELS_MODULE
+        and "图片化压缩" in PDF_IMAGE_COMPRESS_LEVELS_MODULE
         and getattr(mod.compress_pdf_file, "__module__", "") == "fengxi_toolbox",
         {
             "module": getattr(compress_pdf_file_module, "__module__", ""),
@@ -2972,6 +2973,45 @@ def main():
             "tiny_size": tiny_image_size,
             "standard_bytes": long_standard.stat().st_size if long_standard.exists() else 0,
             "tiny_bytes": long_tiny.stat().st_size if long_tiny.exists() else 0,
+        },
+    )
+
+    vector_raster_pdf = inp / "vector_raster_source.pdf"
+    vec_canvas = canvas.Canvas(str(vector_raster_pdf))
+    for page_index in range(12):
+        vec_canvas.setFont("Helvetica", 8)
+        for row in range(85):
+            y = 812 - row * 9
+            vec_canvas.drawString(22, y, f"Vector row {page_index+1:02d}-{row+1:02d} | " + ("ABCD1234 xyz " * 22))
+            vec_canvas.line(20, y - 1, 585, y - 1)
+            vec_canvas.line(20, y + 2, 585, y + 2)
+            vec_canvas.rect(20 + (row % 15) * 12, y - 7, 160, 8, stroke=1, fill=0)
+            vec_canvas.circle(520 - (row % 8) * 14, y - 3, 4, stroke=1, fill=0)
+        vec_canvas.showPage()
+    vec_canvas.save()
+    vector_raster_out = out / "vector_rasterized.pdf"
+    vector_pike_out = out / "vector_pike.pdf"
+    vector_raster_status = mod.compress_pdf_file(str(vector_raster_pdf), str(vector_raster_out), "标准", "图片化压缩")
+    vector_pike_status = mod.compress_pdf_file(str(vector_raster_pdf), str(vector_pike_out), "标准", "保留原图")
+    vector_raster_img_size = first_pdf_image_size(vector_raster_out)
+    record(
+        "pdf_compress_web_raster_mode",
+        vector_raster_status.startswith("SUCCESS")
+        and vector_pike_status.startswith("SUCCESS")
+        and vector_raster_out.exists()
+        and vector_pike_out.exists()
+        and vector_raster_out.stat().st_size <= vector_raster_pdf.stat().st_size
+        and (
+            ":rasterized" in vector_raster_status
+            or vector_raster_out.stat().st_size == vector_pike_out.stat().st_size
+        ),
+        {
+            "status": vector_raster_status,
+            "pike_status": vector_pike_status,
+            "source_bytes": vector_raster_pdf.stat().st_size,
+            "raster_bytes": vector_raster_out.stat().st_size if vector_raster_out.exists() else 0,
+            "pike_bytes": vector_pike_out.stat().st_size if vector_pike_out.exists() else 0,
+            "first_image_size": vector_raster_img_size,
         },
     )
 

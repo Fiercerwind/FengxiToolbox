@@ -548,3 +548,27 @@
   - `python -m py_compile Fengxi_Toolbox.py tools\fx_pdf_compress_core.py full_debug_test.py smoke_test.py` passed.
   - `python smoke_test.py` passed 14/14.
   - `python full_debug_test.py` passed 222/222.
+
+
+## 2026-06-24 PDF web-style raster compression mode
+- New optional image compression profile: `图片化压缩`.
+- Purpose:
+  - Match the kind of strong size reduction users see from web tools such as PDF24 on complex vector/Print-to-PDF documents.
+  - Keep existing `保留原图 / 高清 / 轻度 / 标准 / 强力 / 极限小体积` behavior unchanged.
+- Behavior:
+  - This profile is opt-in only.
+  - Fengxi rasterizes each page to a JPEG image and rebuilds the PDF page-by-page.
+  - The rasterized result still enters the normal candidate race with optimized/pikepdf/pymupdf/ghostscript outputs.
+  - Final safety rule is unchanged: only keep a valid candidate smaller than the source; otherwise keep the original bytes.
+- User-visible caution:
+  - This mode is for upload/share/web-size reduction.
+  - It may lose selectable/searchable text, vector sharpness, links, forms, and editing friendliness because pages are turned into images.
+- Implementation:
+  - `tools/fx_pdf_compress_core.py` adds `WEB_RASTER_IMAGE_LEVEL = "图片化压缩"`.
+  - Added `_save_rasterized_web_candidate(...)` using PyMuPDF page rendering + JPEG recomposition.
+  - `Fengxi_Toolbox.py` PDF compression success log now labels this engine as `图片化`.
+  - PDF compression panel help text now explains the tradeoff.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_pdf_compress_core.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 223/223.
