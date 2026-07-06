@@ -572,3 +572,21 @@
   - `python -m py_compile Fengxi_Toolbox.py tools\fx_pdf_compress_core.py full_debug_test.py` passed.
   - `python smoke_test.py` passed 14/14.
   - `python full_debug_test.py` passed 223/223.
+
+## 2026-07-05 Smart Recursive ZIP mixed-boundary fix
+- User symptom:
+  - In Smart Recursive batch compression, depth range `3-4`, existing archive policy `rebuild_existing`, a folder like `Archive1` that had normal files such as PDFs next to child folders still caused large ZIPs for the child folders.
+  - User explicitly requested not to touch the real Archive result folder; all repro and validation used temporary fixtures only.
+- Rule now:
+  - A Smart Recursive folder that contains meaningful non-archive files is a boundary.
+  - Fengxi may create the ZIP for that folder if its depth is in range, but it will not descend below it.
+  - This boundary applies even when the folder itself is before the selected minimum depth, preventing child folders at depth 3/4 from being zipped under a mixed depth-2 parent.
+  - Existing archive files are ignored when deciding whether a folder has meaningful files.
+- Implementation:
+  - `tools/fx_zip_core.py`: removed the minimum-depth exception from the smart recursion stop condition.
+  - `full_debug_test.py`: added `zip_smart_depth_range_stops_at_mixed_boundary`.
+- Validation:
+  - Temporary repro changed from planning `Archive1/child_pdf.zip` to planning no descendant ZIP.
+  - `python -m py_compile tools\fx_zip_core.py full_debug_test.py Fengxi_Toolbox.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 228/228.

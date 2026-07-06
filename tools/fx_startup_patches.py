@@ -23,6 +23,7 @@ class StartupPatchContext:
     refresh_visible_tab_layout: object
     guess_lazy_tab_for_attr: object
     record_performance: object
+    defer_default_tab: bool = True
 
 
 def _call(callback, *args, **kwargs):
@@ -79,7 +80,7 @@ def install_startup_performance_patch(context):
                 initializer = getattr(self, init_name, None)
                 if callable(initializer):
                     self._fx_lazy_tab_initializers[task_name] = initializer
-                if task_name == context.default_startup_tab:
+                if task_name == context.default_startup_tab and not context.defer_default_tab:
                     continue
 
                 def deferred_init(_task_name=task_name):
@@ -89,7 +90,10 @@ def install_startup_performance_patch(context):
                 setattr(self, init_name, deferred_init)
 
             result = original_setup_main_area(self)
-            self._fx_lazy_tabs_state[context.default_startup_tab] = True
+            default_already_ready = bool(self._fx_lazy_tabs_state.get(context.default_startup_tab))
+            self._fx_lazy_tabs_state[context.default_startup_tab] = (
+                default_already_ready or not context.defer_default_tab
+            )
             self._fx_lazy_startup_ready = True
             return result
         finally:

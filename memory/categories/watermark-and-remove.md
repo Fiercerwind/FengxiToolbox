@@ -434,3 +434,18 @@
   - `python -m py_compile Fengxi_Toolbox.py tools\fx_watermark_core.py full_debug_test.py` passed.
   - `python smoke_test.py` passed 14/14.
   - `python full_debug_test.py` passed 213/213.
+
+## 2026-07-05 PDF-only batch watermark parallel fast path
+- Batch watermark can now use the existing `enable_multithread` switch for PDF-only folder runs.
+- Fast path conditions are intentionally narrow:
+  - input is a folder, not a single file;
+  - more than one processable file;
+  - every processable file is a PDF;
+  - Word/PPT `convert to PDF` watermark setting is off;
+  - `_get_parallel_worker_count(...)` returns more than one worker.
+- Implementation lives in `Fengxi_Toolbox.py`:
+  - `_watermark_pdf_parallel_enabled(...)` gates the path.
+  - `_run_watermark_pdf_parallel_task(...)` runs per-PDF watermark jobs in a `ThreadPoolExecutor`.
+  - `_watermark_make_pdf_packet(...)` can rebuild the packet from precomputed bytes for each worker.
+- Keep Word/PPT watermark and Office conversion paths serial. Office COM remains the risky part for multi-threading.
+- Regression anchor: `watermark_pdf_parallel_executor`.

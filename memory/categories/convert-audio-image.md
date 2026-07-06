@@ -167,3 +167,45 @@
 - Speech-to-text skips existing transcript outputs for the requested format (`txt`, `srt`, or `txt+srt`) and counts them as success + skipped.
 - Ordinary conversion/image paths that still flow through `process_single_file` are also covered by the generic resume wrapper in `Fengxi_Toolbox.py`.
 - Delete-source behavior must not run for resumed items; deletion is only allowed after fresh successful processing.
+
+## 2026-07-05 Format conversion expansion
+- Added four convert modes under the existing `convert` task:
+  - `pdf2ppt`: PDF -> PPTX. Uses PowerPoint COM and PyMuPDF rendering; each PDF page becomes an image-backed slide. This preserves appearance but is not an editable text/layout reconstruction.
+  - `txt2word`: TXT -> DOCX. Uses a lightweight built-in DOCX writer, supports UTF-8/GB18030 text input, and does not require Word COM.
+  - `md2pdf`: Markdown -> PDF. Uses ReportLab plus the bundled SmileySans font when available; handles headings, bullets, ordered lists, code blocks, links/images as simplified text.
+  - `pdf2md`: PDF -> Markdown. Extracts selectable text through PyMuPDF first, then pypdf fallback; scanned PDFs still need OCR first.
+- `tools/fx_convert_core.py` owns the new mode specs, aliases, file collection, and output suffix planning.
+- `tools/fx_convert_task.py` owns the reusable conversion helpers and `process_convert_file(...)` routing for the new modes.
+- `Fengxi_Toolbox.py` adds loader-layer UI radio buttons and a dedicated extended-convert task adapter. The final runtime progress wrapper also intercepts these modes so structured task results report correct processed/success counts.
+- Existing `word2pdf`, `pdf2word`, `ppt2pdf`, and `imgs2pdf` paths remain on their established adapters/runtime routes.
+- Regression coverage:
+  - `convert_core_module_exports` covers the new modes, aliases, file collection, and output planning.
+  - `convert_file_adapter_module_exports` covers `pdf2ppt`, `txt2word`, `md2pdf`, and `pdf2md` adapter outputs.
+  - `convert_extended_txt2word_workflow` verifies a real app `run_process(..., "convert")` path uses the extended adapter and writes proper task counts.
+- Validation: `py_compile` passed; `smoke_test.py` passed 14/14; `full_debug_test.py` passed 224/224.
+
+## 2026-07-05 Rich PDF conversion pass
+- User rejected the first PDF conversion pass because the convert UI split old/new modes awkwardly, PDF -> PPT was image-only, and PDF -> Markdown only extracted text.
+- GitHub/library research:
+  - `pymupdf4llm` is used for PDF -> Markdown because it supports layout-aware Markdown with image extraction and table-oriented output on top of PyMuPDF.
+  - PDF -> PPT libraries such as pdf2slides/MinerU-based options were reviewed, but the local implementation uses PyMuPDF + `python-pptx` to keep text editable without forcing a heavy external model pipeline.
+- PDF -> PPT:
+  - `_convert_pdf_to_ppt_safely(...)` now creates PPTX files with `python-pptx`.
+  - PDF text spans become editable PowerPoint text boxes, mapped from PDF page coordinates.
+  - Embedded PDF images are placed as image shapes, not baked into a single page screenshot.
+  - The `pdf2ppt` route no longer requires PowerPoint COM; `ppt2pdf` still uses the existing COM path.
+- PDF -> Markdown:
+  - `convert_pdf_to_md_file(...)` now prefers `pymupdf4llm.to_markdown(..., write_images=True, image_path=...)`.
+  - Extracted images are written beside the Markdown file in `<stem>_assets/` and referenced by relative Markdown links.
+  - Fallback uses PyMuPDF text, image extraction, and `find_tables()` when available.
+- Convert UI:
+  - Added a cleanup patch that replaces the split old/new radio layout with one compact two-column conversion-mode grid.
+  - The unified grid contains `word2pdf`, `pdf2word`, `ppt2pdf`, `pdf2ppt`, `txt2word`, `md2pdf`, `pdf2md`, and `imgs2pdf`.
+- Dependencies/packaging:
+  - Added `pymupdf4llm==1.28.0` and `python-pptx==1.0.2` to `requirements.txt`.
+  - Added PyInstaller hidden imports/data collection for `pymupdf4llm`, `pymupdf_layout`, `pptx`, `fitz`/`pymupdf`, and `tabulate`.
+- Regression coverage:
+  - `pdf_to_ppt_editable_text` checks PPTX slide XML contains the converted PDF text, proving it is editable text rather than a page image.
+  - `pdf_to_md_rich_assets` checks Markdown text, image references, and extracted asset files.
+  - UI probe confirmed exactly one conversion-mode grid with all 8 modes.
+- Validation: `py_compile` passed; `smoke_test.py` passed 14/14; `full_debug_test.py` passed 226/226.

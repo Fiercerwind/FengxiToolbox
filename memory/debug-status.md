@@ -1953,3 +1953,92 @@
   - `python -m py_compile Fengxi_Toolbox.py tools\fx_pdf_compress_core.py full_debug_test.py` passed.
   - `python smoke_test.py` passed 14/14.
   - `python full_debug_test.py` passed 223/223.
+
+## 2026-07-05 format conversion expansion validation
+- Added and validated new format conversion modes: PDF -> PPT, TXT -> Word, Markdown -> PDF, and PDF -> Markdown.
+- Key implementation checks:
+  - `CONVERT_MODE_SPECS` now includes `pdf2ppt`, `txt2word`, `md2pdf`, and `pdf2md`.
+  - `process_convert_file(...)` routes all four modes and keeps `pdf2ppt` dependent on PowerPoint COM instead of reporting false success without Office.
+  - The final runtime progress wrapper intercepts the new modes before legacy runtime conversion so task history/counts are accurate.
+- Scope boundaries:
+  - No `fengxi_runtime.bin` change.
+  - Existing `word2pdf`, `pdf2word`, `ppt2pdf`, and `imgs2pdf` behavior preserved.
+  - No batch compression or watermark core behavior changed.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_convert_core.py tools\fx_convert_task.py full_debug_test.py smoke_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 224/224.
+
+## 2026-07-05 rich PDF conversion validation
+- Updated the format conversion follow-up requested by user:
+  - Convert page layout is now one unified 8-mode grid instead of old modes plus a separate new-mode stack.
+  - PDF -> PPT now generates editable PPTX text boxes via PyMuPDF + python-pptx and no longer requires PowerPoint COM for this mode.
+  - PDF -> Markdown now prefers PyMuPDF4LLM with `write_images=True`, writes `<stem>_assets/`, and falls back to PyMuPDF text/images/table extraction.
+- Dependency/package updates:
+  - `requirements.txt`: `pymupdf4llm==1.28.0`, `python-pptx==1.0.2`.
+  - `fx_toolbox.spec`: added PyInstaller data/hidden-import coverage for PyMuPDF4LLM/PyMuPDF layout and python-pptx.
+- Validation:
+  - UI probe: one conversion grid, 8 radio modes (`word2pdf`, `pdf2word`, `ppt2pdf`, `pdf2ppt`, `txt2word`, `md2pdf`, `pdf2md`, `imgs2pdf`).
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_convert_core.py tools\fx_convert_task.py full_debug_test.py smoke_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 226/226.
+
+## 2026-07-05 startup perceived-speed validation
+- User reported the packaged app opened slowly after the conversion work.
+- Diagnosis from `%LOCALAPPDATA%\FengxiToolbox\performance.jsonl`:
+  - Recent packaged launches showed `startup_total` around 3.3-3.4s.
+  - `main_create_app` was the largest pre-visible cost, around 2.4-2.5s.
+  - Default `watermark` tab initialization was still happening during `setup_main_area`, while only non-default tabs were truly deferred.
+- Fix:
+  - `tools/fx_startup_patches.py` now supports deferring the default startup tab too.
+  - `Fengxi_Toolbox.py` schedules default `watermark` initialization shortly after `deiconify/lift`, so the window can appear before the heavy default tab UI is built.
+  - The first post-show layout refresh remains staged and runs after default-tab initialization has been queued.
+  - The `first_random` watermark range radio now explicitly writes `wm_range_var` in its command, fixing a lazy-init/test ordering edge case.
+  - Follow-up fix: if startup-time attribute access initializes the default tab before `_show_ready_window`, `tools/fx_startup_patches.py` now preserves that initialized state instead of resetting it to `False`. This removes the second post-show `lazy_tab_init watermark` event.
+- Regression:
+  - `startup_patch_installer_module` now asserts `init_watermark_ui` and other lazy initializers are deferred during setup.
+  - `watermark_range_first_random_option_visible` still verifies the lazy-initialized extra range option writes `first_random`.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py tools\fx_startup_patches.py full_debug_test.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 226/226.
+  - Packaged `dist_release_ascii\fx_toolbox\fx_toolbox.exe` launch: `startup_total=2899.965ms`, `main_create_app=2063.937ms`, one `lazy_tab_init watermark=579.06ms`, no duplicate post-show watermark init.
+
+## 2026-07-05 batch watermark PDF parallel validation
+- User asked whether batch watermark can be sped up for very large folders, and specifically asked not to package because the app is currently in use.
+- Implemented a low-risk fast path for PDF-only batch watermark folders:
+  - If `enable_multithread` is on, input is a folder, there is more than one file, all processable files are PDFs, and Word/PPT-to-PDF conversion is off, `_run_watermark_task(...)` routes to `_run_watermark_pdf_parallel_task(...)`.
+  - The PDF branch uses `ThreadPoolExecutor` with the existing `_get_parallel_worker_count(...)` limit.
+  - A single prebuilt PDF watermark packet is serialized once and reused per worker via `io.BytesIO`, avoiding repeated ReportLab packet generation.
+  - Existing result-folder output planning, resume/skip existing outputs, protected-PDF preservation, skipped-file copy, failed-file report, and progress updates are preserved.
+- Safety boundary:
+  - Word/PPT files and Word/PPT converted-to-PDF watermark runs stay on the existing serial Office COM path.
+  - No packaging or packaged EXE restart was performed for this change.
+- Regression:
+  - Added `watermark_pdf_parallel_executor`, verifying the watermark folder workflow uses more than one worker and returns a successful task result for two PDFs.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py` passed.
+  - Targeted source probe: two PDF files used `workers=[2]`, `status=success`, `success_count=2`.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 227/227.
+
+## 2026-07-05 smart ZIP mixed-boundary validation
+- User reported Smart Recursive batch compression with depth range `3-4` still compressed large child-folder ZIPs below a folder that had normal PDF/files at the same level as child folders.
+- Protected user data boundary:
+  - Did not run probes or cleanup inside `d:\Users\CHEER\Desktop\Archive\archive\【处理完成】结果文件夹\archive`.
+  - Reproduced only with temporary fixture folders.
+- Root cause:
+  - `plan_zip_archives(..., mode="smart_recursive")` previously allowed descent through mixed-content folders when the folder depth was before the selected minimum depth.
+  - That meant a depth-2 folder like `Archive1` containing both `doc.pdf` and `child_pdf\...` could still produce depth-3/4 child ZIPs.
+- Fix:
+  - Smart Recursive now treats any folder with meaningful non-archive files as a stop boundary, regardless of whether that folder is before the selected minimum depth.
+  - If that mixed folder is within the chosen depth range, Fengxi plans a ZIP for the folder itself; if it is before the range, Fengxi stops without planning descendant ZIPs.
+  - Existing archive files such as `.zip` remain ignored for this boundary decision.
+- Regression:
+  - Added `zip_smart_depth_range_stops_at_mixed_boundary`.
+  - Covers both mixed boundary before selected min depth and mixed boundary inside selected range.
+- Validation:
+  - Temporary repro before fix planned `Archive1/child_pdf.zip`; after fix planned `[]`.
+  - `python -m py_compile tools\fx_zip_core.py full_debug_test.py Fengxi_Toolbox.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 228/228.

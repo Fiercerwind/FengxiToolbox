@@ -30,6 +30,26 @@ CONVERT_MODE_SPECS = {
         "input_exts": (".ppt", ".pptx"),
         "output_ext": ".pdf",
     },
+    "pdf2ppt": {
+        "label": "PDF 转 PPT",
+        "input_exts": (".pdf",),
+        "output_ext": ".pptx",
+    },
+    "txt2word": {
+        "label": "TXT 转 Word",
+        "input_exts": (".txt",),
+        "output_ext": ".docx",
+    },
+    "md2pdf": {
+        "label": "Markdown 转 PDF",
+        "input_exts": (".md", ".markdown"),
+        "output_ext": ".pdf",
+    },
+    "pdf2md": {
+        "label": "PDF 转 Markdown",
+        "input_exts": (".pdf",),
+        "output_ext": ".md",
+    },
     "imgs2pdf": {
         "label": "多图合并 ➔ PDF电子书",
         "input_exts": CONVERT_IMAGE_EXTS,
@@ -44,6 +64,22 @@ CONVERT_MODE_ALIASES = {
     "pdf to word": "pdf2word",
     "ppt_to_pdf": "ppt2pdf",
     "ppt to pdf": "ppt2pdf",
+    "pdf_to_ppt": "pdf2ppt",
+    "pdf to ppt": "pdf2ppt",
+    "pdf_to_powerpoint": "pdf2ppt",
+    "pdf to powerpoint": "pdf2ppt",
+    "txt_to_word": "txt2word",
+    "txt to word": "txt2word",
+    "text_to_word": "txt2word",
+    "text to word": "txt2word",
+    "md_to_pdf": "md2pdf",
+    "md to pdf": "md2pdf",
+    "markdown_to_pdf": "md2pdf",
+    "markdown to pdf": "md2pdf",
+    "pdf_to_md": "pdf2md",
+    "pdf to md": "pdf2md",
+    "pdf_to_markdown": "pdf2md",
+    "pdf to markdown": "pdf2md",
     "images_to_pdf": "imgs2pdf",
     "image_to_pdf": "imgs2pdf",
     "image to pdf": "imgs2pdf",
@@ -162,4 +198,3 @@ def plan_convert_output_path(src, input_root, output_folder, mode):
 
 def describe_convert_mode(mode, fallback=""):
     return get_convert_mode_label(mode, fallback=fallback)
-

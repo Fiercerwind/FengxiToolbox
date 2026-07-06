@@ -1,5 +1,35 @@
 # 最近变更
 
+## 2026-07-05 21:53:50 | pdf_file
+- 摘要：Fix Smart Recursive ZIP mixed-content depth boundary
+- 文件：tools/fx_zip_core.py, full_debug_test.py, memory/debug-status.md, memory/categories/pdf-file-meta-zip.md
+- 说明：Smart Recursive now stops at folders containing meaningful files even when they are before the selected minimum depth; regression zip_smart_depth_range_stops_at_mixed_boundary; validation py_compile, smoke_test 14/14, full_debug_test 228/228.
+
+## 2026-07-05 20:22:06 | watermark
+- 摘要：Parallelize PDF-only batch watermark runs
+- 文件：-
+- 说明：Validation: py_compile passed, targeted probe workers=[2] success_count=2, smoke_test.py 14/14, full_debug_test.py 227/227.
+
+## 2026-07-05 19:25:39 | runtime
+- 摘要：Avoid duplicate default-tab startup initialization
+- 文件：-
+- 说明：Validated packaged launch: startup_total 2899.965ms, main_create_app 2063.937ms, single lazy_tab_init watermark 579.06ms and no post-show duplicate.
+
+## 2026-07-05 19:10:11 | runtime
+- 摘要：Improve startup perceived speed with default-tab lazy init
+- 文件：Fengxi_Toolbox.py, tools/fx_startup_patches.py, full_debug_test.py, memory/debug-status.md, memory/architecture.md
+- 说明：Diagnosed packaged startup logs showing startup_total around 3.3-3.4s and main_create_app around 2.4-2.5s. tools/fx_startup_patches.py now defers the default startup tab as well as non-default tabs; Fengxi_Toolbox.py shows the window first, then schedules default watermark tab initialization shortly after. Fixed the lazy-init first_random watermark range command to explicitly write wm_range_var. Validation: py_compile passed, smoke_test.py 14/14, full_debug_test.py 226/226.
+
+## 2026-07-05 18:26:46 | convert
+- 摘要：Make PDF conversion rich and reorganize convert UI
+- 文件：Fengxi_Toolbox.py, tools/fx_convert_task.py, requirements.txt, fx_toolbox.spec, full_debug_test.py, memory/categories/convert-audio-image.md, memory/debug-status.md
+- 说明：Converted PDF to PPT from image-backed slides to editable python-pptx text boxes with image shapes; PDF to Markdown now uses PyMuPDF4LLM with extracted assets and PyMuPDF fallback for text/images/tables. Replaced split convert radio layout with one unified 8-mode grid. Validation: py_compile passed, smoke_test.py 14/14, full_debug_test.py 226/226.
+
+## 2026-07-05 17:46:40 | convert
+- 摘要：Expand format conversion modes
+- 文件：Fengxi_Toolbox.py, tools/fx_convert_core.py, tools/fx_convert_task.py, full_debug_test.py, memory/categories/convert-audio-image.md, memory/debug-status.md
+- 说明：Added PDF to PPT, TXT to Word, Markdown to PDF, and PDF to Markdown modes under the existing convert task. New core specs, task helpers, loader UI buttons, extended run_process adapter, and final progress-wrapper interception keep structured counts accurate. Validation: py_compile passed, smoke_test.py 14/14, full_debug_test.py 224/224.
+
 ## 2026-06-24 09:50:46 | pdf_file
 - 摘要：Add web-style raster PDF compression mode
 - 文件：tools\fx_pdf_compress_core.py, Fengxi_Toolbox.py, full_debug_test.py, memory\categories\pdf-file-meta-zip.md, memory\debug-status.md

@@ -37,6 +37,8 @@ def _module_exists(module_name):
 datas = [('fengxi_runtime.bin', '.')]
 datas += collect_data_files('customtkinter')
 datas += collect_data_files('rapidocr')
+if _module_exists('pymupdf4llm'):
+    datas += collect_data_files('pymupdf4llm')
 binaries = collect_dynamic_libs('onnxruntime')
 if _module_exists('ctranslate2'):
     binaries += collect_dynamic_libs('ctranslate2')
@@ -45,6 +47,7 @@ if _module_exists('av'):
 hiddenimports = [
     'PyInstaller.archive.readers', 'customtkinter', 'pdf2docx', 'PIL', 'imageio',
     'imageio_ffmpeg', 'pypdf', 'pythoncom',
+    'fitz', 'pptx', 'pymupdf', 'pymupdf4llm', 'tabulate',
     'pywinstyles', 'rapidocr', 'reportlab.lib.pagesizes', 'reportlab.pdfbase',
     'reportlab.pdfbase.ttfonts', 'reportlab.pdfgen', 'tkinter', 'tkinter.filedialog',
     'tkinter.font', 'tkinter.messagebox', 'tkinter.ttk', 'windnd',

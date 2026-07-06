@@ -66,6 +66,9 @@ from tools.fx_convert_core import (
 from tools.fx_convert_task import (
     ConvertFileContext,
     ConvertImgsToPdfCallbacks,
+    convert_md_to_pdf_file,
+    convert_pdf_to_md_file,
+    convert_txt_to_word_file,
     process_convert_file,
     run_convert_imgs_to_pdf_task_core,
 )
@@ -191,6 +194,7 @@ DEBUG_LOG = Path(tempfile.gettempdir()) / "fx_toolbox_loader.log"
 DEFAULT_STARTUP_TAB = "watermark"
 STARTUP_LAYOUT_FIRST_DELAY_MS = 450
 STARTUP_LAYOUT_STAGE_DELAY_MS = 90
+STARTUP_DEFAULT_TAB_INIT_DELAY_MS = 30
 LAZY_TAB_SPECS = {
     "watermark": {"init": "init_watermark_ui"},
     "remove_wm": {"init": "init_remove_wm_ui"},
@@ -559,6 +563,10 @@ FEATURE_REGISTRY = {
             "word2pdf": "Word 转 PDF",
             "pdf2word": "PDF 转 Word",
             "ppt2pdf": "PPT 转 PDF",
+            "pdf2ppt": "PDF 转 PPT",
+            "txt2word": "TXT 转 Word",
+            "md2pdf": "Markdown 转 PDF",
+            "pdf2md": "PDF 转 Markdown",
             "imgs2pdf": "多图合并 ➔ PDF电子书",
         },
     },
@@ -3667,6 +3675,10 @@ def _patch_convert_file_adapter():
                         convert_doc_to_pdf=lambda word_app, src_path, dst_path: _convert_doc_to_pdf_safely(word_app, src_path, dst_path),
                         convert_pdf_to_word=convert_pdf_to_word,
                         convert_ppt_to_pdf=lambda ppt_app, src_path, dst_path: _convert_ppt_to_pdf_safely(ppt_app, src_path, dst_path),
+                        convert_pdf_to_ppt=lambda ppt_app, src_path, dst_path: _convert_pdf_to_ppt_safely(ppt_app, src_path, dst_path),
+                        convert_txt_to_word=convert_txt_to_word_file,
+                        convert_md_to_pdf=convert_md_to_pdf_file,
+                        convert_pdf_to_md=convert_pdf_to_md_file,
                         check_pdf_complexity=check_pdf_complexity,
                         copy_file_safe=copy_file_safe,
                         log=getattr(self, "log", None),
@@ -4381,6 +4393,137 @@ def _convert_doc_to_pdf_safely(word_app, src, dst):
 def _convert_ppt_to_pdf_safely(ppt_app, src, dst):
     with _DisableWin32ComGenCache():
         return _FX_RUNTIME_CONVERT_PPT_TO_PDF(ppt_app, src, dst)
+
+
+def _convert_pdf_to_ppt_safely(ppt_app, src, dst):
+    temp_dir = None
+    try:
+        import fitz
+        from pptx import Presentation
+        from pptx.dml.color import RGBColor
+        from pptx.util import Pt
+
+        src_abs = os.path.abspath(src)
+        dst_abs = os.path.abspath(dst)
+        os.makedirs(os.path.dirname(dst_abs), exist_ok=True)
+        temp_dir = tempfile.mkdtemp(prefix="fx_pdf2ppt_")
+        with fitz.open(src_abs) as doc:
+            if doc.is_encrypted and not doc.authenticate(""):
+                return "ERROR:encrypted_pdf_requires_password"
+            if len(doc) <= 0:
+                return "ERROR:empty_pdf"
+
+            first_rect = doc[0].rect
+            slide_width_pt = max(120.0, float(first_rect.width or 720.0))
+            slide_height_pt = max(120.0, float(first_rect.height or 540.0))
+            pt_to_emu = 12700
+
+            presentation = Presentation()
+            presentation.slide_width = int(round(slide_width_pt * pt_to_emu))
+            presentation.slide_height = int(round(slide_height_pt * pt_to_emu))
+            blank_layout = presentation.slide_layouts[6]
+
+            def to_emu(value):
+                return int(round(float(value) * pt_to_emu))
+
+            def page_mapper(page):
+                rect = page.rect
+                scale = min(slide_width_pt / max(1.0, float(rect.width)), slide_height_pt / max(1.0, float(rect.height)))
+                offset_x = (slide_width_pt - float(rect.width) * scale) / 2.0
+                offset_y = (slide_height_pt - float(rect.height) * scale) / 2.0
+
+                def map_bbox(bbox):
+                    x0, y0, x1, y1 = [float(v) for v in bbox]
+                    left = offset_x + x0 * scale
+                    top = offset_y + y0 * scale
+                    width = max(1.0, (x1 - x0) * scale)
+                    height = max(1.0, (y1 - y0) * scale)
+                    return to_emu(left), to_emu(top), to_emu(width), to_emu(height), scale
+
+                return map_bbox
+
+            def set_run_font(run, span, scale):
+                font_name = str(span.get("font") or "").strip()
+                if font_name and len(font_name) < 64:
+                    run.font.name = font_name
+                size = span.get("size")
+                try:
+                    run.font.size = Pt(max(1.0, min(96.0, float(size) * max(0.2, scale))))
+                except Exception:
+                    run.font.size = Pt(10)
+                lowered_font = font_name.lower()
+                run.font.bold = bool("bold" in lowered_font or "black" in lowered_font)
+                run.font.italic = bool("italic" in lowered_font or "oblique" in lowered_font)
+                try:
+                    color = int(span.get("color") or 0)
+                    run.font.color.rgb = RGBColor((color >> 16) & 255, (color >> 8) & 255, color & 255)
+                except Exception:
+                    pass
+
+            for page_index, page in enumerate(doc, start=1):
+                slide = presentation.slides.add_slide(blank_layout)
+                mapper = page_mapper(page)
+                page_dict = page.get_text("dict")
+
+                for block_index, block in enumerate(page_dict.get("blocks") or [], start=1):
+                    block_type = int(block.get("type", 0) or 0)
+                    bbox = block.get("bbox")
+                    if not bbox:
+                        continue
+                    left, top, width, height, scale = mapper(bbox)
+                    if block_type == 1:
+                        image_bytes = block.get("image")
+                        if not image_bytes:
+                            continue
+                        ext = str(block.get("ext") or "png").lower().lstrip(".") or "png"
+                        image_path = os.path.join(temp_dir, f"page_{page_index:04d}_image_{block_index:03d}.{ext}")
+                        with open(image_path, "wb") as image_file:
+                            image_file.write(image_bytes)
+                        if os.path.exists(image_path) and os.path.getsize(image_path) > 0:
+                            slide.shapes.add_picture(image_path, left, top, width, height)
+                        continue
+
+                    if block_type != 0:
+                        continue
+                    lines = block.get("lines") or []
+                    if not lines:
+                        continue
+                    shape = slide.shapes.add_textbox(left, top, width, max(height, to_emu(8)))
+                    frame = shape.text_frame
+                    frame.clear()
+                    frame.margin_left = 0
+                    frame.margin_right = 0
+                    frame.margin_top = 0
+                    frame.margin_bottom = 0
+                    frame.word_wrap = False
+                    paragraph = frame.paragraphs[0]
+                    used_paragraph = False
+                    for line in lines:
+                        spans = [span for span in (line.get("spans") or []) if str(span.get("text") or "")]
+                        if not spans:
+                            continue
+                        if used_paragraph:
+                            paragraph = frame.add_paragraph()
+                        used_paragraph = True
+                        paragraph.space_after = Pt(0)
+                        paragraph.space_before = Pt(0)
+                        for span in spans:
+                            run = paragraph.add_run()
+                            run.text = str(span.get("text") or "")
+                            set_run_font(run, span, scale)
+
+            presentation.save(dst_abs)
+        if os.path.exists(dst_abs) and os.path.getsize(dst_abs) > 0:
+            return "SUCCESS"
+        return "ERROR:no_output"
+    except Exception as exc:
+        return f"ERROR:{exc}"
+    finally:
+        try:
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 _install_safe_office_dispatch_patch()
@@ -6581,6 +6724,131 @@ def _run_convert_imgs_to_pdf_task(app, input_folder):
     return result
 
 
+CONVERT_EXTENDED_MODES = {"pdf2ppt", "txt2word", "md2pdf", "pdf2md"}
+
+
+def _run_convert_extended_task(app, input_folder):
+    mode = _get_convert_mode(app)
+    normalized_input, input_root, output_folder, resolved_strategy = _resolve_output_root_for_task(
+        input_folder,
+        "convert",
+        _get_task_output_strategy(app, "convert"),
+    )
+    result = _get_last_task_result(app)
+    if result is None:
+        result = _start_task_result(app, normalized_input, "convert")
+    _set_task_result_output_strategy(result, "convert", resolved_strategy)
+    _set_task_result_output_root(result, output_folder)
+
+    files = _convert_core_collect_files(
+        normalized_input,
+        mode,
+        collect_input_files=getattr(app, "collect_input_files", None),
+    )
+    total = len(files)
+    if total <= 0:
+        message = f"未找到可用于{_convert_core_describe_mode(mode, fallback='格式转换')}的文件"
+        app.log(f"⚠️ [格式转换] {message}")
+        _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=1)
+        _set_task_result_finished(result, "skipped", message=message, detail=message, skipped=True)
+        return result
+
+    os.makedirs(output_folder, exist_ok=True)
+    tracker = _get_active_progress_tracker(app)
+    if tracker is not None:
+        tracker.total_units = max(1, total)
+
+    app.log(f"🔄 [格式转换] {_convert_core_describe_mode(mode, fallback='格式转换')} | 共 {total} 个文件")
+    failed_items = []
+    outputs = []
+    skipped_count = 0
+
+    try:
+        context = ConvertFileContext(
+            ppt_app=None,
+            convert_pdf_to_ppt=lambda ppt_app_obj, src_path, dst_path: _convert_pdf_to_ppt_safely(ppt_app_obj, src_path, dst_path),
+            convert_txt_to_word=convert_txt_to_word_file,
+            convert_md_to_pdf=convert_md_to_pdf_file,
+            convert_pdf_to_md=convert_pdf_to_md_file,
+            copy_file_safe=copy_file_safe,
+            log=getattr(app, "log", None),
+        )
+
+        for index, src in enumerate(files, start=1):
+            if getattr(app, "stop_event", False):
+                break
+            if tracker is not None:
+                tracker.set_current_item(src, _convert_core_describe_mode(mode, fallback="格式转换"))
+            status_text = "准备"
+            try:
+                expected_output = _convert_core_plan_output_path(src, input_root, output_folder, mode)
+                if is_nonempty_file(expected_output):
+                    outputs.append(expected_output)
+                    _add_task_result_output(result, expected_output)
+                    skipped_count += 1
+                    app.log(f"⏭️ [断点续跑] 已存在结果，跳过: {os.path.basename(src)}")
+                    status_text = "断点续跑"
+                else:
+                    item_result = process_convert_file(src, input_root, output_folder, mode, context)
+                    status = str(item_result.get("status") or "")
+                    output_path = str(item_result.get("output") or expected_output)
+                    if item_result.get("ok") and is_nonempty_file(output_path):
+                        outputs.append(output_path)
+                        _add_task_result_output(result, output_path)
+                        if item_result.get("skipped"):
+                            skipped_count += 1
+                        app.log(f"✅ [格式转换] {os.path.basename(src)} -> {output_path}")
+                        status_text = "完成"
+                    else:
+                        failed_items.append(str(src))
+                        app.log(f"❌ [格式转换失败] {os.path.basename(src)} | {status or item_result.get('message') or 'unknown'}")
+                        status_text = "失败"
+            except Exception as exc:
+                failed_items.append(str(src))
+                app.log(f"❌ [格式转换失败] {os.path.basename(src)} | {exc}")
+                status_text = "失败"
+            finally:
+                if tracker is not None:
+                    tracker.complete_units(1, stage=status_text, current_file=src)
+                else:
+                    app.progress_bar.set(min(1.0, index / max(1, total)))
+    finally:
+        pass
+
+    processed_count = len(outputs) + len(failed_items)
+    success_count = len(outputs)
+    if failed_items:
+        result["failed_items"] = list(failed_items)
+        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=len(failed_items), skipped=skipped_count)
+        app.log("\n========= ❌ 失败清单 =========")
+        for item in failed_items:
+            app.log(f"• {item}")
+        report_path = _write_failed_report(output_folder, failed_items)
+        if report_path:
+            _add_task_result_output(result, report_path)
+            app.log(f"\n📄 [报告] 已生成报告: {report_path}")
+        _set_task_result_finished(
+            result,
+            "failed",
+            message=f"格式转换完成，但有 {len(failed_items)} 个文件失败。",
+            detail=f"成功 {success_count} 个，失败 {len(failed_items)} 个",
+            error=f"失败 {len(failed_items)} 个文件",
+        )
+    elif getattr(app, "stop_event", False):
+        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=0, skipped=skipped_count)
+        _set_task_result_finished(result, "stopped", message="用户停止格式转换任务", detail="用户停止格式转换任务", stopped=True)
+    else:
+        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=0, skipped=skipped_count)
+        app.log("\n🎉 [完成] 格式转换已全部完成！")
+        _set_task_result_finished(
+            result,
+            "success",
+            message="格式转换已全部完成",
+            detail=f"成功处理 {success_count} 个文件",
+        )
+    return result
+
+
 def _run_image_to_pdf_task(app, input_folder, merge=False):
     normalized_input, input_root, output_folder, resolved_strategy = _resolve_output_root_for_task(
         input_folder,
@@ -7435,6 +7703,207 @@ def _patch_convert_imgs_to_pdf_task():
 
 
 _patch_convert_imgs_to_pdf_task()
+
+
+def _iter_child_widgets(widget):
+    try:
+        children = list(widget.winfo_children())
+    except Exception:
+        return
+    for child in children:
+        yield child
+        yield from _iter_child_widgets(child)
+
+
+def _install_convert_mode_grid(app):
+    if getattr(app, "cv_mode", None) is None:
+        app.cv_mode = tkinter.StringVar(value="word2pdf")
+    card = app.tab_cv.winfo_children()[0]
+    body = card.winfo_children()[1] if len(card.winfo_children()) > 1 else card
+    mode_values = tuple(CONVERT_MODE_SPECS.keys())
+    mode_widgets = []
+    old_grids = []
+    for widget in _iter_child_widgets(body):
+        try:
+            if getattr(widget, "_fx_convert_mode_grid", False):
+                old_grids.append(widget)
+                continue
+            if isinstance(widget, customtkinter.CTkRadioButton) and str(widget.cget("value")) in mode_values:
+                mode_widgets.append(widget)
+        except Exception:
+            continue
+
+    insert_before = mode_widgets[0].master if mode_widgets else None
+    parents_to_destroy = []
+    for widget in mode_widgets:
+        try:
+            parent = widget.master
+            if parent is not body and parent not in parents_to_destroy:
+                parents_to_destroy.append(parent)
+        except Exception:
+            pass
+
+    for widget in old_grids:
+        try:
+            widget.destroy()
+        except Exception:
+            pass
+
+    section = customtkinter.CTkFrame(
+        body,
+        fg_color=globals().get("COLOR_CARD_ALT", "#303030"),
+        corner_radius=8,
+        border_width=1,
+        border_color=globals().get("COLOR_BORDER", "#3A3A3A"),
+    )
+    section._fx_convert_mode_grid = True
+    pack_options = {"fill": "x", "pady": (8, 10)}
+    if insert_before is not None:
+        pack_options["before"] = insert_before
+    try:
+        section.pack(**pack_options)
+    except Exception:
+        section.pack(fill="x", pady=(8, 10))
+    section.grid_columnconfigure(0, weight=1)
+    section.grid_columnconfigure(1, weight=1)
+
+    customtkinter.CTkLabel(
+        section,
+        text="转换类型",
+        text_color=COLOR_TEXT_SOFT,
+        font=customtkinter.CTkFont(size=12, weight="bold"),
+    ).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 6))
+
+    mode_items = (
+        ("word2pdf", "Word -> PDF"),
+        ("pdf2word", "PDF -> Word"),
+        ("ppt2pdf", "PPT -> PDF"),
+        ("pdf2ppt", "PDF -> PPT"),
+        ("txt2word", "TXT -> Word"),
+        ("md2pdf", "Markdown -> PDF"),
+        ("pdf2md", "PDF -> Markdown"),
+        ("imgs2pdf", "多图合并 PDF"),
+    )
+    for index, (value, label) in enumerate(mode_items):
+        radio = customtkinter.CTkRadioButton(
+            section,
+            text=label,
+            variable=app.cv_mode,
+            value=value,
+            **app._get_radio_style(),
+        )
+        radio.grid(row=index // 2 + 1, column=index % 2, sticky="w", padx=12, pady=(0, 8))
+
+    for widget in mode_widgets:
+        try:
+            widget.destroy()
+        except Exception:
+            pass
+    for parent in parents_to_destroy:
+        try:
+            if parent is not section:
+                parent.destroy()
+        except Exception:
+            pass
+
+
+def _patch_convert_extended_modes():
+    try:
+        original_init_convert_ui = FengxiToolboxApp.init_convert_ui
+        original_run_process = FengxiToolboxApp.run_process
+    except Exception as exc:
+        _debug(f"patch_convert_extended_modes:missing:{exc}")
+        return
+
+    if getattr(original_init_convert_ui, "__fx_convert_extended_modes_patch__", False):
+        return
+
+    def patched_init_convert_ui(self):
+        original_init_convert_ui(self)
+        if getattr(self, "_fx_convert_extended_ui_ready", False):
+            return
+        try:
+            if getattr(self, "cv_mode", None) is None:
+                self.cv_mode = tkinter.StringVar(value="word2pdf")
+            card = self.tab_cv.winfo_children()[0]
+            body = card.winfo_children()[1] if len(card.winfo_children()) > 1 else card
+            section = customtkinter.CTkFrame(body, fg_color="transparent")
+            section.pack(fill="x", pady=(8, 4))
+            customtkinter.CTkLabel(
+                section,
+                text="新增转换",
+                text_color=COLOR_TEXT_SOFT,
+                font=customtkinter.CTkFont(size=12, weight="bold"),
+            ).pack(anchor="w", pady=(0, 6))
+            for value, label in (
+                ("pdf2ppt", "PDF 转 PPT (PDF to PPT)"),
+                ("txt2word", "TXT 转 Word (TXT to Word)"),
+                ("md2pdf", "Markdown 转 PDF (MD to PDF)"),
+                ("pdf2md", "PDF 转 Markdown (PDF to MD)"),
+            ):
+                customtkinter.CTkRadioButton(
+                    section,
+                    text=label,
+                    variable=self.cv_mode,
+                    value=value,
+                    **self._get_radio_style(),
+                ).pack(anchor="w", pady=(0, 6))
+            customtkinter.CTkLabel(
+                section,
+                text="PDF 转 PPT 会将每页 PDF 作为图片放入幻灯片；PDF 转 Markdown 只提取可复制文本，扫描件需先做 OCR。",
+                text_color=COLOR_TEXT_SOFT,
+                font=customtkinter.CTkFont(size=11),
+                justify="left",
+                wraplength=560,
+            ).pack(anchor="w", fill="x", pady=(2, 0))
+            self._fx_convert_extended_ui_ready = True
+        except Exception as exc:
+            _debug(f"patch_convert_extended_modes:init_ui_error:{exc}")
+
+    def patched_run_process(self, input_folder, task_type):
+        if task_type == "convert" and _get_convert_mode(self) in CONVERT_EXTENDED_MODES:
+            try:
+                _run_convert_extended_task(self, input_folder)
+            except Exception as exc:
+                self.log(f"🔥 [严重错误] {exc}")
+            finally:
+                self.reset_ui()
+            return
+        return original_run_process(self, input_folder, task_type)
+
+    patched_init_convert_ui.__fx_convert_extended_modes_patch__ = True
+    patched_run_process.__fx_convert_extended_modes_patch__ = True
+    FengxiToolboxApp.init_convert_ui = patched_init_convert_ui
+    FengxiToolboxApp.run_process = patched_run_process
+    _debug("patch_convert_extended_modes:installed")
+
+
+_patch_convert_extended_modes()
+
+
+def _patch_convert_mode_grid_cleanup():
+    try:
+        original_init_convert_ui = FengxiToolboxApp.init_convert_ui
+    except Exception as exc:
+        _debug(f"patch_convert_mode_grid_cleanup:missing:{exc}")
+        return
+
+    if getattr(original_init_convert_ui, "__fx_convert_mode_grid_cleanup_patch__", False):
+        return
+
+    def patched_init_convert_ui(self):
+        original_init_convert_ui(self)
+        try:
+            _install_convert_mode_grid(self)
+        except Exception as exc:
+            _debug(f"patch_convert_mode_grid_cleanup:init_ui_error:{exc}")
+
+    patched_init_convert_ui.__fx_convert_mode_grid_cleanup_patch__ = True
+    FengxiToolboxApp.init_convert_ui = patched_init_convert_ui
+    _debug("patch_convert_mode_grid_cleanup:installed")
+
+
+_patch_convert_mode_grid_cleanup()
 
 
 def _collect_audio_files(app, input_value):
@@ -9951,6 +10420,11 @@ def _schedule_watermark_range_last_settings_save(app):
             _debug(f"watermark_range:last_settings_save_error:{exc}")
 
 
+def _select_first_random_watermark_range(app):
+    _set_watermark_range_var(app, "first_random")
+    _schedule_watermark_range_last_settings_save(app)
+
+
 def _iter_watermark_range_radios(app):
     tab = getattr(app, "tab_wm", None)
     target_var = getattr(app, "wm_range_var", None)
@@ -10025,13 +10499,17 @@ def _install_watermark_range_options(app):
                     text=WATERMARK_RANGE_UI_LABELS["first_random"],
                     variable=app.wm_range_var,
                     value="first_random",
-                    command=lambda target=app: _schedule_watermark_range_last_settings_save(target),
+                    command=lambda target=app: _select_first_random_watermark_range(target),
                     **style,
                 )
                 radio.pack(anchor="w", pady=(0, 2))
                 app._fx_wm_range_random_radio = radio
             else:
                 app._fx_wm_range_random_radio = existing[-1]
+                try:
+                    app._fx_wm_range_random_radio.configure(command=lambda target=app: _select_first_random_watermark_range(target))
+                except Exception:
+                    pass
         app._fx_wm_range_options_ready = True
     except Exception as exc:
         _debug(f"watermark_range:install_error:{exc}")
@@ -10090,6 +10568,9 @@ def _get_watermark_settings(app):
 
 
 def _watermark_make_pdf_packet(settings):
+    packet_bytes = settings.get("_pdf_packet_bytes") if isinstance(settings, dict) else None
+    if packet_bytes:
+        return io.BytesIO(packet_bytes)
     return create_watermark_packet(
         settings["text"],
         settings["font_name"],
@@ -10244,6 +10725,222 @@ def _collect_watermark_input_files(input_value):
     return collected
 
 
+def _watermark_pdf_parallel_enabled(app, all_files, settings, is_single_input):
+    if is_single_input or not _is_parallel_enabled(app):
+        return False
+    if len(all_files) <= 1:
+        return False
+    if settings.get("convert_pdf"):
+        return False
+    for file_path in all_files:
+        try:
+            if Path(_normalize_input_path_value(file_path)).suffix.lower() not in WATERMARK_PDF_EXTS:
+                return False
+        except Exception:
+            return False
+    return _get_parallel_worker_count(len(all_files)) > 1
+
+
+def _write_watermark_failed_report(failed_items, input_root, output_root, actual_strategy, result):
+    if not failed_items:
+        return
+    report_root = Path(output_root if actual_strategy == "result_folder" else input_root)
+    try:
+        report_root.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        report_root = Path(input_root)
+        report_root.mkdir(parents=True, exist_ok=True)
+    report_path = report_root / "!失败文件清单.txt"
+    lines = ["以下文件处理失败："]
+    for item in failed_items:
+        try:
+            lines.append(os.path.relpath(item, input_root))
+        except Exception:
+            lines.append(str(item))
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _add_task_result_output(result, str(report_path))
+
+
+def _run_watermark_pdf_parallel_task(
+    app,
+    all_files,
+    input_root,
+    output_root,
+    actual_strategy,
+    settings,
+    logs,
+    result,
+    overall_total,
+    rule_skipped_files,
+    type_skipped_files,
+    unsupported_skipped_files,
+):
+    pdf_settings = dict(settings)
+    try:
+        packet = _watermark_make_pdf_packet(settings)
+        packet.seek(0)
+        pdf_settings["_pdf_packet_bytes"] = packet.getvalue()
+    except Exception:
+        pdf_settings.pop("_pdf_packet_bytes", None)
+
+    workers = _get_parallel_worker_count(len(all_files))
+    _watermark_log(app, logs, f"[批量并行] PDF 水印启用 {workers} 个线程。")
+
+    success_outputs = []
+    failed_items = []
+    skipped_items = []
+    copied_skipped_outputs = []
+    deferred_skipped_copy_items = []
+    processed_count = 0
+    jobs = []
+
+    for file_path in all_files:
+        if getattr(app, "stop_event", False):
+            break
+        src = Path(_normalize_input_path_value(file_path))
+        resolved_src = _resolve_watermark_source_path(src, input_root)
+        if resolved_src != src:
+            _watermark_log(app, logs, f"[批量水印] 已修正源文件路径: {src} -> {resolved_src}")
+            src = resolved_src
+        if not src.exists():
+            failed_items.append(str(src))
+            processed_count += 1
+            _watermark_log(app, logs, f"[批量水印] 失败: {src.name} | 源文件不存在")
+            _watermark_update_progress(app, current_file=str(src), stage="添加水印", completed=processed_count, total=max(overall_total, 1))
+            continue
+        target_path = Path(
+            _build_watermark_output_path(
+                src,
+                input_root,
+                output_root,
+                actual_strategy,
+                convert_to_pdf=False,
+                single_input=False,
+            )
+        )
+        try:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            failed_items.append(str(src))
+            processed_count += 1
+            _watermark_log(app, logs, f"[批量水印] 失败: {src.name} | 输出路径准备失败: {_watermark_format_path_error(target_path.parent, exc)}")
+            _watermark_update_progress(app, current_file=str(src), stage="添加水印", completed=processed_count, total=max(overall_total, 1))
+            continue
+        if is_nonempty_file(target_path):
+            success_outputs.append(str(target_path))
+            skipped_items.append(str(src))
+            _add_task_result_output(result, str(target_path))
+            _watermark_log(app, logs, f"[批量水印] 断点续跑：已存在结果，跳过处理: {src.name} -> {target_path}")
+            processed_count += 1
+            _watermark_update_progress(app, current_file=str(src), stage="断点续跑", completed=processed_count, total=max(overall_total, 1))
+            continue
+        jobs.append((src, target_path))
+
+    def process_pdf_job(job):
+        src, output_path = job
+        status = _watermark_process_pdf(src, output_path, pdf_settings)
+        kind = _watermark_status_kind(status)
+        item = {
+            "src": str(src),
+            "name": src.name,
+            "output": str(output_path),
+            "status": status,
+            "kind": kind,
+            "copied_output": "",
+        }
+        if kind == "skipped" and _watermark_should_preserve_original(status) and output_path.resolve() != src.resolve():
+            try:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(output_path))
+                item["copied_output"] = str(output_path)
+            except Exception as exc:
+                item["kind"] = "failed"
+                item["status"] = f"ERROR:preserve original failed: {exc}"
+        return item
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {executor.submit(process_pdf_job, job): job for job in jobs}
+        for future in concurrent.futures.as_completed(future_map):
+            src, output_path = future_map[future]
+            try:
+                item = future.result()
+            except Exception as exc:
+                item = {
+                    "src": str(src),
+                    "name": src.name,
+                    "output": str(output_path),
+                    "status": f"ERROR:{exc}",
+                    "kind": "failed",
+                    "copied_output": "",
+                }
+            kind = item.get("kind")
+            src_text = item.get("src") or str(src)
+            output_text = item.get("output") or str(output_path)
+            if kind == "success":
+                success_outputs.append(output_text)
+                _add_task_result_output(result, output_text)
+                _watermark_log(app, logs, f"[批量水印] 成功: {item.get('name') or Path(src_text).name} -> {output_text}")
+                if settings.get("delete_source"):
+                    try:
+                        Path(src_text).unlink()
+                    except Exception as delete_exc:
+                        _watermark_log(app, logs, f"[批量水印] 删除源文件失败: {Path(src_text).name} | {delete_exc}")
+            elif kind == "skipped":
+                copied_output = item.get("copied_output") or ""
+                if copied_output:
+                    copied_skipped_outputs.append(copied_output)
+                    _add_task_result_output(result, copied_output)
+                    _watermark_log(app, logs, f"[批量水印] 受保护文件无法加水印，已保留原文件: {Path(src_text).name} -> {copied_output}")
+                elif _get_watermark_copy_skipped_to_output(app):
+                    deferred_skipped_copy_items.append(src_text)
+                skipped_items.append(src_text)
+                _watermark_log(app, logs, f"[批量水印] 跳过: {Path(src_text).name} | {item.get('status')}")
+            else:
+                failed_items.append(src_text)
+                _watermark_log(app, logs, f"[批量水印] 失败: {Path(src_text).name} | {item.get('status') or 'unknown'}")
+            processed_count += 1
+            _watermark_update_progress(app, current_file=src_text, stage="添加水印", completed=processed_count, total=max(overall_total, 1))
+
+    if rule_skipped_files:
+        copied_skipped, failed_copies = _copy_watermark_skipped_files(app, rule_skipped_files, input_root, output_root, actual_strategy, logs, result)
+        copied_skipped_outputs.extend(copied_skipped)
+        skipped_items.extend(str(Path(_normalize_input_path_value(item))) for item in rule_skipped_files)
+        failed_items.extend(failed_copies)
+    if type_skipped_files:
+        copied_skipped, failed_copies = _copy_watermark_skipped_files(app, type_skipped_files, input_root, output_root, actual_strategy, logs, result)
+        copied_skipped_outputs.extend(copied_skipped)
+        skipped_items.extend(str(Path(_normalize_input_path_value(item))) for item in type_skipped_files)
+        failed_items.extend(failed_copies)
+    if deferred_skipped_copy_items:
+        copied_skipped, failed_copies = _copy_watermark_skipped_files(app, deferred_skipped_copy_items, input_root, output_root, actual_strategy, logs, result)
+        copied_skipped_outputs.extend(copied_skipped)
+        failed_items.extend(failed_copies)
+    if unsupported_skipped_files:
+        copied_skipped, failed_copies = _copy_watermark_skipped_files(app, unsupported_skipped_files, input_root, output_root, actual_strategy, logs, result)
+        copied_skipped_outputs.extend(copied_skipped)
+        skipped_items.extend(str(Path(_normalize_input_path_value(item))) for item in unsupported_skipped_files)
+        failed_items.extend(failed_copies)
+
+    _write_watermark_failed_report(failed_items, input_root, output_root, actual_strategy, result)
+    result["failed_items"] = list(failed_items)
+    _set_task_result_counts(
+        result,
+        processed=processed_count + len(rule_skipped_files) + len(type_skipped_files) + len(unsupported_skipped_files),
+        success=len(success_outputs),
+        failed=len(failed_items),
+        skipped=len(skipped_items),
+    )
+    if getattr(app, "stop_event", False):
+        _set_task_result_finished(result, "stopped", message="用户停止批量水印任务", detail="用户停止批量水印任务", stopped=True)
+    elif failed_items:
+        _set_task_result_finished(result, "failed", message=f"批量水印失败 {len(failed_items)} 个文件", detail=f"批量水印失败 {len(failed_items)} 个文件", error=f"failed_items={len(failed_items)}")
+    elif success_outputs or copied_skipped_outputs:
+        _set_task_result_finished(result, "success", message="批量水印完成", detail="批量水印完成")
+    else:
+        _set_task_result_finished(result, "skipped", message="没有生成新的水印文件", detail="没有生成新的水印文件", skipped=True)
+    return result
+
+
 def _run_watermark_task(app, input_value):
     normalized_input = _normalize_input_path_value(input_value)
     is_single_input = bool(normalized_input and os.path.isfile(normalized_input))
@@ -10330,6 +11027,22 @@ def _run_watermark_task(app, input_value):
     if unsupported_skipped_files:
         copy_hint = "浼氬鍒跺埌杈撳嚭鏂囦欢澶?" if _get_watermark_copy_skipped_to_output(app) else "浠呰烦杩囦笉澶嶅埗"
         _watermark_log(app, logs, f"[鎵归噺姘村嵃] 闈炴按鍗板彲澶勭悊鏂囦欢璺宠繃 {len(unsupported_skipped_files)} 涓枃浠?| {copy_hint}")
+    if _watermark_pdf_parallel_enabled(app, all_files, settings, is_single_input):
+        return _run_watermark_pdf_parallel_task(
+            app,
+            all_files,
+            input_root,
+            output_root,
+            actual_strategy,
+            settings,
+            logs,
+            result,
+            overall_total,
+            rule_skipped_files,
+            type_skipped_files,
+            unsupported_skipped_files,
+        )
+
     success_outputs = []
     failed_items = []
     skipped_items = []
@@ -13405,6 +14118,15 @@ def _patch_runtime_progress_reporting():
         guard_reason = f"run_process:{task_type}"
         _fx_background_guard_begin(self, guard_reason)
         try:
+            if task_type == "convert" and _get_convert_mode(self) in CONVERT_EXTENDED_MODES:
+                try:
+                    result = _run_convert_extended_task(self, input_folder)
+                    return result
+                finally:
+                    try:
+                        self.reset_ui()
+                    except Exception:
+                        pass
             tracker = _install_run_progress_tracker(
                 self,
                 input_folder,
@@ -13559,6 +14281,10 @@ def _show_ready_window(app):
         _debug("startup:window_shown")
     except Exception as exc:
         _debug(f"startup:window_show_error:{exc}")
+    try:
+        app.after(STARTUP_DEFAULT_TAB_INIT_DELAY_MS, lambda target=app: _ensure_lazy_tab_initialized(target, DEFAULT_STARTUP_TAB))
+    except Exception:
+        _ensure_lazy_tab_initialized(app, DEFAULT_STARTUP_TAB)
     try:
         app.after(160, lambda target=app: _run_startup_layout_refresh(target))
     except Exception:

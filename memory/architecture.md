@@ -1124,3 +1124,12 @@
 - Startup post-show layout is staged with `after(...)`: shell layout, current-tab layout, then current-tab visible refresh. Keep this staged shape so the first visible window stays responsive instead of doing all fine layout work in one long callback.
 - Performance events to watch after packaging: `startup_layout_refresh` should be `scheduled`; actual work is split into `startup_layout_shell`, `startup_layout_tighten_visible`, and `startup_layout_refresh_visible`.
 - Regression anchors: `startup_layout_refresh_current_tab_only` and `startup_switch_tab_single_idle_refresh` in `full_debug_test.py`.
+
+## 2026-07-05 Default Tab Lazy Startup
+- Startup perceived speed depends on showing the shell before building the heavy default tab.
+- `tools/fx_startup_patches.py` now defers every lazy tab initializer by default, including `DEFAULT_STARTUP_TAB`.
+- `Fengxi_Toolbox.py::_show_ready_window(...)` calls `deiconify/lift` first, then schedules `_ensure_lazy_tab_initialized(app, DEFAULT_STARTUP_TAB)` via `after(...)`.
+- Do not restore the old special case that skipped deferring the default tab during `setup_main_area`; that pushes watermark UI construction back into `main_create_app` and delays the first visible window.
+- If a default-tab widget is accessed before the scheduled callback runs, the existing `LAZY_ATTR_PREFIXES`/`__getattr__` path still initializes the tab on demand.
+- When that on-demand startup access happens, `patched_setup_main_area(...)` must preserve the default tab's `True` lazy state. Resetting it to `False` causes `_show_ready_window(...)` to initialize the watermark tab a second time after startup.
+- Regression anchor: `startup_patch_installer_module` must show default tab state as not initialized after `setup_main_area`, with `lazy_tab:deferred:watermark` logged.

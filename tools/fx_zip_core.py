@@ -163,11 +163,6 @@ def _can_descend(depth, depth_range):
     return max_depth is None or depth < max_depth
 
 
-def _depth_is_before_selected_range(depth, depth_range):
-    min_depth, _max_depth = depth_range
-    return depth < min_depth
-
-
 def plan_zip_archives(input_path, mode=ZIP_MODE_TOTAL, max_depth=None):
     """Return archive jobs without touching the filesystem."""
 
@@ -246,7 +241,7 @@ def plan_zip_archives(input_path, mode=ZIP_MODE_TOTAL, max_depth=None):
             )
         if not child_dirs or not _can_descend(depth, depth_range):
             return
-        if meaningful_files and not _depth_is_before_selected_range(depth, depth_range):
+        if meaningful_files:
             return
         for child in child_dirs:
             visit(child, depth + 1)

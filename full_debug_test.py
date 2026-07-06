@@ -114,6 +114,9 @@ from tools.fx_convert_core import (
 from tools.fx_convert_task import (
     ConvertFileContext,
     ConvertImgsToPdfCallbacks,
+    convert_md_to_pdf_file as convert_md_to_pdf_file_module,
+    convert_pdf_to_md_file as convert_pdf_to_md_file_module,
+    convert_txt_to_word_file as convert_txt_to_word_file_module,
     process_convert_file as process_convert_file_module,
     run_convert_imgs_to_pdf_task_core as run_convert_imgs_to_pdf_task_core_module,
 )
@@ -544,6 +547,7 @@ def main():
             self.events.append("init_pdf")
 
         def setup_main_area(self):
+            self.init_watermark_ui()
             self.init_pdf_ui()
             return "main_ready"
 
@@ -598,9 +602,10 @@ def main():
         and not startup_installed_again
         and getattr(fake_window, "_fx_start_hidden", False)
         and setup_main_result == "main_ready"
+        and "init_watermark" not in fake_startup_app.events
         and fake_startup_app.pdf_init_count == 0
         and fake_startup_app._fx_lazy_tabs_initializing == set()
-        and fake_startup_app._fx_lazy_tabs_state == {"watermark": True, "pdf": False}
+        and fake_startup_app._fx_lazy_tabs_state == {"watermark": False, "pdf": False}
         and reentrant_getattr_blocked
         and switch_result == "switched"
         and startup_patch_lazy == ["pdf"]
@@ -612,6 +617,7 @@ def main():
             "installed_again": startup_installed_again,
             "window_hidden": getattr(fake_window, "_fx_start_hidden", False),
             "setup": setup_main_result,
+            "events": fake_startup_app.events,
             "pdf_init_count": fake_startup_app.pdf_init_count,
             "reentrant_getattr_blocked": reentrant_getattr_blocked,
             "lazy": startup_patch_lazy,
@@ -3088,6 +3094,49 @@ def main():
         pdf_executor_workers,
     )
 
+    parallel_wm_root = root / "parallel_watermark_pdf"
+    parallel_wm_root.mkdir()
+    make_pdf(parallel_wm_root / "a.pdf", ["watermark parallel a"])
+    make_pdf(parallel_wm_root / "b.pdf", ["watermark parallel b"])
+    mod._ensure_lazy_tab_initialized(app, "watermark")
+    try:
+        app.wm_text.delete("1.0", "end")
+        app.wm_text.insert("1.0", "PARALLEL WM")
+    except Exception:
+        pass
+    app.current_task = "watermark"
+    app.enable_multithread.set(True)
+    watermark_executor_workers = []
+    original_executor = mod.concurrent.futures.ThreadPoolExecutor
+
+    class RecordingWatermarkExecutor(original_executor):
+        def __init__(self, *args, **kwargs):
+            watermark_executor_workers.append(kwargs.get("max_workers") if "max_workers" in kwargs else (args[0] if args else None))
+            super().__init__(*args, **kwargs)
+
+    mod.concurrent.futures.ThreadPoolExecutor = RecordingWatermarkExecutor
+    try:
+        app.run_process(str(parallel_wm_root), "watermark")
+    finally:
+        mod.concurrent.futures.ThreadPoolExecutor = original_executor
+        app.enable_multithread.set(False)
+    parallel_wm_out_a = parallel_wm_root / mod.RESULT_FOLDER_NAME / "a.pdf"
+    parallel_wm_out_b = parallel_wm_root / mod.RESULT_FOLDER_NAME / "b.pdf"
+    parallel_wm_result = dict(getattr(app, "_fx_last_task_result", {}) or {})
+    record(
+        "watermark_pdf_parallel_executor",
+        bool(watermark_executor_workers)
+        and max(value or 0 for value in watermark_executor_workers) > 1
+        and wait_for(lambda: parallel_wm_out_a.exists() and parallel_wm_out_b.exists())
+        and parallel_wm_result.get("status") == "success"
+        and parallel_wm_result.get("success_count") == 2,
+        {
+            "workers": watermark_executor_workers,
+            "result": parallel_wm_result,
+            "outputs": [str(parallel_wm_out_a), str(parallel_wm_out_b)],
+        },
+    )
+
     inp = root / "img_in"
     out = root / "img_out"
     inp.mkdir()
@@ -3352,6 +3401,8 @@ def main():
     (convert_core_root / "doc.docx").write_text("doc", encoding="utf-8")
     (convert_core_root / "slides.pptx").write_text("ppt", encoding="utf-8")
     make_pdf(convert_core_root / "scan.pdf", ["convert core"])
+    (convert_core_root / "notes.txt").write_text("hello txt\n第二行", encoding="utf-8")
+    (convert_core_root / "article.md").write_text("# 标题\n\n- item", encoding="utf-8")
     Image.new("RGB", (20, 20), "red").save(convert_core_root / "b.jpg")
     Image.new("RGB", (20, 20), "blue").save(convert_core_root / "a.png")
     (convert_core_root / "note.txt").write_text("ignore", encoding="utf-8")
@@ -3359,18 +3410,32 @@ def main():
     convert_output_root.mkdir()
     word_files = collect_convert_files_module(str(convert_core_root), "word2pdf")
     img_files = collect_convert_files_module(str(convert_core_root), "imgs2pdf")
+    txt_files = collect_convert_files_module(str(convert_core_root), "txt2word")
+    md_files = collect_convert_files_module(str(convert_core_root), "md2pdf")
     record(
         "convert_core_module_exports",
         normalize_convert_mode_module("pdf_to_word") == "pdf2word"
+        and normalize_convert_mode_module("pdf_to_ppt") == "pdf2ppt"
+        and normalize_convert_mode_module("markdown_to_pdf") == "md2pdf"
         and describe_convert_mode_module("ppt2pdf") == "PPT 转 PDF"
+        and describe_convert_mode_module("pdf2md") == "PDF 转 Markdown"
         and "imgs2pdf" in CONVERT_MODE_SPECS_MODULE
+        and "pdf2ppt" in CONVERT_MODE_SPECS_MODULE
         and [Path(path).name for path in word_files] == ["doc.docx"]
         and [Path(path).name for path in img_files] == ["a.png", "b.jpg"]
+        and [Path(path).name for path in txt_files] == ["note.txt", "notes.txt"]
+        and [Path(path).name for path in md_files] == ["article.md"]
         and Path(plan_convert_output_path_module(str(convert_core_root / "scan.pdf"), str(convert_core_root), str(convert_output_root), "pdf2word")).name == "scan.docx"
+        and Path(plan_convert_output_path_module(str(convert_core_root / "scan.pdf"), str(convert_core_root), str(convert_output_root), "pdf2ppt")).name == "scan.pptx"
+        and Path(plan_convert_output_path_module(str(convert_core_root / "notes.txt"), str(convert_core_root), str(convert_output_root), "txt2word")).name == "notes.docx"
+        and Path(plan_convert_output_path_module(str(convert_core_root / "article.md"), str(convert_core_root), str(convert_output_root), "md2pdf")).name == "article.pdf"
+        and Path(plan_convert_output_path_module(str(convert_core_root / "scan.pdf"), str(convert_core_root), str(convert_output_root), "pdf2md")).name == "scan.md"
         and Path(plan_convert_output_path_module("", str(convert_core_root), str(convert_output_root), "imgs2pdf")).name == "convert_core_图集合并.pdf",
         {
             "word": [Path(path).name for path in word_files],
             "images": [Path(path).name for path in img_files],
+            "txt": [Path(path).name for path in txt_files],
+            "md": [Path(path).name for path in md_files],
             "pdf_out": plan_convert_output_path_module(str(convert_core_root / "scan.pdf"), str(convert_core_root), str(convert_output_root), "pdf2word"),
             "imgs_out": plan_convert_output_path_module("", str(convert_core_root), str(convert_output_root), "imgs2pdf"),
         },
@@ -3434,6 +3499,12 @@ def main():
         Path(dst).write_bytes(b"ppt-pdf")
         return "SUCCESS"
 
+    def fake_pdf_to_ppt(app_obj, src, dst):
+        convert_file_calls.append(("pdfppt", Path(src).name, Path(dst).name, app_obj))
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst).write_bytes(b"pdf-ppt")
+        return "SUCCESS"
+
     def fake_copy(src, dst):
         convert_file_copies.append((Path(src).name, Path(dst).name))
         Path(dst).parent.mkdir(parents=True, exist_ok=True)
@@ -3446,6 +3517,7 @@ def main():
         convert_doc_to_pdf=fake_doc_to_pdf,
         convert_pdf_to_word=fake_pdf_to_word,
         convert_ppt_to_pdf=fake_ppt_to_pdf,
+        convert_pdf_to_ppt=fake_pdf_to_ppt,
         check_pdf_complexity=lambda _src: False,
         copy_file_safe=fake_copy,
         log=lambda message: convert_file_logs.append(str(message)),
@@ -3469,6 +3541,34 @@ def main():
         convert_file_root,
         convert_file_out,
         "ppt2pdf",
+        convert_file_context,
+    )
+    pdf_ppt_adapter_result = process_convert_file_module(
+        convert_file_root / "scan.pdf",
+        convert_file_root,
+        convert_file_out,
+        "pdf2ppt",
+        convert_file_context,
+    )
+    txt_adapter_result = process_convert_file_module(
+        convert_core_root / "notes.txt",
+        convert_core_root,
+        convert_file_out,
+        "txt2word",
+        convert_file_context,
+    )
+    md_pdf_adapter_result = process_convert_file_module(
+        convert_core_root / "article.md",
+        convert_core_root,
+        convert_file_out,
+        "md2pdf",
+        convert_file_context,
+    )
+    pdf_md_adapter_result = process_convert_file_module(
+        convert_file_root / "scan.pdf",
+        convert_file_root,
+        convert_file_out,
+        "pdf2md",
         convert_file_context,
     )
     complex_context = ConvertFileContext(
@@ -3507,18 +3607,31 @@ def main():
         and word_adapter_result.get("ok")
         and pdf_adapter_result.get("ok")
         and ppt_adapter_result.get("ok")
+        and pdf_ppt_adapter_result.get("ok")
+        and txt_adapter_result.get("ok")
+        and md_pdf_adapter_result.get("ok")
+        and pdf_md_adapter_result.get("ok")
         and complex_adapter_result.get("status") == "skipped_complex"
         and (convert_file_out / "doc.pdf").exists()
         and (convert_file_out / "scan.docx").exists()
         and (convert_file_out / "slides.pdf").exists()
+        and (convert_file_out / "scan.pptx").exists()
+        and (convert_file_out / "notes.docx").exists()
+        and (convert_file_out / "article.pdf").exists()
+        and (convert_file_out / "scan.md").exists()
         and (convert_file_out / "complex" / "scan.pdf").exists()
         and ("word", "doc.docx", "doc.pdf", convert_file_context.word_app) in convert_file_calls
         and ("pdf", "scan.pdf", "scan.docx") in convert_file_calls
-        and ("ppt", "slides.pptx", "slides.pdf", convert_file_context.ppt_app) in convert_file_calls,
+        and ("ppt", "slides.pptx", "slides.pdf", convert_file_context.ppt_app) in convert_file_calls
+        and ("pdfppt", "scan.pdf", "scan.pptx", convert_file_context.ppt_app) in convert_file_calls,
         {
             "word": word_adapter_result,
             "pdf": pdf_adapter_result,
             "ppt": ppt_adapter_result,
+            "pdf_ppt": pdf_ppt_adapter_result,
+            "txt_word": txt_adapter_result,
+            "md_pdf": md_pdf_adapter_result,
+            "pdf_md": pdf_md_adapter_result,
             "complex": complex_adapter_result,
             "calls": convert_file_calls,
             "copies": convert_file_copies,
@@ -3540,6 +3653,68 @@ def main():
             "ppt": missing_ppt_result,
             "word_logs": missing_word_logs,
             "ppt_logs": missing_ppt_logs,
+        },
+    )
+
+    pdf_ppt_rich_root = root / "pdf_ppt_editable"
+    pdf_ppt_rich_root.mkdir()
+    pdf_ppt_src = pdf_ppt_rich_root / "editable.pdf"
+    pdf_ppt_out = pdf_ppt_rich_root / "editable.pptx"
+    make_pdf(pdf_ppt_src, ["Editable PPT text block"])
+    pdf_ppt_status = mod._convert_pdf_to_ppt_safely(None, str(pdf_ppt_src), str(pdf_ppt_out))
+    pptx_slide_xml = ""
+    if pdf_ppt_out.exists():
+        with zipfile.ZipFile(pdf_ppt_out) as archive:
+            pptx_slide_xml = "\n".join(
+                archive.read(name).decode("utf-8", errors="ignore")
+                for name in archive.namelist()
+                if name.startswith("ppt/slides/slide") and name.endswith(".xml")
+            )
+    record(
+        "pdf_to_ppt_editable_text",
+        pdf_ppt_status == "SUCCESS"
+        and pdf_ppt_out.exists()
+        and pdf_ppt_out.stat().st_size > 0
+        and "Editable PPT text block" in pptx_slide_xml,
+        {"status": pdf_ppt_status, "output": str(pdf_ppt_out), "xml_has_text": "Editable PPT text block" in pptx_slide_xml},
+    )
+
+    pdf_md_rich_root = root / "pdf_md_rich"
+    pdf_md_rich_root.mkdir()
+    pdf_md_image = pdf_md_rich_root / "embedded.png"
+    Image.new("RGB", (48, 32), "purple").save(pdf_md_image)
+    pdf_md_src = pdf_md_rich_root / "rich.pdf"
+    pdf_md_canvas = canvas.Canvas(str(pdf_md_src))
+    pdf_md_canvas.drawString(72, 740, "Rich markdown text")
+    pdf_md_canvas.drawImage(ImageReader(str(pdf_md_image)), 72, 660, width=96, height=64)
+    pdf_md_canvas.line(72, 610, 260, 610)
+    pdf_md_canvas.line(72, 580, 260, 580)
+    pdf_md_canvas.line(72, 550, 260, 550)
+    pdf_md_canvas.line(72, 610, 72, 550)
+    pdf_md_canvas.line(160, 610, 160, 550)
+    pdf_md_canvas.line(260, 610, 260, 550)
+    pdf_md_canvas.drawString(84, 590, "Name")
+    pdf_md_canvas.drawString(176, 590, "Value")
+    pdf_md_canvas.drawString(84, 560, "Alpha")
+    pdf_md_canvas.drawString(176, 560, "42")
+    pdf_md_canvas.save()
+    pdf_md_out = pdf_md_rich_root / "rich.md"
+    pdf_md_status = convert_pdf_to_md_file_module(str(pdf_md_src), str(pdf_md_out))
+    pdf_md_text = pdf_md_out.read_text(encoding="utf-8") if pdf_md_out.exists() else ""
+    pdf_md_assets = pdf_md_rich_root / "rich_assets"
+    pdf_md_asset_files = list(pdf_md_assets.glob("*")) if pdf_md_assets.exists() else []
+    record(
+        "pdf_to_md_rich_assets",
+        pdf_md_status == "SUCCESS"
+        and "Rich markdown text" in pdf_md_text
+        and "![" in pdf_md_text
+        and "rich_assets/" in pdf_md_text.replace("\\", "/")
+        and any(path.is_file() and path.stat().st_size > 0 for path in pdf_md_asset_files),
+        {
+            "status": pdf_md_status,
+            "output": str(pdf_md_out),
+            "assets": [path.name for path in pdf_md_asset_files],
+            "text_preview": pdf_md_text[:500],
         },
     )
 
@@ -4239,6 +4414,33 @@ def main():
         },
     )
 
+    zip_smart_boundary_before_root = root / "zip_smart_boundary_before_range"
+    (zip_smart_boundary_before_root / "Archive1" / "child_pdf").mkdir(parents=True)
+    (zip_smart_boundary_before_root / "Archive1" / "doc.pdf").write_text("pdf", encoding="utf-8")
+    (zip_smart_boundary_before_root / "Archive1" / "child_pdf" / "deep.pdf").write_text("deep", encoding="utf-8")
+    smart_boundary_before_outputs = {
+        Path(item["output"]).relative_to(zip_smart_boundary_before_root).as_posix()
+        for item in plan_zip_archives_module(zip_smart_boundary_before_root, "smart_recursive", max_depth="3-4")
+    }
+
+    zip_smart_boundary_inside_root = root / "zip_smart_boundary_inside_range"
+    (zip_smart_boundary_inside_root / "level2" / "Archive1" / "child_pdf").mkdir(parents=True)
+    (zip_smart_boundary_inside_root / "level2" / "Archive1" / "doc.pdf").write_text("pdf", encoding="utf-8")
+    (zip_smart_boundary_inside_root / "level2" / "Archive1" / "child_pdf" / "deep.pdf").write_text("deep", encoding="utf-8")
+    smart_boundary_inside_outputs = {
+        Path(item["output"]).relative_to(zip_smart_boundary_inside_root).as_posix()
+        for item in plan_zip_archives_module(zip_smart_boundary_inside_root, "smart_recursive", max_depth="3-4")
+    }
+    record(
+        "zip_smart_depth_range_stops_at_mixed_boundary",
+        smart_boundary_before_outputs == set()
+        and smart_boundary_inside_outputs == {"level2/Archive1.zip"},
+        {
+            "before_range": sorted(smart_boundary_before_outputs),
+            "inside_range": sorted(smart_boundary_inside_outputs),
+        },
+    )
+
     app.zip_mode_var.set("smart_recursive")
     app.zip_min_depth_var.set("2")
     app.zip_max_depth_var.set("4")
@@ -4386,6 +4588,27 @@ def main():
             "output": str(imgs_pdf),
             "task_calls": len(convert_task_calls),
             "task_result": imgs2pdf_result,
+        },
+    )
+
+    convert_extended_root = root / "convert_extended_workflow"
+    convert_extended_root.mkdir()
+    (convert_extended_root / "workflow.txt").write_text("workflow txt\n第二行", encoding="utf-8")
+    app.current_task = "convert"
+    app.cv_mode.set("txt2word")
+    app.run_process(str(convert_extended_root), "convert")
+    convert_extended_out = convert_extended_root / "workflow.docx"
+    convert_extended_result = mod._get_last_task_result(app)
+    record(
+        "convert_extended_txt2word_workflow",
+        wait_for(lambda: convert_extended_out.exists())
+        and isinstance(convert_extended_result, dict)
+        and convert_extended_result.get("status") == "success"
+        and convert_extended_result.get("success_count") == 1
+        and str(convert_extended_out) in convert_extended_result.get("outputs", []),
+        {
+            "output": str(convert_extended_out),
+            "task_result": convert_extended_result,
         },
     )
 
