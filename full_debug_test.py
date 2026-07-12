@@ -55,9 +55,16 @@ from tools.fx_resume import (
     outputs_are_complete as outputs_are_complete_module,
 )
 from tools.fx_watermark_core import (
+    COPY_GUARD_METADATA_KEY as COPY_GUARD_METADATA_KEY_MODULE,
+    COPY_GUARD_METADATA_VALUE as COPY_GUARD_METADATA_VALUE_MODULE,
+    COPY_GUARD_TEXT_PREFIX as COPY_GUARD_TEXT_PREFIX_MODULE,
+    WORD_COPY_GUARD_VALUE as WORD_COPY_GUARD_VALUE_MODULE,
+    WORD_COPY_GUARD_VARIABLE as WORD_COPY_GUARD_VARIABLE_MODULE,
+    _copy_guard_noise_lines as copy_guard_noise_lines_module,
     add_watermark_to_pdf as add_watermark_to_pdf_module,
     add_watermark_to_word as add_watermark_to_word_module,
     create_watermark_packet as create_watermark_packet_module,
+    normalize_copy_guard_strength as normalize_copy_guard_strength_module,
     normalize_watermark_page_range as normalize_watermark_page_range_module,
 )
 from tools.fx_zip_core import (
@@ -783,6 +790,9 @@ def main():
         "覆盖原文件",
         "保守（推荐）",
         "批量并行",
+        "复制干扰层",
+        "局部拖选一行正文",
+        "截图后重新 OCR",
     ]
     record(
         "inline_help_workflow_sections",
@@ -791,6 +801,35 @@ def main():
         {
             "sections": [title for title, _lines in mod.INLINE_HELP_SECTIONS],
             "missing": [term for term in help_required_terms if term not in help_blob],
+        },
+    )
+
+    zip_help_lines = dict(mod.INLINE_HELP_SECTIONS).get("批量压缩", ())
+    zip_help_blob = "\n".join(zip_help_lines)
+    zip_help_required_terms = [
+        "空目录",
+        "混合边界早于所选起始层",
+        "zip、rar、7z、tar、gz、bz2、xz、zst",
+        ".DS_Store",
+        "本次计划生成的 ZIP",
+        "根目录名.zip",
+        "原文件名_Backup.zip",
+        "结构有效的 ZIP",
+        "ZIP Deflate",
+        "单线程逐包执行",
+        "两个压缩包之间响应",
+        "不会删除普通源文件",
+    ]
+    record(
+        "zip_help_documents_complete_implementation_rules",
+        tuple(zip_help_lines) == tuple(mod.ZIP_IMPLEMENTATION_HELP_LINES)
+        and all(term in zip_help_blob for term in zip_help_required_terms)
+        and all(term in mod.ZIP_MODE_DESCRIPTION_TEXT for term in zip_help_required_terms)
+        and mod.ZIP_MODE_DESCRIPTION_TEXT.startswith("功能说明：新版智能压缩完整实现规则"),
+        {
+            "line_count": len(zip_help_lines),
+            "missing_inline": [term for term in zip_help_required_terms if term not in zip_help_blob],
+            "missing_panel": [term for term in zip_help_required_terms if term not in mod.ZIP_MODE_DESCRIPTION_TEXT],
         },
     )
 
@@ -1241,6 +1280,8 @@ def main():
     app.wm_skip_word_type_var.set(True)
     app.wm_skip_ppt_type_var.set(False)
     app.wm_color_var.set("#2A7FFF")
+    app.wm_copy_guard_enabled_var.set(True)
+    app.wm_copy_guard_strength_var.set("强力")
     mod._safe_named_widget_set(app, "slider_size", 72)
     mod._safe_named_widget_set(app, "slider_opacity", 0.22)
     mod._safe_named_widget_set(app, "slider_angle", 30)
@@ -1254,6 +1295,8 @@ def main():
     app.wm_skip_word_type_var.set(False)
     app.wm_skip_ppt_type_var.set(True)
     app.wm_color_var.set("#C0C0C0")
+    app.wm_copy_guard_enabled_var.set(False)
+    app.wm_copy_guard_strength_var.set("轻度")
     mod._safe_named_widget_set(app, "slider_size", 20)
     apply_ok, apply_message = mod._restore_last_settings_category(app, "watermark")
     loaded_last = mod._load_last_settings().get("watermark")
@@ -1269,6 +1312,8 @@ def main():
         and app.wm_skip_word_type_var.get() is True
         and app.wm_skip_ppt_type_var.get() is False
         and app.wm_color_var.get() == "#2A7FFF"
+        and app.wm_copy_guard_enabled_var.get() is True
+        and app.wm_copy_guard_strength_var.get() == "强力"
         and abs(float(app.slider_size.get()) - saved_slider_size) < 0.01,
         {
             "message": apply_message,
@@ -1329,6 +1374,37 @@ def main():
             "text_index": text_index,
             "preview_before_text": preview_before_text,
             "preview_count": len(preview_frames),
+        },
+    )
+    wm_copy_guard_frame = getattr(app, "_fx_wm_copy_guard_frame", None)
+    wm_copy_guard_hint = getattr(app, "wm_copy_guard_hint_label", None)
+    try:
+        copy_guard_index = wm_left_children.index(wm_copy_guard_frame)
+    except Exception:
+        copy_guard_index = -1
+    wm_copy_guard_settings = mod._get_watermark_settings(app)
+    wm_copy_guard_preview = mod._get_preview_mode_detail(app, "watermark")
+    record(
+        "watermark_copy_guard_module_ui_and_settings",
+        wm_copy_guard_frame is not None
+        and wm_copy_guard_frame.master == wm_text_panel
+        and wm_copy_guard_frame.winfo_manager() == "pack"
+        and 0 <= copy_guard_index < text_index
+        and 0 <= preview_index < text_index
+        and app.wm_copy_guard_enabled_var.get() is True
+        and app.wm_copy_guard_strength_var.get() == "强力"
+        and wm_copy_guard_settings.get("copy_guard_enabled") is True
+        and wm_copy_guard_settings.get("copy_guard_strength") == "strong"
+        and "复制干扰层" in wm_copy_guard_preview
+        and str(getattr(app.wm_copy_guard_strength_control, "_state", "")) == "normal"
+        and "全选整页/整份" in str(wm_copy_guard_hint.cget("text") if wm_copy_guard_hint is not None else "")
+        and "截图后重新 OCR 不受影响" in str(wm_copy_guard_hint.cget("text") if wm_copy_guard_hint is not None else ""),
+        {
+            "manager": wm_copy_guard_frame.winfo_manager() if wm_copy_guard_frame is not None else None,
+            "copy_guard_index": copy_guard_index,
+            "text_index": text_index,
+            "settings": wm_copy_guard_settings,
+            "preview": wm_copy_guard_preview,
         },
     )
     wm_range_random_radio = getattr(app, "_fx_wm_range_random_radio", None)
@@ -1816,6 +1892,7 @@ def main():
     mod._safe_var_set(app, "wm_skip_pdf_type_var", True)
     mod._safe_var_set(app, "wm_skip_word_type_var", False)
     mod._safe_var_set(app, "wm_skip_ppt_type_var", False)
+    app.wm_copy_guard_enabled_var.set(False)
     mod._safe_var_set(app, "wm_range_var", "all")
     mod._safe_var_set(app, "wm_overwrite_var", "force")
     app.run_process(str(wm_type_skip_root), "watermark")
@@ -2652,11 +2729,120 @@ def main():
         and random_page_pixels[2] > random_page_pixels[1] + 5000,
         {"status": random_status, "pixels": random_page_pixels},
     )
+
+    copy_guard_pdf_noise = copy_guard_noise_lines_module("strong", 0, "pdf-noise-probe", allow_unicode=False)
+    copy_guard_word_noise = copy_guard_noise_lines_module("strong", 0, "word-noise-probe", allow_unicode=True)
+    record(
+        "copy_guard_mixed_noise_character_families",
+        all(line.startswith(COPY_GUARD_TEXT_PREFIX_MODULE) for line in copy_guard_pdf_noise + copy_guard_word_noise)
+        and any(any(character.isdigit() for character in line) for line in copy_guard_pdf_noise)
+        and any(any(character.isalpha() for character in line) for line in copy_guard_pdf_noise)
+        and any(any(character in "|#@/" for character in line) for line in copy_guard_pdf_noise)
+        and any(any("\u4e00" <= character <= "\u9fff" for character in line) for line in copy_guard_word_noise)
+        and any("�" in line or "æ" in line for line in copy_guard_word_noise),
+        {"pdf_noise": copy_guard_pdf_noise[:3], "word_noise": copy_guard_word_noise[:6]},
+    )
+
+    copy_guard_src = root / "copy_guard_source.pdf"
+    copy_guard_source_pdf = canvas.Canvas(str(copy_guard_src))
+    for copy_guard_line_index in range(12):
+        copy_guard_source_pdf.drawString(
+            100,
+            740 - (copy_guard_line_index * 45),
+            f"NORMAL CUSTOMER VISIBLE LINE {copy_guard_line_index + 1:02d}",
+        )
+    copy_guard_source_pdf.save()
+    copy_guard_out = root / "copy_guard_output.pdf"
+    import fitz as fitz_copy_guard
+
+    with fitz_copy_guard.open(str(copy_guard_src)) as document:
+        copy_guard_before_pixels = [page.get_pixmap(alpha=False).samples for page in document]
+    copy_guard_status = mod.add_watermark_to_pdf(
+        str(copy_guard_src),
+        str(copy_guard_out),
+        mod.create_watermark_packet("", "Helvetica", 12, 0.0, 0),
+        page_range="first",
+        check_text="",
+        copy_guard=True,
+        copy_guard_strength="standard",
+    )
+    copy_guard_reader = PdfReader(str(copy_guard_out))
+    copy_guard_texts = [page.extract_text() or "" for page in copy_guard_reader.pages]
+    copy_guard_text_lines = copy_guard_texts[0].splitlines() if copy_guard_texts else []
+    copy_guard_first_noise_index = next(
+        (
+            index
+            for index, line in enumerate(copy_guard_text_lines)
+            if len(line) >= 80 and line.startswith(COPY_GUARD_TEXT_PREFIX_MODULE)
+        ),
+        -1,
+    )
+    copy_guard_last_visible_index = max(
+        (
+            index
+            for index, line in enumerate(copy_guard_text_lines)
+            if line == "NORMAL CUSTOMER VISIBLE LINE 12"
+        ),
+        default=-1,
+    )
+    with fitz_copy_guard.open(str(copy_guard_out)) as document:
+        copy_guard_after_pixels = [page.get_pixmap(alpha=False).samples for page in document]
+        copy_guard_local_line = document[0].get_text(
+            clip=fitz_copy_guard.Rect(80, 300, 520, 350)
+        ).strip()
+    record(
+        "pdf_copy_guard_whole_copy_noise_local_line_clean_visual_unchanged",
+        copy_guard_status == "SUCCESS"
+        and len(copy_guard_texts) == 1
+        and all(len(text) > 500 for text in copy_guard_texts)
+        and "NORMAL CUSTOMER VISIBLE LINE 01" in copy_guard_texts[0]
+        and "NORMAL CUSTOMER VISIBLE LINE 12" in copy_guard_texts[0]
+        and 0 < copy_guard_first_noise_index < copy_guard_last_visible_index
+        and copy_guard_local_line == "NORMAL CUSTOMER VISIBLE LINE 06"
+        and copy_guard_before_pixels == copy_guard_after_pixels
+        and copy_guard_reader.metadata.get(COPY_GUARD_METADATA_KEY_MODULE) == COPY_GUARD_METADATA_VALUE_MODULE
+        and normalize_copy_guard_strength_module("强力") == "strong",
+        {
+            "status": copy_guard_status,
+            "text_lengths": [len(text) for text in copy_guard_texts],
+            "local_line": copy_guard_local_line,
+            "first_noise_index": copy_guard_first_noise_index,
+            "last_visible_index": copy_guard_last_visible_index,
+            "pixels_equal": copy_guard_before_pixels == copy_guard_after_pixels,
+            "metadata": copy_guard_reader.metadata.get(COPY_GUARD_METADATA_KEY_MODULE),
+        },
+    )
+
+    copy_guard_upgrade_out = root / "copy_guard_upgrade_existing_watermark.pdf"
+    copy_guard_upgrade_status = mod.add_watermark_to_pdf(
+        str(pdf_out),
+        str(copy_guard_upgrade_out),
+        pkt,
+        page_range="all",
+        check_text="CONFIDENTIAL",
+        copy_guard=True,
+        copy_guard_strength="light",
+    )
+    copy_guard_upgrade_reader = PdfReader(str(copy_guard_upgrade_out))
+    copy_guard_upgrade_text = "\n".join(page.extract_text() or "" for page in copy_guard_upgrade_reader.pages)
+    record(
+        "pdf_copy_guard_upgrades_existing_watermark_without_duplicate_visible_text",
+        copy_guard_upgrade_status == "SUCCESS"
+        and copy_guard_upgrade_text.count("CONFIDENTIAL") == 1
+        and len(copy_guard_upgrade_text) > len(watermark_text) + 200
+        and copy_guard_upgrade_reader.metadata.get(COPY_GUARD_METADATA_KEY_MODULE) == COPY_GUARD_METADATA_VALUE_MODULE,
+        {
+            "status": copy_guard_upgrade_status,
+            "visible_count": copy_guard_upgrade_text.count("CONFIDENTIAL"),
+            "text_length": len(copy_guard_upgrade_text),
+        },
+    )
     record(
         "watermark_core_module_exports",
         callable(create_watermark_packet_module)
         and callable(add_watermark_to_pdf_module)
         and callable(add_watermark_to_word_module)
+        and callable(normalize_copy_guard_strength_module)
         and callable(normalize_watermark_page_range_module)
         and getattr(mod._watermark_core_create_watermark_packet, "__module__", "") == "tools.fx_watermark_core",
         {
@@ -3104,6 +3290,8 @@ def main():
         app.wm_text.insert("1.0", "PARALLEL WM")
     except Exception:
         pass
+    app.wm_copy_guard_enabled_var.set(True)
+    app.wm_copy_guard_strength_var.set("强力")
     app.current_task = "watermark"
     app.enable_multithread.set(True)
     watermark_executor_workers = []
@@ -3123,19 +3311,34 @@ def main():
     parallel_wm_out_a = parallel_wm_root / mod.RESULT_FOLDER_NAME / "a.pdf"
     parallel_wm_out_b = parallel_wm_root / mod.RESULT_FOLDER_NAME / "b.pdf"
     parallel_wm_result = dict(getattr(app, "_fx_last_task_result", {}) or {})
+    parallel_wm_logs = list(getattr(app, "_fx_last_task_logs", []) or [])
+    try:
+        parallel_wm_reader_a = PdfReader(str(parallel_wm_out_a))
+        parallel_wm_guard_text_a = "\n".join(page.extract_text() or "" for page in parallel_wm_reader_a.pages)
+        parallel_wm_guard_metadata_a = parallel_wm_reader_a.metadata.get(COPY_GUARD_METADATA_KEY_MODULE)
+    except Exception:
+        parallel_wm_guard_text_a = ""
+        parallel_wm_guard_metadata_a = ""
     record(
         "watermark_pdf_parallel_executor",
         bool(watermark_executor_workers)
         and max(value or 0 for value in watermark_executor_workers) > 1
         and wait_for(lambda: parallel_wm_out_a.exists() and parallel_wm_out_b.exists())
         and parallel_wm_result.get("status") == "success"
-        and parallel_wm_result.get("success_count") == 2,
+        and parallel_wm_result.get("success_count") == 2
+        and len(parallel_wm_guard_text_a) > 800
+        and parallel_wm_guard_metadata_a == COPY_GUARD_METADATA_VALUE_MODULE
+        and any("[复制干扰层] 已开启（强力）" in item for item in parallel_wm_logs),
         {
             "workers": watermark_executor_workers,
             "result": parallel_wm_result,
             "outputs": [str(parallel_wm_out_a), str(parallel_wm_out_b)],
+            "guard_text_length": len(parallel_wm_guard_text_a),
+            "guard_metadata": parallel_wm_guard_metadata_a,
+            "logs": parallel_wm_logs,
         },
     )
+    app.wm_copy_guard_enabled_var.set(False)
 
     inp = root / "img_in"
     out = root / "img_out"
@@ -4441,6 +4644,44 @@ def main():
         },
     )
 
+    zip_ds_store_root = root / "zip_smart_ignores_ds_store"
+    (zip_ds_store_root / "child_a").mkdir(parents=True)
+    (zip_ds_store_root / "child_b").mkdir()
+    (zip_ds_store_root / ".DS_Store").write_bytes(b"macos metadata")
+    (zip_ds_store_root / "child_a" / "a.pdf").write_text("a", encoding="utf-8")
+    (zip_ds_store_root / "child_b" / "b.pdf").write_text("b", encoding="utf-8")
+    zip_ds_store_jobs = plan_zip_archives_module(zip_ds_store_root, "smart_recursive")
+    zip_ds_store_outputs = {
+        Path(item["output"]).relative_to(zip_ds_store_root).as_posix()
+        for item in zip_ds_store_jobs
+    }
+    zip_ds_store_result = run_zip_task_module(zip_ds_store_root, "smart_recursive")
+    zip_ds_store_root_archive = zip_ds_store_root / f"{zip_ds_store_root.name}.zip"
+    try:
+        with zipfile.ZipFile(zip_ds_store_root_archive) as archive:
+            zip_ds_store_entries = set(archive.namelist())
+    except Exception:
+        zip_ds_store_entries = set()
+    record(
+        "zip_smart_ignores_ds_store_artifacts",
+        zip_ds_store_outputs
+        == {
+            f"{zip_ds_store_root.name}.zip",
+            "child_a.zip",
+            "child_b.zip",
+        }
+        and zip_ds_store_result.get("status") == "success"
+        and (zip_ds_store_root / "child_a.zip").exists()
+        and (zip_ds_store_root / "child_b.zip").exists()
+        and ".DS_Store" not in zip_ds_store_entries
+        and plan_zip_archives_module(zip_ds_store_root / ".DS_Store", "smart_recursive") == [],
+        {
+            "outputs": sorted(zip_ds_store_outputs),
+            "result": zip_ds_store_result,
+            "entries": sorted(zip_ds_store_entries),
+        },
+    )
+
     app.zip_mode_var.set("smart_recursive")
     app.zip_min_depth_var.set("2")
     app.zip_max_depth_var.set("4")
@@ -4977,6 +5218,99 @@ def main():
                 status = mod.add_watermark_to_word(word, str(docx_src.resolve()), str(wm_docx.resolve()), "XMU TEST", "SmileySans-Oblique", 60, 0.08, 45)
                 record("word_watermark", status == "SUCCESS" and wm_docx.exists(), status)
 
+                word_guard_src = root / "office_word_copy_guard_src.docx"
+                doc = word.Documents.Add()
+                doc.Content.Text = (
+                    "WORD GUARD VISIBLE PARAGRAPH 01\r"
+                    "WORD GUARD VISIBLE PARAGRAPH 02\r"
+                    "WORD GUARD VISIBLE PARAGRAPH 03\r"
+                    "WORD GUARD VISIBLE PARAGRAPH 04"
+                )
+                doc.SaveAs2(str(word_guard_src.resolve()), FileFormat=16)
+                doc.Close(False)
+                word_guard_docx = root / "office_word_copy_guard.docx"
+                word_guard_status = mod.add_watermark_to_word(
+                    word,
+                    str(word_guard_src.resolve()),
+                    str(word_guard_docx.resolve()),
+                    "WORD GUARD",
+                    "SmileySans-Oblique",
+                    60,
+                    0.08,
+                    45,
+                    copy_guard=True,
+                    copy_guard_strength="standard",
+                )
+                word_guard_opened = word.Documents.Open(str(word_guard_docx.resolve()))
+                try:
+                    word_guard_full_text = str(word_guard_opened.Content.Text or "")
+                    word_guard_first_range = word_guard_opened.Paragraphs(1).Range.Duplicate
+                    word_guard_first_range.End = max(
+                        int(word_guard_first_range.Start),
+                        int(word_guard_first_range.End) - 1,
+                    )
+                    word_guard_first_copy = str(word_guard_first_range.Text or "").strip()
+                    word_guard_variable = str(
+                        word_guard_opened.Variables(WORD_COPY_GUARD_VARIABLE_MODULE).Value or ""
+                    )
+                    word_guard_copy_paragraphs = []
+                    for paragraph_index in range(1, int(word_guard_opened.Paragraphs.Count) + 1):
+                        paragraph = word_guard_opened.Paragraphs(paragraph_index)
+                        paragraph_text = str(paragraph.Range.Text or "").replace("\r", "").replace("\x07", "").strip()
+                        if len(paragraph_text) < 80 or not paragraph_text.startswith(COPY_GUARD_TEXT_PREFIX_MODULE):
+                            continue
+                        try:
+                            style_ok = (
+                                int(paragraph.Range.Font.Hidden) == 0
+                                and float(paragraph.Range.Font.Size) <= 1.1
+                                and int(paragraph.Range.Font.Color) == 0xFFFFFF
+                            )
+                        except Exception:
+                            style_ok = False
+                        word_guard_copy_paragraphs.append((paragraph_index, paragraph_text, style_ok))
+                    word_guard_pdf = root / "office_word_copy_guard.pdf"
+                    word_guard_opened.ExportAsFixedFormat(str(word_guard_pdf.resolve()), 17)
+                finally:
+                    word_guard_opened.Close(False)
+                word_guard_first_noise = min(
+                    (word_guard_full_text.find(item[1]) for item in word_guard_copy_paragraphs),
+                    default=-1,
+                )
+                word_guard_last_visible = word_guard_full_text.rfind("WORD GUARD VISIBLE PARAGRAPH 04")
+                word_guard_upgrade_docx = root / "office_word_copy_guard_upgrade.docx"
+                word_guard_upgrade_status = mod.add_watermark_to_word(
+                    word,
+                    str(word_guard_docx.resolve()),
+                    str(word_guard_upgrade_docx.resolve()),
+                    "WORD GUARD",
+                    "SmileySans-Oblique",
+                    60,
+                    0.08,
+                    45,
+                    copy_guard=True,
+                    copy_guard_strength="standard",
+                )
+                record(
+                    "word_copy_guard_between_paragraphs_full_copy_noises_local_copy_clean",
+                    word_guard_status == "SUCCESS"
+                    and word_guard_docx.exists()
+                    and word_guard_variable == WORD_COPY_GUARD_VALUE_MODULE
+                    and len(word_guard_copy_paragraphs) >= 4
+                    and all(item[2] for item in word_guard_copy_paragraphs)
+                    and word_guard_first_copy == "WORD GUARD VISIBLE PARAGRAPH 01"
+                    and 0 < word_guard_first_noise < word_guard_last_visible
+                    and word_guard_upgrade_status == "SKIP:already watermarked and copy guard exists",
+                    {
+                        "status": word_guard_status,
+                        "first_copy": word_guard_first_copy,
+                        "guard_paragraph_count": len(word_guard_copy_paragraphs),
+                        "first_noise": word_guard_first_noise,
+                        "last_visible": word_guard_last_visible,
+                        "variable": word_guard_variable,
+                        "upgrade_status": word_guard_upgrade_status,
+                    },
+                )
+
                 wm_color_docx = root / "office_word_wm_color.docx"
                 status = mod.add_watermark_to_word(word, str(docx_src.resolve()), str(wm_color_docx.resolve()), "COLOR TEST", "SmileySans-Oblique", 60, 0.3, 45, color="#3366CC")
                 color_opened = word.Documents.Open(str(wm_color_docx.resolve()))
@@ -5288,7 +5622,7 @@ def main():
         finally:
             pythoncom.CoUninitialize()
     else:
-        for name in ["word_dispatchex_gen_py_safe_patch", "word_to_pdf", "word_watermark", "word_watermark_visible_when_exported", "word_remove_wm", "word_remove_wm_header_inline_image", "word_remove_wm_preserve_header_assets", "word_meta_author", "watermark_docx_run_process_safe_word_dispatch", "watermark_docx_single_same_dir_output_model", "watermark_docx_direct_visible_when_exported", "watermark_docx_convert_pdf_safe_fallback"]:
+        for name in ["word_dispatchex_gen_py_safe_patch", "word_to_pdf", "word_watermark", "word_copy_guard_between_paragraphs_full_copy_noises_local_copy_clean", "word_watermark_visible_when_exported", "word_remove_wm", "word_remove_wm_header_inline_image", "word_remove_wm_preserve_header_assets", "word_meta_author", "watermark_docx_run_process_safe_word_dispatch", "watermark_docx_single_same_dir_output_model", "watermark_docx_direct_visible_when_exported", "watermark_docx_convert_pdf_safe_fallback"]:
             record(name, True, "skipped_no_word_com", skipped=True)
 
     ppt_available, _ = office_available("PowerPoint.Application", mod=mod)

@@ -7,8 +7,10 @@ thin wrappers for runtime compatibility and supplies font/COM adapters.
 from __future__ import annotations
 
 import io
+import hashlib
 import os
 import random
+import secrets
 import tempfile
 from contextlib import nullcontext
 from pathlib import Path
@@ -30,6 +32,16 @@ WORD_WATERMARK_MAX_VISIBLE_OPACITY = 0.85
 WATERMARK_RANGE_ALL = "all"
 WATERMARK_RANGE_FIRST = "first"
 WATERMARK_RANGE_FIRST_RANDOM = "first_random"
+COPY_GUARD_METADATA_KEY = "/FXCopyGuard"
+COPY_GUARD_METADATA_VALUE = "Fengxi Copy Guard v1"
+WORD_COPY_GUARD_VARIABLE = "FXCopyGuard"
+WORD_COPY_GUARD_VALUE = "Fengxi Copy Guard v1"
+COPY_GUARD_TEXT_PREFIX = "FXCG"
+COPY_GUARD_STRENGTH_BLOCKS = {
+    "light": 4,
+    "standard": 8,
+    "strong": 14,
+}
 
 
 def _safe_float(value, default):
@@ -113,6 +125,22 @@ def normalize_watermark_page_range(value):
     if compact in {"first", "first_page", "1", "第一页", "仅第一页", "首页"}:
         return WATERMARK_RANGE_FIRST
     return WATERMARK_RANGE_ALL
+
+
+def normalize_copy_guard_strength(value):
+    text = str(value or "standard").strip().lower()
+    aliases = {
+        "轻度": "light",
+        "轻量": "light",
+        "light": "light",
+        "标准": "standard",
+        "standard": "standard",
+        "normal": "standard",
+        "强力": "strong",
+        "强": "strong",
+        "strong": "strong",
+    }
+    return aliases.get(text, "standard")
 
 
 def _select_watermark_page_indexes(page_count, page_range):
@@ -206,6 +234,172 @@ def create_watermark_packet(
     return packet
 
 
+def _copy_guard_noise_lines(strength, page_index, document_token, allow_unicode=False):
+    block_count = COPY_GUARD_STRENGTH_BLOCKS[normalize_copy_guard_strength(strength)]
+    latin_fragments = ("A9x", "Ã¥Â­Â—", "Â¤Q", "xY7", "â€¢", "Z_9")
+    unicode_fragments = ("锟斤拷", "寮€", "页码", "�", "文档", "æ–‡")
+    lines = []
+    for slot in range(block_count):
+        seed = f"{document_token}:{page_index}:{slot}".encode("utf-8")
+        first = hashlib.sha256(seed).hexdigest().upper()
+        second = hashlib.sha256(seed + b":fx-copy-guard").hexdigest().upper()
+        fragments = unicode_fragments if allow_unicode else latin_fragments
+        # Cycle the visible character family by slot so every normal/strong guard
+        # reliably contains multiple kinds of noise, not merely random hex output.
+        fragment = fragments[slot % len(fragments)]
+        separator = "|#@/"[int(first[2:4], 16) % 4]
+        lines.append(f"{COPY_GUARD_TEXT_PREFIX}{slot:02d}{separator}{fragment}{first}{separator}{second[:24]}")
+    return lines
+
+
+def create_copy_guard_packet(page_size, strength="standard", page_index=0, document_token=None):
+    """Build an invisible edge-text overlay for whole-page text extraction."""
+
+    try:
+        page_width = max(1.0, float(page_size[0]))
+        page_height = max(1.0, float(page_size[1]))
+    except Exception:
+        page_width, page_height = A4
+    token = str(document_token or secrets.token_hex(16))
+    lines = _copy_guard_noise_lines(strength, page_index, token)
+
+    packet = io.BytesIO()
+    pdf = canvas.Canvas(packet, pagesize=(page_width, page_height))
+    text_obj = pdf.beginText()
+    text_obj.setFont("Helvetica", 1.0)
+    text_obj.setTextRenderMode(3)
+    top_margin = min(12.0, max(2.0, page_height * 0.02))
+    available_height = max(1.0, page_height - (top_margin * 2.0))
+    step = available_height / max(1, len(lines) - 1) if len(lines) > 1 else 0.0
+    for index, line in enumerate(lines):
+        text_obj.setTextOrigin(1.5, top_margin + (index * step))
+        text_obj.textLine(line)
+    pdf.drawText(text_obj)
+    pdf.showPage()
+    pdf.save()
+    packet.seek(0)
+    return packet
+
+
+def _copy_guard_text_instruction_blocks(pikepdf, font_name, line, y_position):
+    """Return one invisible text block that stays outside normal line selection."""
+
+    return [
+        pikepdf.ContentStreamInstruction([], pikepdf.Operator("q")),
+        pikepdf.ContentStreamInstruction([], pikepdf.Operator("BT")),
+        pikepdf.ContentStreamInstruction([font_name, 1], pikepdf.Operator("Tf")),
+        pikepdf.ContentStreamInstruction([3], pikepdf.Operator("Tr")),
+        pikepdf.ContentStreamInstruction([1, 0, 0, 1, 1.5, y_position], pikepdf.Operator("Tm")),
+        pikepdf.ContentStreamInstruction([pikepdf.String(line)], pikepdf.Operator("Tj")),
+        pikepdf.ContentStreamInstruction([], pikepdf.Operator("ET")),
+        pikepdf.ContentStreamInstruction([], pikepdf.Operator("Q")),
+    ]
+
+
+def _copy_guard_page_size(page):
+    try:
+        box = page.MediaBox
+        left, bottom, right, top = (float(box[index]) for index in range(4))
+        return left, bottom, max(1.0, right - left), max(1.0, top - bottom)
+    except Exception:
+        return 0.0, 0.0, float(A4[0]), float(A4[1])
+
+
+def _add_interleaved_copy_guard_to_pdf(src_path, dst_path, strength, document_token):
+    """Interleave invisible blocks between existing text blocks using pikepdf.
+
+    PDF extractors follow content-stream order rather than visual coordinates.  Rewriting
+    only the parsed instruction list lets the blocks appear during a full-document copy,
+    while their left-edge coordinates keep ordinary visible-line selection clean.
+    """
+
+    try:
+        import pikepdf
+    except Exception as exc:
+        return f"ERROR:copy guard backend unavailable: {exc}"
+
+    text_show_operators = {"Tj", "TJ", "'", '"'}
+    font = pikepdf.Dictionary(
+        {
+            "/Type": pikepdf.Name("/Font"),
+            "/Subtype": pikepdf.Name("/Type1"),
+            "/BaseFont": pikepdf.Name("/Helvetica"),
+            "/Encoding": pikepdf.Name("/WinAnsiEncoding"),
+        }
+    )
+    try:
+        with pikepdf.Pdf.open(str(src_path)) as pdf:
+            for page_index, page in enumerate(pdf.pages):
+                instructions = list(pikepdf.parse_content_stream(page))
+                text_block_indexes = []
+                block_has_text = False
+                for index, instruction in enumerate(instructions):
+                    operator = str(instruction.operator)
+                    if operator == "BT":
+                        block_has_text = False
+                    elif operator in text_show_operators:
+                        block_has_text = True
+                    elif operator == "ET":
+                        if block_has_text:
+                            # Keep every original BT...ET text block intact, so copying one
+                            # paragraph/text block does not cross into a guard block.
+                            text_block_indexes.append(index)
+                        block_has_text = False
+                lines = _copy_guard_noise_lines(strength, page_index, document_token, allow_unicode=False)
+                left, bottom, _width, height = _copy_guard_page_size(page)
+                top_margin = min(12.0, max(2.0, height * 0.02))
+                available_height = max(1.0, height - (top_margin * 2.0))
+                step = available_height / max(1, len(lines) - 1) if len(lines) > 1 else 0.0
+                font_name = page.add_resource(font, pikepdf.Name("/Font"), prefix="FXCopyGuard")
+                insertions = {}
+
+                if text_block_indexes:
+                    for line_index, line in enumerate(lines):
+                        # Spread blocks through complete text blocks instead of appending them
+                        # after the page. Duplicate anchors are intentional on short pages.
+                        block_position = min(
+                            len(text_block_indexes) - 1,
+                            ((line_index + 1) * len(text_block_indexes)) // (len(lines) + 1),
+                        )
+                        anchor = text_block_indexes[block_position]
+                        y_position = bottom + top_margin + (line_index * step)
+                        insertions.setdefault(anchor, []).extend(
+                            _copy_guard_text_instruction_blocks(
+                                pikepdf,
+                                font_name,
+                                line,
+                                y_position,
+                            )
+                        )
+                else:
+                    # Image-only pages have no ordinary text to interleave with, but still
+                    # receive the guard so their text layer remains consistently protected.
+                    anchor = len(instructions) - 1
+                    insertions[anchor] = []
+                    for line_index, line in enumerate(lines):
+                        y_position = bottom + top_margin + (line_index * step)
+                        insertions[anchor].extend(
+                            _copy_guard_text_instruction_blocks(
+                                pikepdf,
+                                font_name,
+                                line,
+                                y_position,
+                            )
+                        )
+
+                rewritten = []
+                for instruction_index, instruction in enumerate(instructions):
+                    rewritten.append(instruction)
+                    rewritten.extend(insertions.get(instruction_index, []))
+                if not instructions:
+                    rewritten.extend(insertions.get(-1, []))
+                page.Contents = pdf.make_stream(pikepdf.unparse_content_stream(rewritten))
+            pdf.save(str(dst_path))
+        return "SUCCESS"
+    except Exception as exc:
+        return f"ERROR:copy guard interleave failed: {exc}"
+
+
 def _same_path(left, right):
     try:
         return os.path.abspath(str(left)) == os.path.abspath(str(right))
@@ -224,6 +418,15 @@ def _metadata_has_marker(metadata):
     return WATERMARK_MARKER in keywords or creator == WATERMARK_CREATOR
 
 
+def _metadata_has_copy_guard(metadata):
+    if not metadata:
+        return False
+    try:
+        return str(metadata.get(COPY_GUARD_METADATA_KEY, "") or "") == COPY_GUARD_METADATA_VALUE
+    except Exception:
+        return False
+
+
 def _first_page_contains(reader, text):
     needle = str(text or "")
     if not needle:
@@ -237,7 +440,7 @@ def _first_page_contains(reader, text):
         return False
 
 
-def _writer_metadata(reader):
+def _writer_metadata(reader, copy_guard=False):
     metadata = {}
     try:
         for key, value in (reader.metadata or {}).items():
@@ -247,6 +450,8 @@ def _writer_metadata(reader):
         metadata = {}
     metadata["/Keywords"] = WATERMARK_MARKER
     metadata["/Creator"] = WATERMARK_CREATOR
+    if copy_guard:
+        metadata[COPY_GUARD_METADATA_KEY] = COPY_GUARD_METADATA_VALUE
     return metadata
 
 
@@ -328,7 +533,16 @@ def _open_pdf_reader_for_watermark(src_path):
             return None, repair_path, f"ERROR:{first_exc}; repair read failed: {repair_exc}"
 
 
-def add_watermark_to_pdf(src, dst, watermark_packet, page_range="all", check_text=None, force_mode=False):
+def add_watermark_to_pdf(
+    src,
+    dst,
+    watermark_packet,
+    page_range="all",
+    check_text=None,
+    force_mode=False,
+    copy_guard=False,
+    copy_guard_strength="standard",
+):
     """Apply the watermark packet to a PDF and return a runtime-compatible status."""
 
     repair_path = None
@@ -343,30 +557,42 @@ def add_watermark_to_pdf(src, dst, watermark_packet, page_range="all", check_tex
             return open_status
         if reader is None:
             return "ERROR:PDF reader unavailable"
-        if not force_mode and _metadata_has_marker(reader.metadata):
-            return "SKIP:already watermarked"
-        if not force_mode and check_text and _first_page_contains(reader, check_text):
-            return "SKIP:watermark text found"
+        visible_watermark_exists = _metadata_has_marker(reader.metadata)
+        if not visible_watermark_exists and check_text:
+            visible_watermark_exists = _first_page_contains(reader, check_text)
+        copy_guard_exists = _metadata_has_copy_guard(reader.metadata)
+        apply_visible_watermark = bool(force_mode or not visible_watermark_exists)
+        apply_copy_guard = bool(copy_guard and (force_mode or not copy_guard_exists))
+        if not apply_visible_watermark and not apply_copy_guard:
+            if copy_guard and copy_guard_exists:
+                return "SKIP:already watermarked and copy guard exists"
+            if visible_watermark_exists:
+                return "SKIP:already watermarked"
+            return "SKIP:no watermark change requested"
 
-        if hasattr(watermark_packet, "seek"):
-            watermark_packet.seek(0)
-        watermark_reader = PdfReader(watermark_packet)
-        watermark_page = watermark_reader.pages[0]
+        watermark_page = None
+        if apply_visible_watermark:
+            if hasattr(watermark_packet, "seek"):
+                watermark_packet.seek(0)
+            watermark_reader = PdfReader(watermark_packet)
+            watermark_page = watermark_reader.pages[0]
 
         writer = PdfWriter()
         target_pages = _select_watermark_page_indexes(len(reader.pages), page_range)
+        copy_guard_token = secrets.token_hex(16) if apply_copy_guard else ""
         for index, page in enumerate(reader.pages):
-            if index in target_pages:
+            if apply_visible_watermark and index in target_pages:
                 try:
                     page.merge_page(watermark_page)
                 except AttributeError:
                     page.mergePage(watermark_page)
             writer.add_page(page)
-        writer.add_metadata(_writer_metadata(reader))
+        writer.add_metadata(_writer_metadata(reader, copy_guard=copy_guard_exists or apply_copy_guard))
 
         dst_path.parent.mkdir(parents=True, exist_ok=True)
         output_path = dst_path
         temp_path = None
+        guard_input_path = None
         if _same_path(src_path, dst_path):
             handle = tempfile.NamedTemporaryFile(
                 prefix=f"{src_path.stem}_watermark_",
@@ -378,8 +604,30 @@ def add_watermark_to_pdf(src, dst, watermark_packet, page_range="all", check_tex
             handle.close()
             output_path = temp_path
 
-        with open(output_path, "wb") as file_obj:
+        writer_output_path = output_path
+        if apply_copy_guard:
+            handle = tempfile.NamedTemporaryFile(
+                prefix=f"{dst_path.stem}_copy_guard_input_",
+                suffix=dst_path.suffix or ".pdf",
+                dir=str(dst_path.parent),
+                delete=False,
+            )
+            guard_input_path = Path(handle.name)
+            handle.close()
+            writer_output_path = guard_input_path
+
+        with open(writer_output_path, "wb") as file_obj:
             writer.write(file_obj)
+
+        if apply_copy_guard:
+            guard_status = _add_interleaved_copy_guard_to_pdf(
+                guard_input_path,
+                output_path,
+                copy_guard_strength,
+                copy_guard_token,
+            )
+            if guard_status != "SUCCESS":
+                return guard_status
 
         if temp_path is not None:
             os.replace(str(temp_path), str(dst_path))
@@ -390,6 +638,11 @@ def add_watermark_to_pdf(src, dst, watermark_packet, page_range="all", check_tex
         try:
             if repair_path is not None and Path(repair_path).exists():
                 Path(repair_path).unlink()
+        except Exception:
+            pass
+        try:
+            if 'guard_input_path' in locals() and guard_input_path is not None and Path(guard_input_path).exists():
+                Path(guard_input_path).unlink()
         except Exception:
             pass
 
@@ -474,6 +727,94 @@ def _word_has_marker(doc):
         except Exception:
             continue
     return False
+
+
+def _word_has_copy_guard(doc):
+    try:
+        variable = _call_collection_item(doc.Variables, WORD_COPY_GUARD_VARIABLE)
+        return str(getattr(variable, "Value", "") or "") == WORD_COPY_GUARD_VALUE
+    except Exception:
+        return False
+
+
+def _mark_word_copy_guard(doc):
+    try:
+        variable = _call_collection_item(doc.Variables, WORD_COPY_GUARD_VARIABLE)
+        variable.Value = WORD_COPY_GUARD_VALUE
+        return True
+    except Exception:
+        pass
+    try:
+        doc.Variables.Add(WORD_COPY_GUARD_VARIABLE, WORD_COPY_GUARD_VALUE)
+        return True
+    except Exception:
+        return False
+
+
+def _word_meaningful_paragraph_ranges(doc):
+    paragraphs = []
+    try:
+        collection = doc.Content.Paragraphs
+        count = int(collection.Count)
+    except Exception:
+        return paragraphs
+
+    for index in range(1, count + 1):
+        try:
+            paragraph = _call_collection_item(collection, index)
+            paragraph_range = paragraph.Range.Duplicate
+            text = str(getattr(paragraph_range, "Text", "") or "")
+            if not text.replace("\r", "").replace("\x07", "").strip():
+                continue
+            paragraphs.append((int(paragraph_range.Start), int(paragraph_range.End)))
+        except Exception:
+            continue
+    return paragraphs
+
+
+def _add_word_copy_guard(doc, strength, document_token):
+    """Insert visually neutral guard paragraphs only at body-paragraph boundaries."""
+
+    paragraphs = _word_meaningful_paragraph_ranges(doc)
+    if not paragraphs:
+        return 0
+
+    lines = _copy_guard_noise_lines(strength, 0, document_token, allow_unicode=True)
+    boundary_positions = [end for _start, end in paragraphs[:-1]]
+    if not boundary_positions:
+        # A one-paragraph document has no internal boundary. Appending one hidden
+        # paragraph keeps the visible paragraph's copy range unchanged.
+        boundary_positions = [paragraphs[-1][1]]
+
+    placements = []
+    for line_index, line in enumerate(lines):
+        boundary_index = min(
+            len(boundary_positions) - 1,
+            ((line_index + 1) * len(boundary_positions)) // (len(lines) + 1),
+        )
+        placements.append((boundary_positions[boundary_index], line))
+
+    added = 0
+    # Insert from the end so original paragraph positions remain valid.
+    for position, line in sorted(placements, key=lambda item: item[0], reverse=True):
+        try:
+            guard_range = doc.Range(position, position)
+            guard_range.InsertAfter(f"{line}\r")
+            guard_range.SetRange(position, position + len(line) + 1)
+            # Word excludes Font.Hidden runs from normal whole-document copy. Use a
+            # 1pt white run instead: it stays in the standard text layer while
+            # remaining visually neutral on the normal white document canvas.
+            guard_range.Font.Hidden = False
+            guard_range.Font.Size = 1
+            guard_range.Font.Color = 0xFFFFFF
+            guard_range.ParagraphFormat.SpaceBefore = 0
+            guard_range.ParagraphFormat.SpaceAfter = 0
+            guard_range.ParagraphFormat.LineSpacingRule = 4
+            guard_range.ParagraphFormat.LineSpacing = 1
+            added += 1
+        except Exception:
+            continue
+    return added
 
 
 def _resolve_word_font(font_name, word_font_resolver=None):
@@ -717,8 +1058,10 @@ def add_watermark_to_word(
     word_font_resolver=None,
     com_context_factory=None,
     color=None,
+    copy_guard=False,
+    copy_guard_strength="standard",
 ):
-    """Apply a header watermark to a Word document."""
+    """Apply a header watermark and optional hidden copy guard to a Word document."""
 
     src_path = Path(src).resolve()
     dst_path = Path(dst).resolve()
@@ -738,36 +1081,47 @@ def add_watermark_to_word(
 
             doc = open_word_document_safely(word_app, src_path)
 
-            if not force_mode and _word_has_marker(doc):
-                try:
-                    doc.Close(False)
-                except Exception:
-                    pass
-                doc = None
+            visible_watermark_exists = _word_has_marker(doc)
+            copy_guard_exists = _word_has_copy_guard(doc)
+            apply_visible_watermark = bool(force_mode or not visible_watermark_exists)
+            apply_copy_guard = bool(copy_guard and (force_mode or not copy_guard_exists))
+            if not apply_visible_watermark and not apply_copy_guard:
+                if copy_guard and copy_guard_exists:
+                    return "SKIP:already watermarked and copy guard exists"
                 return "SKIP:already watermarked"
 
-            compatible_font = _resolve_word_font(raw_font_name, word_font_resolver=word_font_resolver)
-            added = 0
-            normalized_range = normalize_watermark_page_range(page_range)
-            header_iter = _iter_word_first_page_headers(doc) if normalized_range in {WATERMARK_RANGE_FIRST, WATERMARK_RANGE_FIRST_RANDOM} else _iter_word_headers(doc)
-            for header, section in header_iter:
-                try:
-                    _add_word_header_watermark(header, section, text, compatible_font, font_size, opacity, angle, color=color)
-                    added += 1
-                except Exception:
-                    continue
-            if normalized_range == WATERMARK_RANGE_FIRST_RANDOM:
-                page_count = _get_word_page_count(doc)
-                target_pages = _select_watermark_page_indexes(page_count, normalized_range)
-                for page_index in sorted(index for index in target_pages if index > 0):
+            added_visible = 0
+            if apply_visible_watermark:
+                compatible_font = _resolve_word_font(raw_font_name, word_font_resolver=word_font_resolver)
+                normalized_range = normalize_watermark_page_range(page_range)
+                header_iter = _iter_word_first_page_headers(doc) if normalized_range in {WATERMARK_RANGE_FIRST, WATERMARK_RANGE_FIRST_RANDOM} else _iter_word_headers(doc)
+                for header, section in header_iter:
                     try:
-                        if _add_word_range_watermark(doc, page_index + 1, text, compatible_font, font_size, opacity, angle, color=color) is not None:
-                            added += 1
+                        _add_word_header_watermark(header, section, text, compatible_font, font_size, opacity, angle, color=color)
+                        added_visible += 1
                     except Exception:
                         continue
+                if normalized_range == WATERMARK_RANGE_FIRST_RANDOM:
+                    page_count = _get_word_page_count(doc)
+                    target_pages = _select_watermark_page_indexes(page_count, normalized_range)
+                    for page_index in sorted(index for index in target_pages if index > 0):
+                        try:
+                            if _add_word_range_watermark(doc, page_index + 1, text, compatible_font, font_size, opacity, angle, color=color) is not None:
+                                added_visible += 1
+                        except Exception:
+                            continue
+                if added_visible <= 0:
+                    return "ERROR:no writable Word header found"
 
-            if added <= 0:
-                return "ERROR:no writable Word header found"
+            if apply_copy_guard:
+                guard_added = _add_word_copy_guard(
+                    doc,
+                    copy_guard_strength,
+                    secrets.token_hex(16),
+                )
+                if guard_added <= 0:
+                    return "ERROR:no writable Word paragraph boundary found"
+                _mark_word_copy_guard(doc)
 
             dst_path.parent.mkdir(parents=True, exist_ok=True)
             if _same_path(src_path, dst_path):

@@ -2042,3 +2042,59 @@
   - `python -m py_compile tools\fx_zip_core.py full_debug_test.py Fengxi_Toolbox.py` passed.
   - `python smoke_test.py` passed 14/14.
   - `python full_debug_test.py` passed 228/228.
+
+## 2026-07-11 Smart ZIP ignores macOS .DS_Store artifacts
+- User reported that `.DS_Store` files in source folders were treated as normal files by Smart Recursive ZIP, causing the planner to stop descending and skip expected child-folder ZIPs.
+- Fix in `tools/fx_zip_core.py`:
+  - `.DS_Store` is ignored case-insensitively when Smart Recursive decides whether a folder has meaningful files.
+  - `.DS_Store` is excluded from generated ZIP contents and is skipped if selected as a direct file input.
+  - Source `.DS_Store` files are not deleted or modified.
+- Regression:
+  - Added `zip_smart_ignores_ds_store_artifacts`, which verifies child ZIP planning, created archives, archive contents, and direct-file skip behavior.
+- Validation:
+  - `python -m py_compile tools\fx_zip_core.py full_debug_test.py Fengxi_Toolbox.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 229/229.
+
+## 2026-07-11 complete Smart ZIP in-app documentation
+- User requested that every current Smart Recursive ZIP implementation characteristic and rule be documented in the feature description.
+- `Fengxi_Toolbox.py` now defines one shared `ZIP_IMPLEMENTATION_HELP_LINES` source used by both:
+  - the Batch ZIP page `功能说明`; and
+  - the inline `使用教程 > 批量压缩` section.
+- The 15 documented rule groups cover modes, deterministic traversal, job planning, mixed boundaries, boundaries before the selected start depth, descent rules, archive extensions, `.DS_Store`, depth ranges, output naming/placement, direct-file and total ZIP behavior, output-package exclusion, existing archive policies, compression/execution details, stop/failure behavior, and source-data safety.
+- Regression:
+  - Added `zip_help_documents_complete_implementation_rules` to require both UI surfaces to share the same source and retain critical implementation terms.
+- Validation:
+  - `python -m py_compile Fengxi_Toolbox.py full_debug_test.py tools\fx_zip_core.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 230/230.
+
+## 2026-07-11 Batch Watermark PDF copy-interference layer
+- Added the optional PDF copy-interference module and three strength levels to the Batch Watermark page.
+- Whole-page/document text extraction now includes invisible high-entropy edge blocks, while clipped extraction of a normal visible line remains clean.
+- The guard covers every PDF page, supports PDF-converted Word/PPT output, persists through last settings/presets/queue snapshots, and participates in the PDF parallel fast path.
+- Existing visible watermarks can receive only the missing guard, and `/FXCopyGuard` metadata prevents accidental duplicate application unless force mode is selected.
+- Render comparison confirmed exact before/after page-pixel equality. The module does not protect against screenshots or subsequent OCR.
+- GitHub research included `Riyoway/pdf-hidden-text`, PyMuPDF, pikepdf, pypdf, and borb. The implementation reuses ReportLab + pypdf already shipped by Fengxi.
+- Validation:
+  - `python -m py_compile tools\fx_watermark_core.py Fengxi_Toolbox.py full_debug_test.py` passed.
+  - `python full_debug_test.py` passed 233/233.
+  - `python smoke_test.py` passed 14/14.
+  - `package.bat` completed successfully; packaged EXE launched responsive as PID 37128.
+
+## 2026-07-11 Copy-interference stream-order correction
+- Corrected the PDF copy-interference layer after user verification: the previous merge-based overlay was visually distributed but appended after the original text in the PDF content stream.
+- The guard now uses pikepdf to insert invisible left-edge blocks among evenly spaced original text-show instructions. Full-page/document extraction receives interference during the body text; ordinary visible-line selection remains clean.
+- The regression fixture has one page with 12 visible lines and requires the first guard block to occur before the final visible line, plus exact rendered-pixel equality.
+- Validation: confirmed the old implementation failed that assertion; the corrected implementation passed `python full_debug_test.py` 233/233 and `python smoke_test.py` 14/14.
+- `package.bat` completed successfully; the refreshed packaged EXE includes pikepdf runtime files and launched responsive as PID 34312.
+
+## 2026-07-11 Copy guard for direct Word and mixed noise
+- Extended the Batch Watermark copy guard from PDF/PDF-converted Office output to direct editable Word output.
+- PDF guard blocks are now inserted only after complete `BT ... ET` text blocks, preserving individual text-block copying while placing noise inside whole-document extraction order.
+- Direct Word adds 1pt white text-layer guard paragraphs only between meaningful body paragraphs. `Font.Hidden` was investigated and rejected because normal Word full-text reads omit hidden runs, which would fail the user's whole-document-copy requirement.
+- Mixed guard strings now combine digits, letters, symbols, garbled-style characters, and, for Word, Chinese/replacement-character fragments. Every standard/strong run cycles across several character families.
+- Word guard layout is visually neutral on ordinary white documents; deep-colored/custom backgrounds can reveal white text, and the UI documents this boundary.
+- Regression added for mixed noise and real Word COM behavior: full text includes eight guard paragraphs, first visible paragraph copy is clean, guard is positioned before the last visible paragraph, formatting is standard text layer (not hidden), and reapplication is skipped.
+- Validation: `python full_debug_test.py` passed 235/235 and `python smoke_test.py` passed 14/14.
+- `package.bat` completed successfully; the refreshed packaged EXE launched responsive as PID 44724.

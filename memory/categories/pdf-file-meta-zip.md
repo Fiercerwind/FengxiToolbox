@@ -590,3 +590,34 @@
   - `python -m py_compile tools\fx_zip_core.py full_debug_test.py Fengxi_Toolbox.py` passed.
   - `python smoke_test.py` passed 14/14.
   - `python full_debug_test.py` passed 228/228.
+
+## 2026-07-11 Smart Recursive ZIP .DS_Store exclusion
+- Problem:
+  - macOS `.DS_Store` metadata files appeared beside folders in user archives.
+  - Smart Recursive ZIP treated them as normal files, stopped descending at that layer, and therefore skipped expected child-folder ZIP jobs.
+- Rule:
+  - `.DS_Store` is a compression-only ignored artifact, matched case-insensitively.
+  - It does not count as meaningful content for Smart Recursive planning, is not written into ZIP files, and is skipped when chosen directly.
+  - The original `.DS_Store` file remains untouched on disk.
+- Implementation and validation:
+  - `tools/fx_zip_core.py` adds `IGNORED_ZIP_ARTIFACT_NAMES` and applies the rule to planning and ZIP entry writing.
+  - `full_debug_test.py` adds `zip_smart_ignores_ds_store_artifacts`.
+  - `python -m py_compile tools\fx_zip_core.py full_debug_test.py Fengxi_Toolbox.py` passed.
+  - `python smoke_test.py` passed 14/14.
+  - `python full_debug_test.py` passed 229/229.
+
+## 2026-07-11 Complete Smart Recursive ZIP feature description
+- One canonical tuple, `ZIP_IMPLEMENTATION_HELP_LINES`, now documents the complete current ZIP implementation and feeds both the ZIP panel description and inline Batch ZIP tutorial.
+- Covered behavior includes:
+  - total, recursive, and smart planning;
+  - depth-first layer numbering and stable case-insensitive ordering;
+  - jobs for in-range visited, leaf, and empty directories;
+  - mixed-content boundaries, including boundaries before the minimum selected depth;
+  - descent through child-only or archive-plus-child directories;
+  - archive extension and `.DS_Store` exceptions;
+  - layer range semantics and output naming/location;
+  - exclusion of current task output archives to prevent nested generated ZIPs;
+  - valid archive reuse, invalid archive rebuild, and explicit rebuild policy;
+  - Deflate level 6, sequential execution, job-based progress, stop timing, per-job failure continuation, and source-data safety.
+- Regression `zip_help_documents_complete_implementation_rules` locks both documentation surfaces to the shared source and checks critical terms.
+- Validation: py_compile passed, smoke test 14/14, full debug test 230/230.

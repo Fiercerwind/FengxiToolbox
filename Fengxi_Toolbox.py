@@ -273,19 +273,24 @@ ZIP_MODE_LABEL_TEXTS = {
     "全层级递归压缩 (Total + Recursive)": "全层级递归压缩 (Total + Recursive)",
     "智能混合模式 (Smart Recursive) [推荐]": "智能混合模式 (Smart Recursive) [推荐]",
 }
-ZIP_MODE_DESCRIPTION_TEXT = (
-    "功能说明：\n"
-    "1. 仅压缩总文件：只在根目录生成一个包含所有内容的总压缩包。\n"
-    "2. 全层级递归：会扫描每一层文件夹；根目录包放在根目录内，其他目录包放在各自上一级。\n"
-    "3. 智能混合模式：先像递归一样每层生成压缩包，再按内容自动剪枝。\n"
-    "   • 若某一层同时包含文件和子文件夹，则该层会整体打包为一个压缩包。\n"
-    "   • 整体打包后，会停止继续为该层内部子文件夹单独生成压缩包。\n"
-    "   • 若某一层只有子文件夹、没有普通文件，则压缩这一层后继续向下递归扫描。\n"
-    "   • 若某一层只有压缩包文件和子文件夹，压缩包文件不阻止继续向下扫描。\n"
-    "   • 根目录若同时包含文件和子文件夹，则会直接跳过对子文件夹的单独压缩，最终只保留根目录总包。\n"
-    "4. 压缩层级范围：递归与智能模式共用；两个输入框都留空表示不限；起始填 2、结束填 4 表示只压第 2 到第 4 层。\n"
-    "5. 自动清理：生成前会自动删除同名的旧压缩包。"
+ZIP_IMPLEMENTATION_HELP_LINES = (
+    "1. 三种模式：总文件模式只生成根目录总包；全层级递归为选定层级内每个文件夹生成包；智能混合在递归规划基础上按内容边界停止下钻。",
+    "2. 智能扫描顺序：从输入根目录开始，根目录计为第 1 层，子文件夹依次为第 2、3 层；目录和文件均按名称忽略大小写排序，结果顺序稳定。",
+    "3. 智能建包规则：每个实际访问到且处于层级范围内的目录都会计划一个 ZIP；叶子目录和空目录也会建包，空目录结构会保留。",
+    "4. 混合边界：目录同时包含普通文件和子文件夹时，当前目录是边界；若当前层在范围内则压当前层，之后不再为其子文件夹单独建包。",
+    "5. 起始层之前的边界：即使混合边界早于所选起始层，也会立即停止该分支；因为当前层不在范围内，所以当前层和更深子目录都不会建包。",
+    "6. 继续下钻：目录只有子文件夹，或只有已有压缩包文件加子文件夹时，会在符合层级范围时压当前层，然后继续扫描子文件夹。",
+    "7. 已有压缩包不算普通文件：zip、rar、7z、tar、gz、bz2、xz、zst 不会触发混合边界；它们仍可作为普通内容进入父包，但本次计划生成的 ZIP 会自动排除，避免压缩包互相套入。",
+    "8. .DS_Store 例外：匹配时忽略大小写；它不参与智能边界判断、不写入任何生成的 ZIP、单独选中时直接跳过，但不会从源目录删除或修改。",
+    "9. 层级范围：两个输入框都留空表示不限；只填结束 4 表示第 1-4 层；起始 2、结束 4 表示只建第 2-4 层；达到结束层后不再下钻。",
+    "10. 输出位置：根目录递归/智能包写在根目录内并命名为“根目录名.zip”；子目录包写在该目录的上一级并命名为“子目录名.zip”。",
+    "11. 单文件与总包：单文件输出“原文件名_Backup.zip”；总文件模式输出“根目录名_Backup.zip”；目录包会包含正常文件与空目录，但排除 .DS_Store 和本次任务的计划输出包。",
+    "12. 已有同名包：复用模式仅跳过结构有效的 ZIP，适合断点续跑；旧包损坏时会重建；重建模式会先删除同名旧输出，再按当前规则重新压缩。",
+    "13. 压缩与执行：使用 ZIP Deflate、压缩级别 6；批量压缩按计划单线程逐包执行，进度以计划包数量计算，每个包都会记录源目录和输出位置。",
+    "14. 停止与失败：停止请求在两个压缩包之间响应，不会中断正在写入的单个大包；某个包失败后会记录失败项并继续后续任务，最终状态会标记失败。",
+    "15. 数据安全：压缩不会删除普通源文件或源目录；只有选择重建策略时，才会删除本次计划输出位置上的同名旧 ZIP。",
 )
+ZIP_MODE_DESCRIPTION_TEXT = "功能说明：新版智能压缩完整实现规则\n" + "\n".join(ZIP_IMPLEMENTATION_HELP_LINES)
 ZIP_ARCHIVE_POLICY_REUSE_LABEL = "复用已有压缩包（断点续跑）"
 ZIP_ARCHIVE_POLICY_REBUILD_LABEL = "删除旧包并重新压缩"
 ZIP_ARCHIVE_POLICY_LABELS = (ZIP_ARCHIVE_POLICY_REUSE_LABEL, ZIP_ARCHIVE_POLICY_REBUILD_LABEL)
@@ -355,6 +360,9 @@ INLINE_HELP_SECTIONS = (
         (
             "支持 PDF、Word、PPT 等文档批量添加文字或图片水印。",
             "智能加水印支持文件名跳过规则：可设置按开头或结尾匹配指定字符，默认兼容跳过文件名去扩展名后以“-”结尾的文件。",
+            "复制干扰层作用于 PDF、直接输出的 Word，以及先转成 PDF 的 Word/PPT。PDF 使用不可见文本；Word 使用 1pt 白色文本段落，在常规白底文档中不显色，深色/彩色页面可能看见白字。",
+            "干扰只放在段落/文本块之间：局部拖选一行正文或单独复制一段正文通常不受影响；全选整页、复制整份文件或直接提取文字时会混入干扰块。",
+            "干扰内容混合数字、字母、符号、乱码样式字符；Word 还会混入汉字片段。复制干扰层不能阻止截图后重新 OCR；轻度、标准、强力只控制每页干扰块数量，默认关闭。",
             "水印内容、字号、透明度、角度、跳过规则和输出策略都会自动记住上一次设置。",
             "这是稳定区功能，除非明确要求，不应改动核心加水印处理逻辑。",
         ),
@@ -399,15 +407,7 @@ INLINE_HELP_SECTIONS = (
     ),
     (
         "批量压缩",
-        (
-            "仅压缩总文件：只在根目录生成一个包含所有内容的总压缩包。",
-            "全层级递归：扫描每一层文件夹；根目录包放根目录内，其他目录包放上一级。",
-            "智能混合模式：先像递归一样每层生成压缩包；若某层同时含普通文件和子文件夹，则压该层后停止下钻。",
-            "若某层只有子文件夹，或只有压缩包文件加子文件夹，会先压这一层再继续向下扫描。",
-            "压缩层级范围：递归和智能模式共用；两个输入框都留空表示不限；起始填 2、结束填 4 表示只压第 2 到第 4 层。",
-            "生成前会自动删除同名旧压缩包，避免结果混乱。",
-            "这是稳定区功能，除非明确要求，不应改动核心批量压缩处理逻辑。",
-        ),
+        ZIP_IMPLEMENTATION_HELP_LINES,
     ),
     (
         "性能、进度与排障",
@@ -3240,7 +3240,16 @@ def create_watermark_packet(content, font_name, font_size, opacity, angle, color
     )
 
 
-def add_watermark_to_pdf(src, dst, watermark_packet, page_range="all", check_text=None, force_mode=False):
+def add_watermark_to_pdf(
+    src,
+    dst,
+    watermark_packet,
+    page_range="all",
+    check_text=None,
+    force_mode=False,
+    copy_guard=False,
+    copy_guard_strength="standard",
+):
     return _watermark_core_add_watermark_to_pdf(
         src,
         dst,
@@ -3248,6 +3257,8 @@ def add_watermark_to_pdf(src, dst, watermark_packet, page_range="all", check_tex
         page_range=_watermark_core_normalize_page_range(page_range),
         check_text=check_text,
         force_mode=force_mode,
+        copy_guard=copy_guard,
+        copy_guard_strength=copy_guard_strength,
     )
 
 
@@ -3263,6 +3274,8 @@ def add_watermark_to_word(
     page_range="all",
     force_mode=False,
     color=None,
+    copy_guard=False,
+    copy_guard_strength="standard",
 ):
     return _watermark_core_add_watermark_to_word(
         word_app,
@@ -3278,6 +3291,8 @@ def add_watermark_to_word(
         word_font_resolver=get_word_compatible_font_name,
         com_context_factory=_DisableWin32ComGenCache,
         color=color,
+        copy_guard=copy_guard,
+        copy_guard_strength=copy_guard_strength,
     )
 
 
@@ -8823,7 +8838,14 @@ def _get_preview_mode_detail(app, task_type):
                 )
             return f"{mode} -> {target_fmt} ({bitrate})"
         if task_type == "watermark":
-            return _get_feature_preview_mode_label(task_type, "default", "添加水印")
+            detail = _get_feature_preview_mode_label(task_type, "default", "添加水印")
+            if bool(_safe_var_get(app, "wm_copy_guard_enabled_var", False)):
+                strength = WATERMARK_COPY_GUARD_STRENGTH_LABELS.get(
+                    _get_watermark_copy_guard_strength(app),
+                    "标准",
+                )
+                detail += f" + 复制干扰层（{strength}）"
+            return detail
     except Exception:
         return ""
     return ""
@@ -9907,6 +9929,22 @@ def _safe_named_widget_set(app, name, value):
 
 
 WATERMARK_DEFAULT_COLOR = "#C0C0C0"
+WATERMARK_COPY_GUARD_STRENGTH_LABELS = {
+    "light": "轻度",
+    "standard": "标准",
+    "strong": "强力",
+}
+WATERMARK_COPY_GUARD_STRENGTH_VALUES = tuple(WATERMARK_COPY_GUARD_STRENGTH_LABELS)
+WATERMARK_COPY_GUARD_LABEL_TO_VALUE = {
+    label: value for value, label in WATERMARK_COPY_GUARD_STRENGTH_LABELS.items()
+}
+
+
+def _get_watermark_copy_guard_strength(app):
+    raw_value = str(_safe_var_get(app, "wm_copy_guard_strength_var", "标准") or "标准").strip()
+    if raw_value in WATERMARK_COPY_GUARD_STRENGTH_VALUES:
+        return raw_value
+    return WATERMARK_COPY_GUARD_LABEL_TO_VALUE.get(raw_value, "standard")
 WATERMARK_WORD_EXTS = {".doc", ".docx"}
 WATERMARK_PPT_EXTS = {".ppt", ".pptx"}
 WATERMARK_PDF_EXTS = {".pdf"}
@@ -10539,6 +10577,118 @@ def _patch_watermark_range_options_ui():
 _patch_watermark_range_options_ui()
 
 
+def _install_watermark_copy_guard_ui(app):
+    if getattr(app, "_fx_wm_copy_guard_ui_ready", False):
+        return getattr(app, "_fx_wm_copy_guard_frame", None)
+    text_widget = getattr(app, "wm_text", None)
+    parent = getattr(text_widget, "master", None)
+    if text_widget is None or parent is None:
+        return None
+
+    if getattr(app, "wm_copy_guard_enabled_var", None) is None:
+        app.wm_copy_guard_enabled_var = tkinter.BooleanVar(value=False)
+    if getattr(app, "wm_copy_guard_strength_var", None) is None:
+        app.wm_copy_guard_strength_var = tkinter.StringVar(value="标准")
+
+    frame = customtkinter.CTkFrame(parent, fg_color="transparent", height=76)
+    frame._fx_wm_copy_guard_module = True
+    try:
+        frame.pack_propagate(False)
+    except Exception:
+        pass
+
+    top_row = customtkinter.CTkFrame(frame, fg_color="transparent", height=34)
+    top_row.pack(fill="x")
+    top_row.pack_propagate(False)
+
+    strength_control = customtkinter.CTkSegmentedButton(
+        top_row,
+        values=[WATERMARK_COPY_GUARD_STRENGTH_LABELS[key] for key in WATERMARK_COPY_GUARD_STRENGTH_VALUES],
+        variable=app.wm_copy_guard_strength_var,
+        height=30,
+        font=customtkinter.CTkFont(size=11),
+    )
+
+    def refresh_state(*_args):
+        enabled = bool(_safe_var_get(app, "wm_copy_guard_enabled_var", False))
+        try:
+            strength_control.configure(state="normal" if enabled else "disabled")
+        except Exception:
+            pass
+        try:
+            _schedule_watermark_last_settings_persistence(app)
+        except Exception:
+            pass
+
+    switch = customtkinter.CTkSwitch(
+        top_row,
+        text="复制干扰层（PDF / Word）",
+        variable=app.wm_copy_guard_enabled_var,
+        command=refresh_state,
+        height=30,
+        font=customtkinter.CTkFont(size=12, weight="bold"),
+    )
+    switch.pack(side="left", fill="x", expand=True)
+    strength_control.pack(side="right", padx=(12, 0))
+
+    hint = customtkinter.CTkLabel(
+        frame,
+        text=(
+            "干扰只插在段落/文本块之间；局部复制一段通常不受影响，全选整页/整份或直接提取文字会混入不可见干扰。"
+            "PDF 使用不可见文本，Word 使用 1pt 白色文本；常规白底文档中不显色，深色/彩色页面可能看见白字，截图后重新 OCR 不受影响。"
+        ),
+        anchor="w",
+        justify="left",
+        wraplength=430,
+        font=customtkinter.CTkFont(size=11),
+        text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+    )
+    hint.pack(fill="x", pady=(4, 0))
+
+    try:
+        frame.pack(before=text_widget, fill="x", padx=24, pady=(0, 8))
+    except Exception:
+        frame.pack(fill="x", padx=24, pady=(0, 8))
+    app.wm_copy_guard_switch = switch
+    app.wm_copy_guard_strength_control = strength_control
+    app.wm_copy_guard_hint_label = hint
+    app._fx_wm_copy_guard_frame = frame
+    app._fx_wm_copy_guard_ui_ready = True
+    try:
+        app._fx_wm_copy_guard_enabled_trace_id = app.wm_copy_guard_enabled_var.trace_add(
+            "write",
+            refresh_state,
+        )
+    except Exception:
+        app._fx_wm_copy_guard_enabled_trace_id = None
+    refresh_state()
+    return frame
+
+
+def _patch_watermark_copy_guard_ui():
+    try:
+        original_init_watermark_ui = FengxiToolboxApp.init_watermark_ui
+    except Exception as exc:
+        _debug(f"watermark_copy_guard:patch_missing:{exc}")
+        return
+    if getattr(original_init_watermark_ui, "__fx_wm_copy_guard_patch__", False):
+        return
+
+    def patched_init_watermark_ui(self):
+        original_init_watermark_ui(self)
+        try:
+            _install_watermark_copy_guard_ui(self)
+        except Exception as exc:
+            _debug(f"watermark_copy_guard:init_error:{exc}")
+
+    patched_init_watermark_ui.__fx_wm_copy_guard_patch__ = True
+    FengxiToolboxApp.init_watermark_ui = patched_init_watermark_ui
+    _debug("patch_watermark_copy_guard:installed")
+
+
+_patch_watermark_copy_guard_ui()
+
+
 def _get_watermark_settings(app):
     text = _read_watermark_text_widget(app) or str(_safe_named_widget_get(app, "wm_text", "") or "")
     font_name = str(_safe_var_get(app, "selected_font", "") or "").strip()
@@ -10564,6 +10714,8 @@ def _get_watermark_settings(app):
         "force_mode": overwrite_mode == "force",
         "convert_pdf": bool(_safe_var_get(app, "wm_convert_pdf", False)),
         "delete_source": bool(_safe_var_get(app, "wm_delete_var", False)),
+        "copy_guard_enabled": bool(_safe_var_get(app, "wm_copy_guard_enabled_var", False)),
+        "copy_guard_strength": _get_watermark_copy_guard_strength(app),
     }
 
 
@@ -10590,6 +10742,8 @@ def _watermark_process_pdf(src, dst, settings):
         page_range=settings["page_range"],
         check_text=settings["text"],
         force_mode=settings["force_mode"],
+        copy_guard=settings.get("copy_guard_enabled", False),
+        copy_guard_strength=settings.get("copy_guard_strength", "standard"),
     )
 
 
@@ -10606,6 +10760,8 @@ def _watermark_process_word(src, dst, settings, word_app):
         page_range=settings["page_range"],
         force_mode=settings["force_mode"],
         color=settings.get("color", WATERMARK_DEFAULT_COLOR),
+        copy_guard=settings.get("copy_guard_enabled", False),
+        copy_guard_strength=settings.get("copy_guard_strength", "standard"),
     )
 
 
@@ -11017,6 +11173,16 @@ def _run_watermark_task(app, input_value):
         os.makedirs(output_root, exist_ok=True)
 
     _watermark_log(app, logs, f"[批量水印] 将处理 {total} 个文件 | 输出策略：{_get_output_strategy_label(actual_strategy)}")
+    if settings.get("copy_guard_enabled"):
+        strength_label = WATERMARK_COPY_GUARD_STRENGTH_LABELS.get(
+            settings.get("copy_guard_strength", "standard"),
+            "标准",
+        )
+        _watermark_log(
+            app,
+            logs,
+            f"[复制干扰层] 已开启（{strength_label}）| 应用于 PDF、直接输出的 Word，以及转成 PDF 的 Word/PPT；默认显示和打印不变。",
+        )
     if rule_skipped_files:
         copy_hint = "会复制到输出文件夹" if _get_watermark_copy_skipped_to_output(app) else "仅跳过不复制"
         _watermark_log(app, logs, f"[批量水印] 文件名规则跳过 {len(rule_skipped_files)} 个文件 | {copy_hint}")
@@ -11632,6 +11798,11 @@ def _capture_preset_settings(app, category=None):
                 "wm_skip_word_type_var": bool(_safe_var_get(app, "wm_skip_word_type_var", False)),
                 "wm_skip_ppt_type_var": bool(_safe_var_get(app, "wm_skip_ppt_type_var", False)),
                 "wm_color_var": _get_watermark_color(app),
+                "wm_copy_guard_enabled_var": bool(_safe_var_get(app, "wm_copy_guard_enabled_var", False)),
+                "wm_copy_guard_strength_var": WATERMARK_COPY_GUARD_STRENGTH_LABELS.get(
+                    _get_watermark_copy_guard_strength(app),
+                    "标准",
+                ),
                 "slider_size": _safe_named_widget_get(app, "slider_size", 60),
                 "slider_opacity": _safe_named_widget_get(app, "slider_opacity", 0.08),
                 "slider_angle": _safe_named_widget_get(app, "slider_angle", 45),
@@ -11770,7 +11941,14 @@ def _apply_preset_settings(app, preset, switch_task=True):
 
     if category == "watermark":
         _safe_named_widget_set(app, "wm_text", settings.get("wm_text", ""))
-        for name in ("selected_font", "wm_range_var", "wm_overwrite_var", "wm_skip_name_position_var", "wm_skip_name_text_var"):
+        for name in (
+            "selected_font",
+            "wm_range_var",
+            "wm_overwrite_var",
+            "wm_skip_name_position_var",
+            "wm_skip_name_text_var",
+            "wm_copy_guard_strength_var",
+        ):
             if name in settings:
                 _safe_var_set(app, name, settings.get(name))
         if "wm_color_var" in settings:
@@ -11784,6 +11962,7 @@ def _apply_preset_settings(app, preset, switch_task=True):
             "wm_skip_pdf_type_var",
             "wm_skip_word_type_var",
             "wm_skip_ppt_type_var",
+            "wm_copy_guard_enabled_var",
         ):
             if name in settings:
                 _safe_var_set(app, name, bool(settings.get(name)))
@@ -12009,6 +12188,8 @@ def _install_watermark_last_settings_memory(app):
         "wm_skip_word_type_var",
         "wm_skip_ppt_type_var",
         "wm_color_var",
+        "wm_copy_guard_enabled_var",
+        "wm_copy_guard_strength_var",
         "output_strategy_var",
     )
     trace_ids = []

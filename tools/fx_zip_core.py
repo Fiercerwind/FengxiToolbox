@@ -28,6 +28,7 @@ ARCHIVE_FILE_EXTS = {
     ".xz",
     ".zst",
 }
+IGNORED_ZIP_ARTIFACT_NAMES = {".ds_store"}
 
 
 def normalize_zip_mode(mode):
@@ -153,6 +154,12 @@ def _is_archive_file(path):
     return Path(path).suffix.lower() in ARCHIVE_FILE_EXTS
 
 
+def _is_ignored_zip_artifact(path):
+    """Return whether a known metadata artifact must be excluded from ZIP work."""
+
+    return Path(path).name.casefold() in IGNORED_ZIP_ARTIFACT_NAMES
+
+
 def _within_depth_range(depth, depth_range):
     min_depth, max_depth = depth_range
     return depth >= min_depth and (max_depth is None or depth <= max_depth)
@@ -170,6 +177,8 @@ def plan_zip_archives(input_path, mode=ZIP_MODE_TOTAL, max_depth=None):
     mode = normalize_zip_mode(mode)
     depth_range = normalize_zip_depth_range(max_depth)
     if source.is_file():
+        if _is_ignored_zip_artifact(source):
+            return []
         return [
             {
                 "source": source,
@@ -228,7 +237,11 @@ def plan_zip_archives(input_path, mode=ZIP_MODE_TOTAL, max_depth=None):
             return
         child_dirs = _sorted_child_dirs(folder)
         child_files = _sorted_child_files(folder)
-        meaningful_files = [item for item in child_files if not _is_archive_file(item)]
+        meaningful_files = [
+            item
+            for item in child_files
+            if not _is_archive_file(item) and not _is_ignored_zip_artifact(item)
+        ]
         if _within_depth_range(depth, depth_range):
             jobs.append(
                 {
@@ -277,6 +290,8 @@ def _iter_directory_zip_entries(root, exclude_paths):
 
         for filename in files:
             file_path = current_path / filename
+            if _is_ignored_zip_artifact(file_path):
+                continue
             if _is_excluded(file_path, exclude_paths):
                 continue
             rel_file = file_path.relative_to(root).as_posix()

@@ -449,3 +449,44 @@
   - `_watermark_make_pdf_packet(...)` can rebuild the packet from precomputed bytes for each worker.
 - Keep Word/PPT watermark and Office conversion paths serial. Office COM remains the risky part for multi-threading.
 - Regression anchor: `watermark_pdf_parallel_executor`.
+
+## 2026-07-11 PDF copy-interference layer
+- Added an optional `复制干扰层（PDF / Word）` module to Batch Watermark, with `轻度 / 标准 / 强力` strengths and default-off behavior.
+- Research references:
+  - `Riyoway/pdf-hidden-text` demonstrates ReportLab text rendering mode 3 merged through pypdf: https://github.com/Riyoway/pdf-hidden-text
+  - Evaluated the surrounding PDF ecosystem through `pymupdf/PyMuPDF`, `pikepdf/pikepdf`, `py-pdf/pypdf`, and `borb-pdf/borb`.
+- Implementation:
+  - Reuses the existing ReportLab + pypdf dependencies and the bundled pikepdf backend; no new runtime dependency was added.
+  - Inserts 4, 8, or 14 mixed-character text blocks per page for light, standard, or strong mode.
+  - Interleaves blocks after complete PDF `BT ... ET` text blocks, so whole-page or whole-document extraction encounters interference during the body text rather than only after the final line. Their coordinates remain on the far-left page edge so ordinary selection/copy of a text block stays clean.
+  - Applies to every PDF page independently of the visible watermark page range.
+  - Direct PDF input is supported. Direct editable Word inserts 1pt white guard paragraphs only between body paragraphs, so ordinary full-document copy retains the guard while copying one visible paragraph does not cross it. Word/PPT converted to PDF uses the PDF guard.
+  - Adds `/FXCopyGuard = Fengxi Copy Guard v1` metadata. An already visibly watermarked PDF can be upgraded with only the missing guard; guarded PDFs are skipped unless force mode is enabled.
+- Boundary:
+  - PDF display, print, and rendered page pixels are unchanged.
+  - This version targets direct PDF text-layer extraction. Screenshots, rasterization, or re-OCR discard the invisible text and are not prevented.
+- Regression coverage:
+  - `pdf_copy_guard_whole_copy_noise_local_line_clean_visual_unchanged`
+  - `pdf_copy_guard_upgrades_existing_watermark_without_duplicate_visible_text`
+  - `watermark_copy_guard_module_ui_and_settings`
+  - `watermark_pdf_parallel_executor` also verifies copy guard in parallel outputs.
+- Validation: `python -m py_compile ...` passed; `python full_debug_test.py` passed 233/233; `python smoke_test.py` passed 14/14.
+
+## 2026-07-11 Word paragraph-boundary and mixed-character guard
+- User required the guard to preserve normal single-paragraph copying while corrupting whole-document copying for both PDF and Word.
+- PDF now uses complete text-block boundaries (`BT ... ET`) instead of individual text-show instructions; PDFs do not encode reliable semantic paragraphs, so this is the safe non-invasive boundary.
+- Direct Word output now inserts guard paragraphs only between meaningful main-body paragraphs. A Word `Font.Hidden` implementation was rejected after real COM verification showed that Word omits hidden runs from normal whole-document text reads/copy.
+- Word guard paragraphs are standard text-layer runs formatted as 1pt white text with exact 1pt line spacing. This preserves full-document extraction/copy while remaining visually neutral on ordinary white documents; colored or dark pages can reveal white text and are documented in the UI.
+- Guard strings are unique mixed noise. PDF uses stable Latin/garbled-style fragments plus digits and symbols for built-in font compatibility; Word additionally uses Chinese fragments and replacement/mojibake-style characters.
+- Regression coverage: `copy_guard_mixed_noise_character_families` and `word_copy_guard_between_paragraphs_full_copy_noises_local_copy_clean`, alongside the existing PDF/interleaving/parallel tests.
+- Validation: `python full_debug_test.py` passed 235/235; `python smoke_test.py` passed 14/14.
+
+## 2026-07-11 Copy-interference stream-order correction
+- User reported that whole-page copy could still obtain all visible content before the appended interference text.
+- Root cause: pypdf `merge_page(...)` appended the invisible layer as a final page content stream, and PDF extraction follows content-stream order rather than visual coordinates.
+- Fix in `tools/fx_watermark_core.py`:
+  - Writes the existing visible-watermark result first, then uses the bundled `pikepdf` backend to parse each page content stream.
+  - Inserts invisible left-edge blocks after evenly distributed `Tj` / `TJ` text-show instructions, preserving the page's images, vector graphics, tables, and formulas without rasterizing them.
+  - On text-heavy pages, the first block now occurs before the final visible line. Pages with no text still receive a guard layer.
+- Regression: `pdf_copy_guard_whole_copy_noise_local_line_clean_visual_unchanged` now creates a 12-line single-page PDF and requires the first noise block to be between the first and final visible lines, while a clipped visible line remains clean and rendered pixels remain identical.
+- Validation: failing baseline reproduced first; after the fix `python full_debug_test.py` passed 233/233 and `python smoke_test.py` passed 14/14.

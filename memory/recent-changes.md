@@ -1,5 +1,30 @@
 # 最近变更
 
+## 2026-07-11 20:43:28 | watermark-and-remove
+- 摘要：复制干扰层支持 Word 段落边界与混合乱码
+- 文件：tools\fx_watermark_core.py, Fengxi_Toolbox.py, full_debug_test.py, memory\categories\watermark-and-remove.md, memory\debug-status.md
+- 说明：PDF 仅在完整文本块间插入；直接 Word 在正文段落间插入 1pt 白色文本层干扰，全文复制会混入，单段复制保持干净。干扰混合数字、字母、符号、乱码样式字符，Word 额外混入汉字。完整回归 235/235，烟雾测试 14/14。
+
+## 2026-07-11 10:25:02 | watermark-and-remove
+- 摘要：修复复制干扰层正文穿插顺序
+- 文件：tools\fx_watermark_core.py, Fengxi_Toolbox.py, full_debug_test.py, memory\categories\watermark-and-remove.md, memory\debug-status.md
+- 说明：改为在 PDF 正文文本显示指令之间插入不可见左侧干扰块，整页/全文提取会在正文中段出现干扰，局部单行复制与渲染保持不变；完整回归 233/233，烟雾测试 14/14。
+
+## 2026-07-11 09:56:47 | watermark-and-remove
+- 摘要：新增批量水印 PDF 复制干扰层
+- 文件：Fengxi_Toolbox.py, tools\fx_watermark_core.py, full_debug_test.py, memory\categories\watermark-and-remove.md, memory\debug-status.md
+- 说明：新增轻度/标准/强力不可见文本干扰；普通单行复制保持干净，整页/整篇文本提取会夹带干扰；视觉和打印不变；支持 PDF 及转 PDF 的 Word/PPT；完整回归 233/233，烟雾测试 14/14。
+
+## 2026-07-11 08:47:44 | pdf_file
+- 摘要：Document complete Smart Recursive ZIP behavior in-app
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/debug-status.md, memory/categories/pdf-file-meta-zip.md
+- 说明：Added one canonical 15-rule ZIP implementation description used by both the ZIP panel and inline tutorial. Covers planning, depth/boundary semantics, archive and .DS_Store exceptions, output rules, policies, execution, failure/stop behavior, and source safety. Validation: py_compile, smoke 14/14, full debug 230/230.
+
+## 2026-07-11 01:38:20 | pdf_file
+- 摘要：Ignore .DS_Store in Smart Recursive ZIP
+- 文件：tools/fx_zip_core.py, full_debug_test.py, memory/debug-status.md, memory/categories/pdf-file-meta-zip.md
+- 说明：Treat .DS_Store as a case-insensitive compression-only ignored artifact: it cannot stop smart recursion, is omitted from archives, and is skipped as a direct input without deleting the source. Validation: py_compile, smoke_test 14/14, full_debug_test 229/229.
+
 ## 2026-07-05 21:53:50 | pdf_file
 - 摘要：Fix Smart Recursive ZIP mixed-content depth boundary
 - 文件：tools/fx_zip_core.py, full_debug_test.py, memory/debug-status.md, memory/categories/pdf-file-meta-zip.md
