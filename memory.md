@@ -28,6 +28,7 @@
 - 备份与记忆工具：`tools/fx_workspace_tools.py`
 - OCR 引擎模块：`tools/fx_pdf_ocr.py`
 - GitHub 自动同步脚本：`tools/fx_git_sync.ps1`
+- GitHub 打包计数同步脚本：`tools/fx_package_sync.ps1`（每成功打包 5 次同步一次）
 - 版本发布脚本：`tools/fx_release_version.ps1`
 - 当前稳定区：批量压缩、添加水印
 - 当前新增 PDF 能力：OCR 搜索版 PDF

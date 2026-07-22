@@ -98,4 +98,12 @@ echo Build completed.
 echo EXE: %APP_ROOT%\%APP_NAME%.exe
 echo =======================================================
 echo.
+
+echo Recording successful package for GitHub sync...
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\fx_package_sync.ps1" -RepoRoot "%~dp0"
+if %errorlevel% neq 0 (
+    color 0E
+    echo [WARNING] Package completed, but the GitHub sync counter could not be updated.
+)
+echo.
 if not defined FX_NO_PAUSE pause

@@ -20,8 +20,15 @@
 - 默认自动提交信息前缀：`chore(sync): auto backup`
 - 计划任务注册脚本：`tools/register_github_sync_task.ps1`
 - 计划任务移除脚本：`tools/unregister_github_sync_task.ps1`
-- 2026-05-02 已在当前机器成功注册计划任务 `FengxiToolbox Auto Sync to GitHub`
-- 当前默认计划：每天 `21:30` 自动同步一次
+- 2026-05-02 曾注册每日 `21:30` 计划任务 `FengxiToolbox Auto Sync to GitHub`；该任务已于 2026-07-22 移除，不再作为默认同步方式。
+
+## 2026-07-22 按打包次数同步 GitHub
+- 用户明确要求：从本次 GitHub 同步完成后开始，后续每成功打包 `5` 次才自动提交并推送一次 GitHub。
+- `package.bat` 在构建完全成功后调用 `tools/fx_package_sync.ps1`；构建失败不计数。
+- 计数文件位于本机 `%LOCALAPPDATA%\FengxiToolbox\package-sync-state.json`，不写入仓库、不随 Git 提交；本次同步后基线从 `0/5` 开始。
+- 第 5 次成功打包会调用 `tools/fx_git_sync.ps1` 执行提交、拉取变基和推送；同步成功后计数重置为 `0/5`。
+- 若 GitHub 同步失败，计数保留，下一次成功打包会继续重试，避免遗漏已完成的 5 次打包。
+- 原每日计划任务 `FengxiToolbox Auto Sync to GitHub` 已移除，避免定时任务绕开此规则。
 
 ## 版本发布
 - 版本标签发布脚本：`tools/fx_release_version.ps1`
