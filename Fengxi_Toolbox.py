@@ -10102,6 +10102,11 @@ WATERMARK_COPY_GUARD_STRENGTH_LABELS = {
     "standard": "标准",
     "strong": "强力",
 }
+WATERMARK_COPY_GUARD_STRENGTH_HINTS = {
+    "light": "轻度：PDF 每页 4 个；Word 每个文件 4 段。",
+    "standard": "标准：PDF 每页 8 个；Word 每个文件 8 段。",
+    "strong": "强力：PDF 每页 14 个；Word 每个文件 14 段。",
+}
 WATERMARK_COPY_GUARD_STRENGTH_VALUES = tuple(WATERMARK_COPY_GUARD_STRENGTH_LABELS)
 WATERMARK_COPY_GUARD_LABEL_TO_VALUE = {
     label: value for value, label in WATERMARK_COPY_GUARD_STRENGTH_LABELS.items()
@@ -10784,6 +10789,10 @@ def _install_watermark_copy_guard_ui(app):
         except Exception:
             pass
         try:
+            refresh_hint()
+        except Exception:
+            pass
+        try:
             _schedule_watermark_last_settings_persistence(app)
         except Exception:
             pass
@@ -10801,10 +10810,7 @@ def _install_watermark_copy_guard_ui(app):
 
     hint = customtkinter.CTkLabel(
         frame,
-        text=(
-            "干扰只插在段落/文本块之间；局部复制一段通常不受影响，全选整页/整份或直接提取文字会混入不可见干扰。"
-            "PDF 使用不可见文本，Word 使用 1pt 白色文本；常规白底文档中不显色，深色/彩色页面可能看见白字，截图后重新 OCR 不受影响。"
-        ),
+        text="",
         anchor="w",
         justify="left",
         wraplength=430,
@@ -10812,6 +10818,20 @@ def _install_watermark_copy_guard_ui(app):
         text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
     )
     hint.pack(fill="x", pady=(4, 0))
+
+    def refresh_hint(*_args):
+        strength = _get_watermark_copy_guard_strength(app)
+        strength_hint = WATERMARK_COPY_GUARD_STRENGTH_HINTS.get(
+            strength,
+            WATERMARK_COPY_GUARD_STRENGTH_HINTS["standard"],
+        )
+        hint.configure(
+            text=(
+                "PDF 插入不可见文本块，Word 在段间插入 1pt 白色乱码段落；"
+                "干扰块含字母、数字、符号和乱码。单段复制正常，跨段或整份复制会混入干扰。"
+                f"{strength_hint}"
+            )
+        )
 
     try:
         frame.pack(before=text_widget, fill="x", padx=24, pady=(0, 8))
@@ -10829,6 +10849,13 @@ def _install_watermark_copy_guard_ui(app):
         )
     except Exception:
         app._fx_wm_copy_guard_enabled_trace_id = None
+    try:
+        app._fx_wm_copy_guard_strength_trace_id = app.wm_copy_guard_strength_var.trace_add(
+            "write",
+            refresh_state,
+        )
+    except Exception:
+        app._fx_wm_copy_guard_strength_trace_id = None
     refresh_state()
     return frame
 
