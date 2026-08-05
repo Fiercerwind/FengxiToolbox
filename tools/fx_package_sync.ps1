@@ -2,7 +2,7 @@
 param(
     [string]$RepoRoot = "",
     [ValidateRange(1, 100)]
-    [int]$SyncEvery = 5,
+    [int]$SyncEvery = 3,
     [string]$StatePath = ""
 )
 

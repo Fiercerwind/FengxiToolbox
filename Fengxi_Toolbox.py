@@ -945,6 +945,46 @@ LOG_DISPLAY_ICON_REPLACEMENTS = {
     "⏱️": "[时间]",
     "🕵️": "[隐私]",
 }
+LOG_MOJIBAKE_ICON_REPLACEMENTS = {
+    "\u9983\u6537": "[检索]",
+    "\u9983\u6546": "[提示]",
+}
+LOG_MOJIBAKE_MARKERS = (
+    "\u93b5\ue0a3\u5f3f",
+    "\u59dd\uff45\u6e6a",
+    "\u95c8\u70b4\u6309",
+    "\u93b5\u5f52\u567a",
+)
+
+
+def _repair_mojibake_log_text(text):
+    """Repair legacy GBK/UTF-8 mojibake while leaving normal Chinese untouched."""
+
+    icon_placeholders = {}
+    for source, replacement in LOG_MOJIBAKE_ICON_REPLACEMENTS.items():
+        placeholder = f"__FX_LOG_ICON_{len(icon_placeholders)}__"
+        if source in text:
+            text = text.replace(source, placeholder)
+            icon_placeholders[placeholder] = replacement
+    if not any(marker in text for marker in LOG_MOJIBAKE_MARKERS):
+        return _restore_log_icon_placeholders(text, icon_placeholders)
+
+    original_marker_count = sum(text.count(marker) for marker in LOG_MOJIBAKE_MARKERS)
+    for encoding in ("gb18030", "gbk"):
+        try:
+            repaired = text.encode(encoding).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        repaired_marker_count = sum(repaired.count(marker) for marker in LOG_MOJIBAKE_MARKERS)
+        if repaired_marker_count < original_marker_count and "\ufffd" not in repaired:
+            return _restore_log_icon_placeholders(repaired, icon_placeholders)
+    return _restore_log_icon_placeholders(text, icon_placeholders)
+
+
+def _restore_log_icon_placeholders(text, placeholders):
+    for placeholder, replacement in placeholders.items():
+        text = text.replace(placeholder, replacement)
+    return text
 
 
 def _normalize_log_display_text(message):
@@ -953,6 +993,7 @@ def _normalize_log_display_text(message):
     text = str(message or "")
     for source, replacement in LOG_DISPLAY_ICON_REPLACEMENTS.items():
         text = text.replace(source, replacement)
+    text = _repair_mojibake_log_text(text)
     return text.replace("\ufe0f", "")
 
 
@@ -4977,6 +5018,43 @@ def _set_task_result_finished(result, status, message="", detail="", error="", s
     return result
 
 
+def _schedule_task_completion_notice(app, result):
+    """Show one completion notice after a task is finalized successfully."""
+
+    if app is None or not isinstance(result, dict):
+        return
+    if str(result.get("status") or "").strip().lower() != "success":
+        return
+    if result.get("_fx_completion_notice_scheduled"):
+        return
+    result["_fx_completion_notice_scheduled"] = True
+
+    task_label = _get_feature_label(result.get("task_type"), fallback="任务")
+    success_count = int(result.get("success_count") or 0)
+    skipped_count = int(result.get("skipped_count") or 0)
+    failed_count = int(result.get("failed_count") or 0)
+    detail_lines = [f"{task_label}已完成。", f"成功处理：{success_count} 个文件"]
+    if skipped_count:
+        detail_lines.append(f"跳过：{skipped_count} 个文件")
+    if failed_count:
+        detail_lines.append(f"失败：{failed_count} 个文件")
+    output_root = str(result.get("output_root") or "").strip()
+    if output_root:
+        detail_lines.extend(["", f"输出位置：{output_root}"])
+    message = "\n".join(detail_lines)
+
+    def show_notice():
+        try:
+            tkinter.messagebox.showinfo("任务完成", message, parent=app)
+        except Exception as exc:
+            _debug(f"task_completion_notice:error:{exc}")
+
+    try:
+        app.after(0, show_notice)
+    except Exception:
+        show_notice()
+
+
 def _task_result_snapshot(result):
     if not isinstance(result, dict):
         return {}
@@ -6014,7 +6092,7 @@ def _run_remove_wm_pdf_roundtrip(app, pdf_files, input_folder, output_folder, mo
                         pass
                 if pdf_status != "SUCCESS" or not os.path.exists(dst_pdf):
                     try:
-                        app.log("馃敆 [PDF鍘绘按鍗癩 Word 瀵煎嚭 PDF 鍏煎妯″紡閲嶈瘯涓?..")
+                        app.log("[提示] [PDF去水印] Word 导出 PDF 兼容模式重试中...")
                     except Exception:
                         pass
                     pdf_status = _export_word_docx_to_pdf_safely(str(chosen_docx), dst_pdf)
@@ -10449,6 +10527,21 @@ def _get_watermark_copy_guard_strength(app):
 WATERMARK_WORD_EXTS = {".doc", ".docx"}
 WATERMARK_PPT_EXTS = {".ppt", ".pptx"}
 WATERMARK_PDF_EXTS = {".pdf"}
+WATERMARK_SUPPORTED_EXTS = WATERMARK_PDF_EXTS | WATERMARK_WORD_EXTS | WATERMARK_PPT_EXTS
+
+
+def _split_watermark_supported_files(files):
+    """Partition inputs before they enter watermark processing or checkpoint work."""
+
+    supported = []
+    unsupported = []
+    for item in files or []:
+        try:
+            suffix = Path(str(item)).suffix.lower()
+        except Exception:
+            suffix = ""
+        (supported if suffix in WATERMARK_SUPPORTED_EXTS else unsupported).append(item)
+    return supported, unsupported
 
 
 def _normalize_watermark_color(value, default=WATERMARK_DEFAULT_COLOR):
@@ -10525,6 +10618,8 @@ def _watermark_status_kind(status):
 def _watermark_should_preserve_original(status, suffix=""):
     text = str(status or "").strip().lower()
     if text.startswith("skip:protected") or "protected pdf requires password" in text:
+        return True
+    if "protected word document requires password" in text:
         return True
     if text.startswith("skip:damaged word source") or "damaged word source" in text:
         return True
@@ -12058,19 +12153,20 @@ def _run_watermark_task(app, input_value):
                 pass
         app._fx_wm_filename_rule_loading = previous_rule_loading
     all_files, type_skipped_files = _filter_watermark_files_by_type_skip(app, all_files)
+    all_files, unsupported_skipped_files = _split_watermark_supported_files(all_files)
     known_file_keys = set()
-    for item in list(all_files) + list(rule_skipped_files) + list(type_skipped_files):
+    for item in list(all_files) + list(rule_skipped_files) + list(type_skipped_files) + list(unsupported_skipped_files):
         item_key = _normalize_watermark_file_key(item)
         if item_key:
             known_file_keys.add(item_key)
-    unsupported_skipped_files = []
     # A second full directory walk is only necessary when skipped unsupported
     # files must be copied to the result folder.  Most watermark jobs do not
     # enable that option, so avoid scanning a large tree twice before work starts.
     if _get_watermark_copy_skipped_to_output(app):
         for item in _collect_watermark_input_files(normalized_input):
             item_key = _normalize_watermark_file_key(item)
-            if item_key and item_key not in known_file_keys:
+            suffix = Path(_normalize_input_path_value(item)).suffix.lower()
+            if item_key and item_key not in known_file_keys and suffix not in WATERMARK_SUPPORTED_EXTS:
                 unsupported_skipped_files.append(str(Path(_normalize_input_path_value(item))))
     checkpoint = _watermark_checkpoint_context(
         normalized_input,
@@ -12134,8 +12230,8 @@ def _run_watermark_task(app, input_value):
         copy_hint = "会复制到输出文件夹" if _get_watermark_copy_skipped_to_output(app) else "仅跳过不复制"
         _watermark_log(app, logs, f"[批量水印] 按文件类型跳过 {len(type_skipped_files)} 个文件 | 类型：{', '.join(skipped_groups)} | {copy_hint}")
     if unsupported_skipped_files:
-        copy_hint = "浼氬鍒跺埌杈撳嚭鏂囦欢澶?" if _get_watermark_copy_skipped_to_output(app) else "浠呰烦杩囦笉澶嶅埗"
-        _watermark_log(app, logs, f"[鎵归噺姘村嵃] 闈炴按鍗板彲澶勭悊鏂囦欢璺宠繃 {len(unsupported_skipped_files)} 涓枃浠?| {copy_hint}")
+        copy_hint = "会复制到输出文件夹" if _get_watermark_copy_skipped_to_output(app) else "仅跳过不复制"
+        _watermark_log(app, logs, f"[批量水印] 非水印可处理文件跳过 {len(unsupported_skipped_files)} 个文件 | {copy_hint}")
     if _watermark_pdf_parallel_enabled(app, all_files, settings, is_single_input):
         return _run_watermark_pdf_parallel_task(
             app,
@@ -15272,26 +15368,26 @@ def _fit_queue_bottom_action_widths(app, action_row=None):
     if available >= 1160:
         widths = {
             "btn_run": 220,
-            "btn_stop": 178,
+            "btn_stop": 132,
             "wm_clear_checkpoint_button": 116,
             "btn_queue_add": 96,
-            "btn_queue_panel": 116,
+            "btn_queue_panel": 124,
         }
     elif available >= 980:
         widths = {
             "btn_run": 198,
-            "btn_stop": 162,
+            "btn_stop": 122,
             "wm_clear_checkpoint_button": 106,
             "btn_queue_add": 92,
-            "btn_queue_panel": 112,
+            "btn_queue_panel": 120,
         }
     else:
         widths = {
             "btn_run": 178,
-            "btn_stop": 148,
+            "btn_stop": 114,
             "wm_clear_checkpoint_button": 98,
             "btn_queue_add": 88,
-            "btn_queue_panel": 108,
+            "btn_queue_panel": 116,
         }
     for attr, width in widths.items():
         widget = getattr(app, attr, None)
@@ -15540,13 +15636,14 @@ def _patch_runtime_progress_reporting():
                 except Exception as exc:
                     _debug(f"patch_runtime_progress:restore_error:{exc}")
             try:
-                _infer_task_result_from_context(
+                finalized_result = _infer_task_result_from_context(
                     self,
                     input_folder,
                     task_type,
                     return_value=result,
                     logs=getattr(self, "_fx_last_task_logs", None),
                 )
+                _schedule_task_completion_notice(self, finalized_result)
             except Exception as exc:
                 _debug(f"patch_runtime_progress:finalize_result_error:{exc}")
             _fx_background_guard_end(self, guard_reason)

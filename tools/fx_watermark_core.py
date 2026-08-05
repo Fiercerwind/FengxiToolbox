@@ -17,6 +17,7 @@ from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
 from reportlab.lib.pagesizes import A4
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
@@ -236,17 +237,26 @@ def create_watermark_packet(
 
 def _copy_guard_noise_lines(strength, page_index, document_token, allow_unicode=False):
     block_count = COPY_GUARD_STRENGTH_BLOCKS[normalize_copy_guard_strength(strength)]
-    latin_fragments = ("A9x", "Ã¥Â­Â—", "Â¤Q", "xY7", "â€¢", "Z_9")
-    unicode_fragments = ("锟斤拷", "寮€", "页码", "�", "文档", "æ–‡")
+    ascii_fragments = ("A9x", "xY7", "Z_9", "Q2", "7K#", "m4@")
+    # Keep these as escapes so the source file remains encoding-independent.
+    # They intentionally resemble common mojibake, rather than meaningful prose.
+    unicode_fragments = (
+        "\u951f\u65a4\u62f7",  # 锟斤拷
+        "\u70eb\u70eb\u70eb",  # 烫烫烫
+        "\u6d63\u20ac",  # 浠€
+        "\u93c2\u56e6\u6b22",  # 鏂囦欢
+        "\u5bee\u20ac",  # 寮€
+        "\u93bb\u612e\u305a",  # 鎻愮ず
+    )
     lines = []
     for slot in range(block_count):
         seed = f"{document_token}:{page_index}:{slot}".encode("utf-8")
         first = hashlib.sha256(seed).hexdigest().upper()
         second = hashlib.sha256(seed + b":fx-copy-guard").hexdigest().upper()
-        fragments = unicode_fragments if allow_unicode else latin_fragments
-        # Cycle the visible character family by slot so every normal/strong guard
-        # reliably contains multiple kinds of noise, not merely random hex output.
-        fragment = fragments[slot % len(fragments)]
+        # Alternate families so every strength mixes Chinese mojibake with the
+        # existing ASCII/digit/symbol noise. Hashing picks the actual fragment.
+        fragments = unicode_fragments if slot % 2 else ascii_fragments
+        fragment = fragments[int(first[4:8], 16) % len(fragments)]
         separator = "|#@/"[int(first[2:4], 16) % 4]
         lines.append(f"{COPY_GUARD_TEXT_PREFIX}{slot:02d}{separator}{fragment}{first}{separator}{second[:24]}")
     return lines
@@ -261,12 +271,17 @@ def create_copy_guard_packet(page_size, strength="standard", page_index=0, docum
     except Exception:
         page_width, page_height = A4
     token = str(document_token or secrets.token_hex(16))
-    lines = _copy_guard_noise_lines(strength, page_index, token)
+    lines = _copy_guard_noise_lines(strength, page_index, token, allow_unicode=True)
 
     packet = io.BytesIO()
     pdf = canvas.Canvas(packet, pagesize=(page_width, page_height))
     text_obj = pdf.beginText()
-    text_obj.setFont("Helvetica", 1.0)
+    try:
+        pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+        guard_font = "STSong-Light"
+    except Exception:
+        guard_font = "Helvetica"
+    text_obj.setFont(guard_font, 1.0)
     text_obj.setTextRenderMode(3)
     top_margin = min(12.0, max(2.0, page_height * 0.02))
     available_height = max(1.0, page_height - (top_margin * 2.0))
@@ -327,12 +342,28 @@ def _inject_copy_guard_into_pikepdf(pdf, pikepdf, strength, document_token):
     """Add guard instructions to an already-open pikepdf document."""
 
     text_show_operators = {"Tj", "TJ", "'", '"'}
+    descendant_font = pikepdf.Dictionary(
+        {
+            "/Type": pikepdf.Name("/Font"),
+            "/Subtype": pikepdf.Name("/CIDFontType0"),
+            "/BaseFont": pikepdf.Name("/STSong-Light"),
+            "/CIDSystemInfo": pikepdf.Dictionary(
+                {
+                    "/Registry": pikepdf.String("Adobe"),
+                    "/Ordering": pikepdf.String("GB1"),
+                    "/Supplement": 4,
+                }
+            ),
+            "/DW": 1000,
+        }
+    )
     font = pikepdf.Dictionary(
         {
             "/Type": pikepdf.Name("/Font"),
-            "/Subtype": pikepdf.Name("/Type1"),
-            "/BaseFont": pikepdf.Name("/Helvetica"),
-            "/Encoding": pikepdf.Name("/WinAnsiEncoding"),
+            "/Subtype": pikepdf.Name("/Type0"),
+            "/BaseFont": pikepdf.Name("/STSong-Light"),
+            "/Encoding": pikepdf.Name("/UniGB-UCS2-H"),
+            "/DescendantFonts": pikepdf.Array([descendant_font]),
         }
     )
     for page_index, page in enumerate(pdf.pages):
@@ -353,7 +384,7 @@ def _inject_copy_guard_into_pikepdf(pdf, pikepdf, strength, document_token):
                     # paragraph/text block does not cross into a guard block.
                     text_block_indexes.append(index)
                 block_has_text = False
-        lines = _copy_guard_noise_lines(strength, page_index, document_token, allow_unicode=False)
+        lines = _copy_guard_noise_lines(strength, page_index, document_token, allow_unicode=True)
         left, bottom, _width, height = _copy_guard_page_size(page)
         top_margin = min(12.0, max(2.0, height * 0.02))
         available_height = max(1.0, height - (top_margin * 2.0))
@@ -943,6 +974,119 @@ def _word_meaningful_paragraph_ranges(doc):
     return paragraphs
 
 
+def _format_word_copy_guard_range(guard_range):
+    # Older Word documents can reject individual paragraph-format assignments.
+    # Keep the text insertion valid even when one optional style is unsupported.
+    for target_name, attribute, value in (
+        ("Font", "Hidden", False),
+        ("Font", "Size", 1),
+        ("Font", "Color", 0xFFFFFF),
+        ("ParagraphFormat", "SpaceBefore", 0),
+        ("ParagraphFormat", "SpaceAfter", 0),
+        ("ParagraphFormat", "LineSpacingRule", 0),
+        ("ParagraphFormat", "LineSpacing", 1),
+    ):
+        try:
+            setattr(getattr(guard_range, target_name), attribute, value)
+        except Exception:
+            pass
+
+
+def _append_word_copy_guard_paragraphs(range_owner, lines):
+    """Append standalone guard paragraphs to a body or text-frame range."""
+
+    if not lines:
+        return 0
+    try:
+        range_owner.InsertAfter("\r".join(lines) + "\r")
+    except Exception:
+        return 0
+
+    added = 0
+    try:
+        paragraphs = range_owner.Paragraphs
+        for index in range(1, int(paragraphs.Count) + 1):
+            paragraph_range = _call_collection_item(paragraphs, index).Range.Duplicate
+            paragraph_text = str(getattr(paragraph_range, "Text", "") or "")
+            if not any(line in paragraph_text for line in lines):
+                continue
+            _format_word_copy_guard_range(paragraph_range)
+            added += 1
+    except Exception:
+        pass
+    return added
+
+
+def _add_word_copy_guard_to_text_frame(text_frame, strength, document_token, frame_index):
+    try:
+        if not bool(text_frame.HasText):
+            return 0
+        text_range = text_frame.TextRange
+        paragraphs = text_range.Paragraphs
+        meaningful = []
+        for index in range(1, int(paragraphs.Count) + 1):
+            paragraph_range = _call_collection_item(paragraphs, index).Range.Duplicate
+            paragraph_text = str(getattr(paragraph_range, "Text", "") or "")
+            if paragraph_text.replace("\r", "").replace("\x07", "").strip():
+                meaningful.append(paragraph_range)
+    except Exception:
+        return 0
+
+    lines = _copy_guard_noise_lines(
+        strength,
+        0,
+        f"{document_token}:frame:{frame_index}",
+        allow_unicode=True,
+    )
+    if not meaningful:
+        return 0
+    boundary_positions = [int(item.End) for item in meaningful[:-1]]
+    if not boundary_positions:
+        return _append_word_copy_guard_paragraphs(text_range, lines)
+
+    placements = []
+    for line_index, line in enumerate(lines):
+        boundary_index = min(
+            len(boundary_positions) - 1,
+            ((line_index + 1) * len(boundary_positions)) // (len(lines) + 1),
+        )
+        placements.append((boundary_positions[boundary_index], line))
+
+    added = 0
+    for position, line in sorted(placements, key=lambda item: item[0], reverse=True):
+        try:
+            guard_range = text_range.Duplicate
+            guard_range.SetRange(position, position)
+            guard_range.InsertAfter(f"{line}\r")
+            guard_range.SetRange(position, position + len(line) + 1)
+        except Exception:
+            continue
+        _format_word_copy_guard_range(guard_range)
+        added += 1
+    return added
+
+
+def _add_word_copy_guard_to_shapes(doc, strength, document_token):
+    added = 0
+    try:
+        shapes = doc.Shapes
+        shape_count = int(shapes.Count)
+    except Exception:
+        return 0
+    for index in range(1, shape_count + 1):
+        try:
+            shape = _call_collection_item(shapes, index)
+            added += _add_word_copy_guard_to_text_frame(
+                shape.TextFrame,
+                strength,
+                document_token,
+                index,
+            )
+        except Exception:
+            continue
+    return added
+
+
 def _add_word_copy_guard(doc, strength, document_token):
     """Insert visually neutral guard paragraphs only at body-paragraph boundaries."""
 
@@ -953,9 +1097,7 @@ def _add_word_copy_guard(doc, strength, document_token):
     lines = _copy_guard_noise_lines(strength, 0, document_token, allow_unicode=True)
     boundary_positions = [end for _start, end in paragraphs[:-1]]
     if not boundary_positions:
-        # A one-paragraph document has no internal boundary. Appending one hidden
-        # paragraph keeps the visible paragraph's copy range unchanged.
-        boundary_positions = [paragraphs[-1][1]]
+        return _append_word_copy_guard_paragraphs(doc.Content, lines)
 
     placements = []
     for line_index, line in enumerate(lines):
@@ -972,19 +1114,11 @@ def _add_word_copy_guard(doc, strength, document_token):
             guard_range = doc.Range(position, position)
             guard_range.InsertAfter(f"{line}\r")
             guard_range.SetRange(position, position + len(line) + 1)
-            # Word excludes Font.Hidden runs from normal whole-document copy. Use a
-            # 1pt white run instead: it stays in the standard text layer while
-            # remaining visually neutral on the normal white document canvas.
-            guard_range.Font.Hidden = False
-            guard_range.Font.Size = 1
-            guard_range.Font.Color = 0xFFFFFF
-            guard_range.ParagraphFormat.SpaceBefore = 0
-            guard_range.ParagraphFormat.SpaceAfter = 0
-            guard_range.ParagraphFormat.LineSpacingRule = 4
-            guard_range.ParagraphFormat.LineSpacing = 1
-            added += 1
         except Exception:
             continue
+
+        _format_word_copy_guard_range(guard_range)
+        added += 1
     return added
 
 
@@ -1252,6 +1386,13 @@ def add_watermark_to_word(
 
             doc = open_word_document_safely(word_app, src_path)
 
+            try:
+                protection_type = int(doc.ProtectionType)
+            except Exception:
+                protection_type = -1
+            if protection_type != -1:
+                return "SKIP:protected Word document requires password"
+
             visible_watermark_exists = _word_has_marker(doc)
             copy_guard_exists = _word_has_copy_guard(doc)
             apply_visible_watermark = bool(force_mode or not visible_watermark_exists)
@@ -1290,9 +1431,15 @@ def add_watermark_to_word(
                     copy_guard_strength,
                     secrets.token_hex(16),
                 )
-                if guard_added <= 0:
-                    return "ERROR:no writable Word paragraph boundary found"
-                _mark_word_copy_guard(doc)
+                guard_added += _add_word_copy_guard_to_shapes(
+                    doc,
+                    copy_guard_strength,
+                    secrets.token_hex(16),
+                )
+                if guard_added > 0:
+                    _mark_word_copy_guard(doc)
+                elif not apply_visible_watermark:
+                    return "SKIP:copy guard not applicable: no writable Word paragraphs"
 
             dst_path.parent.mkdir(parents=True, exist_ok=True)
             if _same_path(src_path, dst_path):

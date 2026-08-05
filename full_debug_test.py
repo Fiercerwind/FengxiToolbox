@@ -2128,6 +2128,21 @@ def main():
         },
     )
 
+    wm_supported_probe, wm_unsupported_probe = mod._split_watermark_supported_files(
+        [
+            str(root / "supported.pdf"),
+            str(root / "supported.docx"),
+            str(root / "supported.pptx"),
+            str(root / "\u7b2c\u4e8c\u9898 \u95ee\u5377\u8c03\u67e5.sav"),
+        ]
+    )
+    record(
+        "watermark_preclassifies_unsupported_extensions",
+        [Path(item).suffix.lower() for item in wm_supported_probe] == [".pdf", ".docx", ".pptx"]
+        and [Path(item).suffix.lower() for item in wm_unsupported_probe] == [".sav"],
+        {"supported": wm_supported_probe, "unsupported": wm_unsupported_probe},
+    )
+
     wm_type_skip_root = root / "watermark_type_skip"
     wm_type_skip_root.mkdir()
     wm_type_pdf = wm_type_skip_root / "skip_pdf.pdf"
@@ -3001,7 +3016,7 @@ def main():
         {"status": random_status, "pixels": random_page_pixels},
     )
 
-    copy_guard_pdf_noise = copy_guard_noise_lines_module("strong", 0, "pdf-noise-probe", allow_unicode=False)
+    copy_guard_pdf_noise = copy_guard_noise_lines_module("strong", 0, "pdf-noise-probe", allow_unicode=True)
     copy_guard_word_noise = copy_guard_noise_lines_module("strong", 0, "word-noise-probe", allow_unicode=True)
     record(
         "copy_guard_mixed_noise_character_families",
@@ -3009,8 +3024,16 @@ def main():
         and any(any(character.isdigit() for character in line) for line in copy_guard_pdf_noise)
         and any(any(character.isalpha() for character in line) for line in copy_guard_pdf_noise)
         and any(any(character in "|#@/" for character in line) for line in copy_guard_pdf_noise)
+        and any(any("\u4e00" <= character <= "\u9fff" for character in line) for line in copy_guard_pdf_noise)
         and any(any("\u4e00" <= character <= "\u9fff" for character in line) for line in copy_guard_word_noise)
-        and any("�" in line or "æ" in line for line in copy_guard_word_noise),
+        and any(
+            any(fragment in line for fragment in ("\u951f\u65a4\u62f7", "\u70eb\u70eb\u70eb", "\u6d60\u20ac", "\u93c2\u56e6\u6b22"))
+            for line in copy_guard_pdf_noise
+        )
+        and any(
+            any(fragment in line for fragment in ("\u951f\u65a4\u62f7", "\u70eb\u70eb\u70eb", "\u6d60\u20ac", "\u93c2\u56e6\u6b22"))
+            for line in copy_guard_word_noise
+        ),
         {"pdf_noise": copy_guard_pdf_noise[:3], "word_noise": copy_guard_word_noise[:6]},
     )
 
@@ -3068,6 +3091,7 @@ def main():
         and all(len(text) > 500 for text in copy_guard_texts)
         and "NORMAL CUSTOMER VISIBLE LINE 01" in copy_guard_texts[0]
         and "NORMAL CUSTOMER VISIBLE LINE 12" in copy_guard_texts[0]
+        and any(any("\u4e00" <= character <= "\u9fff" for character in text) for text in copy_guard_texts)
         and 0 < copy_guard_first_noise_index < copy_guard_last_visible_index
         and copy_guard_local_line == "NORMAL CUSTOMER VISIBLE LINE 06"
         and copy_guard_before_pixels == copy_guard_after_pixels
