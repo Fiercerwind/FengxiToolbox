@@ -2334,6 +2334,18 @@ def _apply_app_icon(app):
         _debug(f"app_icon:iconphoto_error:{exc}")
 
 
+def _apply_app_icon_after_first_paint(app):
+    """Apply the taskbar icon after the main window has had a chance to map."""
+    started_at = time.perf_counter()
+    try:
+        _apply_app_icon(app)
+        _debug("startup:icon_applied_deferred")
+    except Exception as exc:
+        _debug(f"startup:icon_apply_deferred_error:{exc}")
+    finally:
+        _record_performance("main_icon_apply_deferred", started_at=started_at)
+
+
 def _apply_window_icon(window):
     try:
         if hasattr(window, "_fx_window_icon") and getattr(window, "_fx_window_icon", None) is not None:
@@ -15754,7 +15766,12 @@ def _show_ready_window(app):
         _debug(f"startup:update_idletasks_error:{exc}")
     try:
         app.deiconify()
+        _ensure_startup_window_visible(app)
         app.lift()
+        try:
+            app.focus_force()
+        except Exception:
+            pass
         try:
             app._fx_startup_visible_pending = False
         except Exception:
@@ -15762,6 +15779,10 @@ def _show_ready_window(app):
         _debug("startup:window_shown")
     except Exception as exc:
         _debug(f"startup:window_show_error:{exc}")
+    try:
+        app.after(100, lambda target=app: _ensure_startup_window_visible(target))
+    except Exception:
+        pass
     try:
         app.after(STARTUP_DEFAULT_TAB_INIT_DELAY_MS, lambda target=app: _ensure_lazy_tab_initialized(target, DEFAULT_STARTUP_TAB))
     except Exception:
@@ -15776,6 +15797,75 @@ def _show_ready_window(app):
         started_at=BOOTSTRAP_STARTED_AT,
         details={"default_tab": DEFAULT_STARTUP_TAB},
     )
+
+
+def _get_startup_visible_geometry(window_x, window_y, window_width, window_height, viewport_x, viewport_y, viewport_width, viewport_height, margin=36):
+    """Return a centered geometry only when the startup window is outside its viewport."""
+    try:
+        window_x = int(window_x)
+        window_y = int(window_y)
+        window_width = max(1, int(window_width))
+        window_height = max(1, int(window_height))
+        viewport_x = int(viewport_x)
+        viewport_y = int(viewport_y)
+        viewport_width = max(1, int(viewport_width))
+        viewport_height = max(1, int(viewport_height))
+        margin = max(0, int(margin))
+    except Exception:
+        return None
+
+    viewport_right = viewport_x + viewport_width
+    viewport_bottom = viewport_y + viewport_height
+    window_right = window_x + window_width
+    window_bottom = window_y + window_height
+    if (
+        window_x >= viewport_x + margin
+        and window_y >= viewport_y + margin
+        and window_right <= viewport_right - margin
+        and window_bottom <= viewport_bottom - margin
+    ):
+        return None
+
+    usable_width = max(1, viewport_width - margin * 2)
+    usable_height = max(1, viewport_height - margin * 2)
+    target_width = min(window_width, usable_width)
+    target_height = min(window_height, usable_height)
+    target_x = viewport_x + max(margin, (viewport_width - target_width) // 2)
+    target_y = viewport_y + max(margin, (viewport_height - target_height) // 2)
+    return f"{target_width}x{target_height}+{target_x}+{target_y}"
+
+
+def _ensure_startup_window_visible(app):
+    """Recover a window that was restored beyond the current desktop bounds."""
+    try:
+        app.update_idletasks()
+        viewport_x = app.winfo_vrootx()
+        viewport_y = app.winfo_vrooty()
+        viewport_width = app.winfo_vrootwidth()
+        viewport_height = app.winfo_vrootheight()
+        if int(viewport_width or 0) <= 1 or int(viewport_height or 0) <= 1:
+            viewport_x = 0
+            viewport_y = 0
+            viewport_width = app.winfo_screenwidth()
+            viewport_height = app.winfo_screenheight()
+        geometry = _get_startup_visible_geometry(
+            app.winfo_rootx(),
+            app.winfo_rooty(),
+            app.winfo_width(),
+            app.winfo_height(),
+            viewport_x,
+            viewport_y,
+            viewport_width,
+            viewport_height,
+        )
+        if geometry:
+            app.geometry(geometry)
+            app.update_idletasks()
+            _debug(f"startup:window_repositioned:{geometry}")
+        return geometry
+    except Exception as exc:
+        _debug(f"startup:window_visibility_check_error:{exc}")
+        return None
 
 
 def _run_startup_layout_refresh(app):
@@ -16043,13 +16133,13 @@ if __name__ == "__main__":
     _record_performance("main_create_app", started_at=main_step_started_at)
     _debug("main:app_created")
     main_step_started_at = time.perf_counter()
-    _apply_app_icon(app)
-    _record_performance("main_icon_apply", started_at=main_step_started_at)
-    _debug("main:icon_applied")
-    main_step_started_at = time.perf_counter()
     _apply_release_identity(app)
     _record_performance("main_release_identity", started_at=main_step_started_at)
     _debug("main:release_identity_applied")
     _debug("main:layout_tighten_deferred")
     _show_ready_window(app)
+    try:
+        app.after(180, lambda target=app: _apply_app_icon_after_first_paint(target))
+    except Exception:
+        _apply_app_icon_after_first_paint(app)
     app.mainloop()

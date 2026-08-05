@@ -921,6 +921,14 @@ def main():
         },
     )
 
+    startup_reposition = mod._get_startup_visible_geometry(486, 632, 1165, 887, 0, 0, 1707, 960)
+    startup_geometry_unchanged = mod._get_startup_visible_geometry(80, 36, 1165, 887, 0, 0, 1707, 960)
+    record(
+        "startup_window_recovers_offscreen_position",
+        startup_reposition == "1165x887+271+36" and startup_geometry_unchanged is None,
+        {"reposition": startup_reposition, "unchanged": startup_geometry_unchanged},
+    )
+
     record(
         "startup_switch_tab_single_idle_refresh",
         fake_startup_app.events.count("idle") == 1,
