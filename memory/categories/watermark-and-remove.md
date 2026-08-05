@@ -472,6 +472,16 @@
   - `watermark_pdf_parallel_executor` also verifies copy guard in parallel outputs.
 - Validation: `python -m py_compile ...` passed; `python full_debug_test.py` passed 233/233; `python smoke_test.py` passed 14/14.
 
+## 2026-08-05 PDF copy-guard single-write optimization
+- Problem: enabling the PDF copy guard previously wrote a complete temporary watermarked PDF with pypdf, then reopened and rewrote it with pikepdf to interleave guard blocks. Large document batches paid for two full output passes.
+- Implementation:
+  - `_inject_copy_guard_into_pikepdf(...)` owns the existing text-block-preserving guard insertion.
+  - `_add_watermark_and_copy_guard_to_pdf(...)` opens the source once with pikepdf, imports the existing visible watermark packet as an overlay, injects guard blocks, writes metadata, and saves once.
+  - `add_watermark_to_pdf(...)` uses this path whenever a copy guard is being added. If it cannot complete, it retains the previous pypdf-plus-pikepdf route as a compatibility fallback.
+- Scope: PDF only. Word and Office conversion behavior remains unchanged. The guard remains between complete `BT ... ET` text blocks, so local selection behavior is preserved.
+- Regression: `pdf_copy_guard_uses_single_write_path` blocks the legacy second-pass helper and verifies the real public API still produces visible text plus guard content.
+- Validation: `python full_debug_test.py` passed 238/238. A text-dense fixture measured about 2.5x faster median processing (0.108s to 0.043s); image-only PDFs remain primarily limited by the unavoidable final pikepdf rewrite and disk throughput.
+
 ## 2026-07-11 Word paragraph-boundary and mixed-character guard
 - User required the guard to preserve normal single-paragraph copying while corrupting whole-document copying for both PDF and Word.
 - PDF now uses complete text-block boundaries (`BT ... ET`) instead of individual text-show instructions; PDFs do not encode reliable semantic paragraphs, so this is the safe non-invasive boundary.
@@ -490,3 +500,31 @@
   - On text-heavy pages, the first block now occurs before the final visible line. Pages with no text still receive a guard layer.
 - Regression: `pdf_copy_guard_whole_copy_noise_local_line_clean_visual_unchanged` now creates a 12-line single-page PDF and requires the first noise block to be between the first and final visible lines, while a clipped visible line remains clean and rendered pixels remain identical.
 - Validation: failing baseline reproduced first; after the fix `python full_debug_test.py` passed 233/233 and `python smoke_test.py` passed 14/14.
+
+## 2026-08-05 Batch watermark throughput optimization
+- PDF copy guard keeps its single-write pikepdf path and now uses pikepdf metadata plus MuPDF first-page fallback for the normal preflight, avoiding a separate pypdf reader on the fast path.
+- Pages without direct font resources are scanned/image pages with no selectable text; their content streams are not parsed and rewritten merely to add a copy guard. Visible watermarking and text-page guard behavior remain unchanged.
+- PDF-only batches and mixed PDF/Office folders use a bounded PDF queue. At most `workers * 2` PDF jobs are queued, so large folders do not create thousands of pending futures and Stop only waits for the small in-flight window.
+- Mixed folders start PDF work in parallel while Word/PPT stay on one Office COM session. This preserves Office stability while avoiding a single Word/PPT file disabling PDF parallelism for the entire folder.
+- Watermark UI logs are batched every 160ms or 12 entries. The complete task log is still retained, while large small-file batches spend less time updating the text widget.
+- This machine has a 20-logical-core i7 and 16GB RAM with an SSD. PDF watermark concurrency is therefore capped at 5 workers; this is intentionally separate from the generic 4-worker task cap to leave memory and disk bandwidth for large PDF rewrites.
+- Regression: `pdf_copy_guard_fast_preflight_avoids_pypdf_reader` and `watermark_mixed_folder_splits_pdf_and_office`.
+- Validation: `python smoke_test.py` 14/14 and `python full_debug_test.py` 240/240.
+
+## 2026-08-05 Word copy-guard paragraph scan optimization
+- Problem: Direct Word watermarking became very slow when the copy-interference layer was enabled. A 1200-paragraph probe took about 30.4 seconds.
+- Root cause: `_word_meaningful_paragraph_ranges(...)` made multiple COM property calls for every paragraph, including `Paragraph.Range`, `Range.Text`, `Range.Start`, and `Range.End`.
+- Fix: Read `doc.Content.Text` once, reconstruct meaningful paragraph ranges from Word paragraph marks in Python, and preserve the old COM paragraph scan as a compatibility fallback if the bulk read fails.
+- Behavior boundary: Guard placement remains only between meaningful body paragraphs; one-paragraph copy behavior, mixed noise, guard metadata, existing-watermark skip rules, visible watermark rendering, and Word/PDF/PPT task semantics are unchanged.
+- Measured result: Real 1200-paragraph Word document with standard guard improved from about 30.4s to 2.6s. The paragraph scan itself dropped from about 39s in the standalone COM probe to about 0.015s.
+- Regression: `word_paragraph_scan_reads_body_text_once` rejects access to `Content.Paragraphs` and verifies the reconstructed ranges.
+- Validation: `python -m py_compile Fengxi_Toolbox.py tools\\fx_watermark_core.py full_debug_test.py`; `python smoke_test.py` 14/14; `python full_debug_test.py` 242/242.
+
+## 2026-08-05 Batch watermark persistent checkpoint resume
+- Added `tools/fx_watermark_checkpoint.py` with a JSONL checkpoint log for batch watermark jobs.
+- The checkpoint identity includes input path, output strategy, watermark settings, copy-guard settings, and a version. Changing any of these starts a new plan automatically.
+- Each successful or safely skipped file records the source size/mtime, planned output path, and output size/mtime. On the next run, only lightweight filesystem metadata is checked; PDF/Word/PPT files are not reopened just to decide whether to resume.
+- User Stop writes `paused`, so the next run resumes the unfinished entries. Normal completion writes `completed`; partial failures write `failed`; an exception writes `interrupted`, and an abrupt process kill leaves `running` so it is distinguishable from a deliberate pause.
+- The Batch Watermark panel exposes `清除断点并重新开始`. This is the explicit abandon-resume action; it removes only the checkpoint metadata and does not delete or modify user outputs.
+- In-place overwrite intentionally does not enable output-based checkpoint reuse because the source itself is modified.
+- Validation: `python -m py_compile Fengxi_Toolbox.py tools\\fx_watermark_checkpoint.py full_debug_test.py`; `python smoke_test.py` 14/14; `python full_debug_test.py` 246/246. No package was created.

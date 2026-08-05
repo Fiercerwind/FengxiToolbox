@@ -106,6 +106,17 @@ from tools.fx_resume import (
     format_resume_skip_message,
     is_nonempty_file,
 )
+from tools.fx_watermark_checkpoint import (
+    build_checkpoint_identity as _watermark_checkpoint_identity,
+    build_checkpoint_path as _watermark_checkpoint_path,
+    checkpoint_item_reusable as _watermark_checkpoint_item_reusable,
+    clear_checkpoint as _watermark_checkpoint_clear,
+    load_checkpoint as _watermark_checkpoint_load,
+    mark_item as _watermark_checkpoint_mark_item,
+    mark_state as _watermark_checkpoint_mark_state,
+    prepare_checkpoint as _watermark_checkpoint_prepare,
+    split_resumable_files as _watermark_checkpoint_split_files,
+)
 from tools.fx_runtime_patches import wrap_callable
 from tools.fx_startup_patches import StartupPatchContext, install_startup_performance_patch
 from tools.fx_file_manager_core import (
@@ -501,6 +512,10 @@ QUEUE_HISTORY_LIMIT = 80
 QUEUE_HISTORY_RETENTION_DAYS = 90
 PROGRESS_STATUS_IDLE_TEXT = "进度：等待任务"
 PARALLEL_MAX_WORKERS = 4
+WATERMARK_PDF_MAX_WORKERS = 5
+WATERMARK_PDF_QUEUE_FACTOR = 2
+WATERMARK_UI_LOG_FLUSH_INTERVAL_SECONDS = 0.16
+WATERMARK_UI_LOG_BATCH_SIZE = 12
 PARALLEL_SWITCH_TEXT = "批量并行（部分生效）"
 PRESET_CATEGORY_LABELS = {
     "watermark": "批量水印",
@@ -907,6 +922,188 @@ def _load_recent_performance_entries(limit=60):
 
 def _wrap_callable(owner, name, label=None):
     return wrap_callable(owner, name, label=label, debug=_debug)
+
+
+LOG_DISPLAY_ICON_REPLACEMENTS = {
+    "🎯": "[目标]",
+    "🔎": "[检索]",
+    "🚀": "[启动]",
+    "✅": "[完成]",
+    "⚠️": "[提示]",
+    "⚠": "[提示]",
+    "❌": "[错误]",
+    "ℹ️": "[说明]",
+    "⏹️": "[停止]",
+    "⏭️": "[跳过]",
+    "🎉": "[完成]",
+    "🛡️": "[保护]",
+    "🗑️": "[删除]",
+    "📌": "[队列]",
+    "↪️": "[跳过]",
+    "📝": "[文本]",
+    "🖼️": "[图片]",
+    "⏱️": "[时间]",
+    "🕵️": "[隐私]",
+}
+
+
+def _normalize_log_display_text(message):
+    """Replace emoji-only log decorations with stable text labels."""
+
+    text = str(message or "")
+    for source, replacement in LOG_DISPLAY_ICON_REPLACEMENTS.items():
+        text = text.replace(source, replacement)
+    return text.replace("\ufe0f", "")
+
+
+def _get_log_display_widget(app):
+    box = getattr(app, "log_box", None)
+    if box is None:
+        return None
+    return box
+
+
+def _read_log_scroll_state(widget):
+    try:
+        top, bottom = widget.yview()
+        return float(top), float(bottom), float(bottom) >= 0.995
+    except Exception:
+        return 0.0, 1.0, True
+
+
+def _sync_log_scroll_state(app):
+    widget = _get_log_display_widget(app)
+    if widget is None:
+        return
+    top, _bottom, at_tail = _read_log_scroll_state(widget)
+    try:
+        app._fx_log_follow_tail = at_tail
+        if not at_tail:
+            app._fx_log_scroll_anchor = top
+    except Exception:
+        pass
+
+
+def _schedule_log_scroll_state_sync(app):
+    try:
+        app.after_idle(lambda target=app: _sync_log_scroll_state(target))
+    except Exception:
+        _sync_log_scroll_state(app)
+
+
+def _handle_log_scroll_interaction(app):
+    try:
+        app._fx_log_scroll_generation = int(getattr(app, "_fx_log_scroll_generation", 0) or 0) + 1
+        app._fx_log_restore_pending = False
+    except Exception:
+        pass
+    _sync_log_scroll_state(app)
+    _schedule_log_scroll_state_sync(app)
+
+
+def _bind_log_scroll_tracking(app):
+    if getattr(app, "_fx_log_scroll_tracking_ready", False):
+        return
+    widget = _get_log_display_widget(app)
+    if widget is None:
+        return
+    tracked_widgets = [widget]
+    inner_widget = getattr(widget, "_textbox", None)
+    scrollbar = getattr(widget, "_y_scrollbar", None) or getattr(widget, "_scrollbar", None)
+    scrollbar_canvas = getattr(scrollbar, "_canvas", None) if scrollbar is not None else None
+    if inner_widget is not None:
+        tracked_widgets.append(inner_widget)
+    if scrollbar is not None:
+        tracked_widgets.append(scrollbar)
+    if scrollbar_canvas is not None:
+        tracked_widgets.append(scrollbar_canvas)
+    events = (
+        "<MouseWheel>",
+        "<Button-4>",
+        "<Button-5>",
+        "<ButtonPress-1>",
+        "<ButtonRelease-1>",
+        "<B1-Motion>",
+        "<KeyRelease>",
+    )
+    for target in tracked_widgets:
+        for event_name in events:
+            try:
+                target.bind(
+                    event_name,
+                    lambda _event=None, owner=app: _handle_log_scroll_interaction(owner),
+                    add="+",
+                )
+            except Exception:
+                pass
+    try:
+        top, _bottom, at_tail = _read_log_scroll_state(widget)
+        app._fx_log_follow_tail = at_tail
+        app._fx_log_scroll_anchor = top
+        app._fx_log_scroll_generation = int(getattr(app, "_fx_log_scroll_generation", 0) or 0)
+        app._fx_log_scroll_tracking_ready = True
+    except Exception:
+        pass
+
+
+def _restore_log_scroll_after_append(app, anchor):
+    widget = _get_log_display_widget(app)
+    if widget is None or getattr(app, "_fx_log_follow_tail", True):
+        return
+    try:
+        widget.yview_moveto(max(0.0, min(1.0, float(anchor))))
+    except Exception:
+        try:
+            inner_widget = getattr(widget, "_textbox", None)
+            if inner_widget is not None:
+                inner_widget.yview_moveto(max(0.0, min(1.0, float(anchor))))
+        except Exception:
+            pass
+
+
+def _patch_log_display_behavior():
+    try:
+        original_log = FengxiToolboxApp.log
+    except Exception as exc:
+        _debug(f"log_display:missing:{exc}")
+        return
+    if getattr(original_log, "__fx_log_display_patch__", False):
+        return
+
+    def patched_log(self, message, *args, **kwargs):
+        widget = _get_log_display_widget(self)
+        _bind_log_scroll_tracking(self)
+        _top, _bottom, at_tail = _read_log_scroll_state(widget) if widget is not None else (0.0, 1.0, True)
+        follow_tail = bool(getattr(self, "_fx_log_follow_tail", at_tail))
+        anchor = float(getattr(self, "_fx_log_scroll_anchor", _top) or _top)
+        generation = int(getattr(self, "_fx_log_scroll_generation", 0) or 0)
+        if not follow_tail and not getattr(self, "_fx_log_restore_pending", False):
+            anchor = _top
+            self._fx_log_scroll_anchor = anchor
+            self._fx_log_restore_pending = True
+        result = original_log(self, _normalize_log_display_text(message), *args, **kwargs)
+        if not follow_tail:
+            def restore(target=self, saved_anchor=anchor, saved_generation=generation):
+                try:
+                    if int(getattr(target, "_fx_log_scroll_generation", 0) or 0) != saved_generation:
+                        return
+                    if getattr(target, "_fx_log_follow_tail", True):
+                        return
+                    _restore_log_scroll_after_append(target, saved_anchor)
+                finally:
+                    if int(getattr(target, "_fx_log_scroll_generation", 0) or 0) == saved_generation:
+                        target._fx_log_restore_pending = False
+
+            try:
+                self.after_idle(restore)
+            except Exception:
+                restore()
+        return result
+
+    patched_log.__fx_log_display_patch__ = True
+    patched_log.__wrapped__ = original_log
+    FengxiToolboxApp.log = patched_log
+    _debug("log_display:installed")
 
 
 def _draw_sidebar_icon(draw, kind, color, size=22, stroke=2):
@@ -3576,6 +3773,7 @@ def _patch_single_input_support():
         _set_progress_status(self, stage="准备中", fraction=0.0)
         self.btn_run.configure(state="disabled", text="⚡ 执行中...", fg_color="#455A64")
         self.btn_stop.configure(state="normal")
+        _set_watermark_checkpoint_action_state(self, "disabled")
         threading.Thread(target=self.run_process, args=(selected_input, self.current_task), daemon=True).start()
 
     patched_select_folder.__fx_single_input_patch__ = True
@@ -6452,6 +6650,15 @@ def _get_parallel_worker_count(item_count):
     return max(1, min(int(item_count), PARALLEL_MAX_WORKERS, max(2, cpu_count)))
 
 
+def _get_watermark_pdf_worker_count(item_count):
+    """Keep PDF rewrites parallel without exhausting RAM on large documents."""
+
+    if item_count <= 1:
+        return 1
+    cpu_count = os.cpu_count() or 4
+    return max(1, min(int(item_count), WATERMARK_PDF_MAX_WORKERS, max(2, cpu_count)))
+
+
 def _reserve_unique_output_path(src, output_folder, builder, reserved):
     target = Path(builder(src, output_folder))
     target_dir = target.parent
@@ -9048,29 +9255,88 @@ def _collect_preview_files(app, input_value, task_type):
     return []
 
 
-def _count_watermark_preview_skips(app, files):
+def _split_watermark_preview_files(app, files):
     rule = _get_watermark_filename_rule(app)
-    _kept_by_type, type_skipped = _filter_watermark_files_by_type_skip(app, files)
-    if not rule:
-        return len(type_skipped)
-    mode, marker = rule
+    kept_by_type, type_skipped = _filter_watermark_files_by_type_skip(app, files)
     skipped_keys = {
         _normalize_watermark_file_key(path)
         for path in type_skipped
         if _normalize_watermark_file_key(path)
     }
-    skipped = len(skipped_keys)
-    for path in files:
+    if not rule:
+        return list(kept_by_type), len(skipped_keys)
+
+    mode, marker = rule
+    eligible = []
+    for path in kept_by_type:
         path_key = _normalize_watermark_file_key(path)
         if path_key and path_key in skipped_keys:
             continue
         try:
             name_no_ext = os.path.splitext(os.path.basename(str(path)))[0]
         except Exception:
+            eligible.append(path)
             continue
         if _watermark_filename_matches_rule(name_no_ext, mode, marker):
-            skipped += 1
+            if path_key:
+                skipped_keys.add(path_key)
+            continue
+        eligible.append(path)
+    return eligible, len(skipped_keys)
+
+
+def _count_watermark_preview_skips(app, files):
+    _eligible, skipped = _split_watermark_preview_files(app, files)
     return skipped
+
+
+def _count_watermark_checkpoint_preview_skips(app, input_value, files):
+    """Count reusable checkpoint entries without changing checkpoint state."""
+
+    normalized_input = _normalize_input_path_value(input_value)
+    if not normalized_input or not files:
+        return 0
+    try:
+        is_single_input = os.path.isfile(normalized_input)
+        input_root = os.path.dirname(normalized_input) if is_single_input else normalized_input
+        requested_strategy = _get_task_output_strategy(app, "watermark")
+        actual_strategy = requested_strategy if is_single_input else "result_folder"
+        if actual_strategy == "overwrite":
+            return 0
+        output_root = (
+            input_root
+            if actual_strategy == "same_dir"
+            else os.path.join(input_root, RESULT_FOLDER_NAME)
+        )
+        settings = _get_watermark_settings(app)
+        checkpoint_path = _watermark_checkpoint_path(normalized_input, output_root)
+        checkpoint = _watermark_checkpoint_load(checkpoint_path)
+        header = checkpoint.get("header") if isinstance(checkpoint, dict) else None
+        expected_identity = _watermark_checkpoint_identity(
+            normalized_input,
+            actual_strategy,
+            settings,
+        )
+        if not isinstance(header, dict) or str(header.get("identity") or "") != expected_identity:
+            return 0
+
+        eligible_files, _rule_skipped = _split_watermark_preview_files(app, files)
+        reusable_count = 0
+        for source in eligible_files:
+            output = _watermark_planned_output_path(
+                source,
+                input_root,
+                output_root,
+                actual_strategy,
+                settings,
+                is_single_input=is_single_input,
+            )
+            if output and _watermark_checkpoint_item_reusable(checkpoint, source, output):
+                reusable_count += 1
+        return reusable_count
+    except Exception as exc:
+        _debug(f"start_preview:watermark_checkpoint_error:{exc}")
+        return 0
 
 
 def _get_start_preview_risks(app, task_type, output_strategy):
@@ -9101,7 +9367,13 @@ def _build_start_preview(app, input_value=None, task_type=None):
     task_type = str(task_type or getattr(app, "current_task", "") or "")
     normalized_input = _normalize_input_path_value(input_value if input_value is not None else _safe_var_get(app, "input_path", ""))
     files = _collect_preview_files(app, normalized_input, task_type)
-    skipped = _count_watermark_preview_skips(app, files) if task_type == "watermark" else 0
+    rule_skipped = _count_watermark_preview_skips(app, files) if task_type == "watermark" else 0
+    checkpoint_skipped = (
+        _count_watermark_checkpoint_preview_skips(app, normalized_input, files)
+        if task_type == "watermark"
+        else 0
+    )
+    skipped = rule_skipped + checkpoint_skipped
     effective_count = max(0, len(files) - skipped)
     output_strategy = _get_task_output_strategy(app, task_type)
     mode_detail = _get_preview_mode_detail(app, task_type)
@@ -9114,6 +9386,8 @@ def _build_start_preview(app, input_value=None, task_type=None):
         "input_kind": "单文件" if normalized_input and os.path.isfile(normalized_input) else "文件夹",
         "total_count": len(files),
         "skipped_count": skipped,
+        "rule_skipped_count": rule_skipped,
+        "checkpoint_skipped_count": checkpoint_skipped,
         "effective_count": effective_count,
         "output_strategy": output_strategy,
         "output_strategy_label": _get_output_strategy_label(output_strategy),
@@ -9135,8 +9409,12 @@ def _format_start_preview_message(preview):
             f"将处理：{preview.get('effective_count')} 个文件",
         ]
     )
-    if int(preview.get("skipped_count") or 0) > 0:
-        lines.append(f"预计跳过：{preview.get('skipped_count')} 个文件")
+    rule_skipped = int(preview.get("rule_skipped_count") or 0)
+    checkpoint_skipped = int(preview.get("checkpoint_skipped_count") or 0)
+    if rule_skipped > 0:
+        lines.append(f"预计按规则跳过：{rule_skipped} 个文件")
+    if checkpoint_skipped > 0:
+        lines.append(f"预计断点续传跳过：{checkpoint_skipped} 个文件")
     lines.append(f"输出策略：{preview.get('output_strategy_label')}")
     risks = list(preview.get("risks") or [])
     if risks:
@@ -9642,6 +9920,39 @@ def _install_watermark_text_memory(app):
     app._fx_wm_text_memory_ready = True
 
 
+def _filter_watermark_result_folder_inputs(input_folder, files):
+    """Exclude generated result folders before the runtime watermark scan."""
+
+    values = list(files or [])
+    normalized_input = _normalize_input_path_value(input_folder)
+    if not normalized_input or os.path.isfile(normalized_input) or not os.path.isdir(normalized_input):
+        return values, []
+
+    result_name = str(RESULT_FOLDER_NAME).strip().rstrip(" .").casefold()
+    input_root = Path(normalized_input)
+    try:
+        input_root_resolved = input_root.resolve()
+    except Exception:
+        input_root_resolved = input_root.absolute()
+
+    if str(input_root.name).strip().rstrip(" .").casefold() == result_name:
+        return [], values
+
+    filtered = []
+    excluded = []
+    for item in values:
+        try:
+            source_path = Path(_normalize_input_path_value(item)).resolve()
+            relative_parts = source_path.relative_to(input_root_resolved).parts
+            if any(str(part).strip().rstrip(" .").casefold() == result_name for part in relative_parts[:-1]):
+                excluded.append(item)
+                continue
+        except Exception:
+            pass
+        filtered.append(item)
+    return filtered, excluded
+
+
 def _patch_watermark_filename_rule_ui():
     try:
         original_init_watermark_ui = FengxiToolboxApp.init_watermark_ui
@@ -9748,6 +10059,23 @@ def _patch_watermark_filename_rule_ui():
         files = original_collect_input_files(self, input_folder, task_type)
         if task_type != "watermark":
             return files
+
+        files, result_folder_files = _filter_watermark_result_folder_inputs(input_folder, files)
+        if result_folder_files:
+            try:
+                log_key = (_normalize_input_path_value(input_folder), len(result_folder_files))
+                if getattr(self, "_fx_wm_result_folder_filter_log_key", None) != log_key:
+                    self._fx_wm_result_folder_filter_log_key = log_key
+                    if os.path.basename(str(_normalize_input_path_value(input_folder)).rstrip("\\/")) == RESULT_FOLDER_NAME:
+                        self.log(
+                            f"[批量水印] 已忽略结果目录自身的 {len(result_folder_files)} 个文件，避免生成嵌套结果目录。"
+                        )
+                    else:
+                        self.log(
+                            f"[批量水印] 已排除已有结果目录中的 {len(result_folder_files)} 个文件，避免重复加水印。"
+                        )
+            except Exception:
+                pass
 
         rule = getattr(self, "_fx_wm_filename_rule_runtime", None)
         if not rule:
@@ -10154,10 +10482,32 @@ def _watermark_color_rgb_tuple(color):
 def _watermark_log(app, logs, message):
     text = str(message)
     logs.append(text)
+    pending = getattr(app, "_fx_watermark_ui_log_pending", None)
+    if pending is None:
+        pending = []
+        app._fx_watermark_ui_log_pending = pending
+    pending.append(text)
+    _flush_watermark_ui_logs(app)
+
+
+def _flush_watermark_ui_logs(app, force=False):
+    pending = list(getattr(app, "_fx_watermark_ui_log_pending", []) or [])
+    if not pending:
+        return
+    now = time.monotonic()
+    last_flush = float(getattr(app, "_fx_watermark_ui_log_last_flush", 0.0) or 0.0)
+    if not force and len(pending) < WATERMARK_UI_LOG_BATCH_SIZE and now - last_flush < WATERMARK_UI_LOG_FLUSH_INTERVAL_SECONDS:
+        return
     try:
-        app.log(text)
+        app.log("\n".join(pending))
     except Exception:
         pass
+    finally:
+        try:
+            app._fx_watermark_ui_log_pending = []
+            app._fx_watermark_ui_log_last_flush = now
+        except Exception:
+            pass
 
 
 def _watermark_status_kind(status):
@@ -10336,28 +10686,55 @@ def _make_watermark_preview_image(app):
         draw.line((x, 16, x - 72, height - 16), fill=(237, 241, 245, 255), width=1)
 
     text = (_read_watermark_text_widget(app) or "Fengxi Watermark").strip() or "Fengxi Watermark"
-    preview_text = " / ".join(line.strip() for line in text.splitlines() if line.strip())[:42] or "Fengxi Watermark"
-    font_size = max(16.0, min(44.0, _get_slider_value_for_preview(app, "slider_size", 60) * 0.45))
+    preview_lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not preview_lines:
+        preview_lines = ["Fengxi Watermark"]
+    if len(preview_lines) > 4:
+        preview_lines = preview_lines[:4]
+        preview_lines[-1] = f"{preview_lines[-1][:24]}..."
+    preview_text = "\n".join(preview_lines)
+    requested_font_size = max(16.0, min(44.0, _get_slider_value_for_preview(app, "slider_size", 60) * 0.45))
     opacity = max(0.08, min(1.0, _get_slider_value_for_preview(app, "slider_opacity", 0.18)))
     angle = _get_slider_value_for_preview(app, "slider_angle", 45)
     red, green, blue = _watermark_color_rgb_tuple(_get_watermark_color(app))
     alpha = max(24, min(230, int(opacity * 255)))
 
-    font = _resolve_preview_font(app, font_size)
     text_layer = PILImage.new("RGBA", (width, height), (0, 0, 0, 0))
     text_draw = ImageDraw.Draw(text_layer)
-    try:
-        bbox = text_draw.textbbox((0, 0), preview_text, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-    except Exception:
-        text_width = len(preview_text) * int(font_size * 0.6)
-        text_height = int(font_size)
-    text_draw.text(
-        ((width - text_width) / 2, (height - text_height) / 2 - 2),
+    font_size = requested_font_size
+    spacing = max(2, int(round(font_size * 0.16)))
+    max_text_width = width - 40
+    max_text_height = height - 42
+    for _ in range(12):
+        font = _resolve_preview_font(app, font_size)
+        try:
+            bbox = text_draw.multiline_textbbox(
+                (0, 0),
+                preview_text,
+                font=font,
+                spacing=spacing,
+                align="center",
+            )
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+        except Exception:
+            line_lengths = [len(line) for line in preview_lines] or [1]
+            text_width = max(line_lengths) * int(font_size * 0.6)
+            text_height = len(preview_lines) * int(font_size) + max(0, len(preview_lines) - 1) * spacing
+            bbox = (0, 0, text_width, text_height)
+        if text_width <= max_text_width and text_height <= max_text_height:
+            break
+        font_size = max(10.0, font_size - 2.0)
+        spacing = max(2, int(round(font_size * 0.16)))
+    text_x = (width - text_width) / 2 - bbox[0]
+    text_y = (height - 42 - text_height) / 2 - bbox[1] + 6
+    text_draw.multiline_text(
+        (text_x, text_y),
         preview_text,
         font=font,
         fill=(red, green, blue, alpha),
+        spacing=spacing,
+        align="center",
     )
     rotated = text_layer.rotate(angle, resample=PILImage.Resampling.BICUBIC, center=(width / 2, height / 2))
     image.alpha_composite(rotated)
@@ -10750,6 +11127,137 @@ def _patch_watermark_range_options_ui():
 _patch_watermark_range_options_ui()
 
 
+def _install_watermark_checkpoint_action_ui(app):
+    if getattr(app, "_fx_wm_checkpoint_action_ui_ready", False):
+        return getattr(app, "wm_clear_checkpoint_button", None)
+    stop_button = getattr(app, "btn_stop", None)
+    parent = getattr(stop_button, "master", None)
+    if stop_button is None or parent is None:
+        return None
+
+    button = customtkinter.CTkButton(
+        parent,
+        text="清除断点",
+        command=lambda target=app: _clear_watermark_checkpoint_for_app(target),
+        width=128,
+        height=40,
+        corner_radius=8,
+        fg_color="transparent",
+        border_width=1,
+        border_color=globals().get("COLOR_BORDER", "#3A3A3A"),
+        text_color=globals().get("COLOR_TEXT_SOFT", "#B2C0C8"),
+        hover_color=globals().get("COLOR_CARD_ALT", "#303030"),
+        font=customtkinter.CTkFont(size=12, weight="bold"),
+    )
+
+    manager = ""
+    try:
+        manager = str(stop_button.winfo_manager() or "")
+    except Exception:
+        pass
+    if manager == "grid":
+        try:
+            stop_info = stop_button.grid_info()
+            stop_column = int(stop_info.get("column", 0))
+            stop_row = int(stop_info.get("row", 0))
+            for sibling in parent.winfo_children():
+                if sibling is stop_button:
+                    continue
+                try:
+                    sibling_info = sibling.grid_info()
+                    sibling_column = int(sibling_info.get("column", -1))
+                    if sibling_column > stop_column:
+                        sibling.grid_configure(column=sibling_column + 1)
+                except Exception:
+                    pass
+            button.grid(
+                row=stop_row,
+                column=stop_column + 1,
+                padx=(8, 8),
+                pady=0,
+                sticky="ew",
+            )
+        except Exception:
+            button.pack(side="left", padx=(8, 0))
+    elif manager == "pack":
+        try:
+            stop_pack_info = stop_button.pack_info()
+            button.pack(
+                side=stop_pack_info.get("side", "left"),
+                padx=(8, 0),
+                pady=stop_pack_info.get("pady", 0),
+                after=stop_button,
+            )
+        except Exception:
+            button.pack(side="left", padx=(8, 0))
+    else:
+        button.pack(side="left", padx=(8, 0))
+
+    try:
+        button.configure(state="disabled" if getattr(app, "is_running", False) else "normal")
+    except Exception:
+        pass
+    app.wm_clear_checkpoint_button = button
+    app._fx_wm_checkpoint_action_ui_ready = True
+    return button
+
+
+def _set_watermark_checkpoint_action_state(app, state=None):
+    button = getattr(app, "wm_clear_checkpoint_button", None)
+    if button is None:
+        return
+    if state is None:
+        state = "disabled" if getattr(app, "is_running", False) else "normal"
+    try:
+        button.configure(state=state)
+    except Exception:
+        pass
+
+
+def _patch_watermark_checkpoint_action_ui():
+    try:
+        original_init_watermark_ui = FengxiToolboxApp.init_watermark_ui
+    except Exception as exc:
+        _debug(f"watermark_checkpoint_ui:missing:{exc}")
+        return
+    if getattr(original_init_watermark_ui, "__fx_wm_checkpoint_action_patch__", False):
+        return
+
+    def patched_init_watermark_ui(self):
+        original_init_watermark_ui(self)
+        try:
+            _install_watermark_checkpoint_action_ui(self)
+        except Exception as exc:
+            _debug(f"watermark_checkpoint_ui:init_error:{exc}")
+
+    patched_init_watermark_ui.__fx_wm_checkpoint_action_patch__ = True
+    FengxiToolboxApp.init_watermark_ui = patched_init_watermark_ui
+    _debug("patch_watermark_checkpoint_ui:installed")
+
+    try:
+        original_setup_main_area = FengxiToolboxApp.setup_main_area
+    except Exception as exc:
+        _debug(f"watermark_checkpoint_ui:main_area_missing:{exc}")
+        return
+    if getattr(original_setup_main_area, "__fx_wm_checkpoint_action_patch__", False):
+        return
+
+    def patched_setup_main_area(self, *args, **kwargs):
+        result = original_setup_main_area(self, *args, **kwargs)
+        try:
+            _install_watermark_checkpoint_action_ui(self)
+        except Exception as exc:
+            _debug(f"watermark_checkpoint_ui:main_area_error:{exc}")
+        return result
+
+    patched_setup_main_area.__fx_wm_checkpoint_action_patch__ = True
+    FengxiToolboxApp.setup_main_area = patched_setup_main_area
+    _debug("patch_watermark_checkpoint_ui:main_area_installed")
+
+
+_patch_watermark_checkpoint_action_ui()
+
+
 def _install_watermark_copy_guard_ui(app):
     if getattr(app, "_fx_wm_copy_guard_ui_ready", False):
         return getattr(app, "_fx_wm_copy_guard_frame", None)
@@ -10763,7 +11271,7 @@ def _install_watermark_copy_guard_ui(app):
     if getattr(app, "wm_copy_guard_strength_var", None) is None:
         app.wm_copy_guard_strength_var = tkinter.StringVar(value="标准")
 
-    frame = customtkinter.CTkFrame(parent, fg_color="transparent", height=76)
+    frame = customtkinter.CTkFrame(parent, fg_color="transparent", height=104)
     frame._fx_wm_copy_guard_module = True
     try:
         frame.pack_propagate(False)
@@ -10912,6 +11420,111 @@ def _get_watermark_settings(app):
         "copy_guard_enabled": bool(_safe_var_get(app, "wm_copy_guard_enabled_var", False)),
         "copy_guard_strength": _get_watermark_copy_guard_strength(app),
     }
+
+
+def _watermark_planned_output_path(src, input_root, output_root, actual_strategy, settings, is_single_input=False):
+    src_path = Path(src)
+    suffix = src_path.suffix.lower()
+    convert_to_pdf = bool(settings.get("convert_pdf")) and suffix in WATERMARK_WORD_EXTS | WATERMARK_PPT_EXTS
+    return Path(
+        _build_watermark_output_path(
+            src_path,
+            input_root,
+            output_root,
+            actual_strategy,
+            convert_to_pdf=convert_to_pdf,
+            single_input=is_single_input,
+        )
+    )
+
+
+def _watermark_checkpoint_context(input_value, input_root, output_root, actual_strategy, settings, total):
+    # In-place overwrite changes the source signature, so output-based resume is
+    # intentionally disabled for that mode.
+    if actual_strategy == "overwrite":
+        return None
+    try:
+        checkpoint_path = _watermark_checkpoint_path(input_value, output_root)
+        identity = _watermark_checkpoint_identity(input_value, actual_strategy, settings)
+        checkpoint = _watermark_checkpoint_prepare(
+            checkpoint_path,
+            input_value,
+            actual_strategy,
+            identity,
+            total,
+        )
+        return {"path": checkpoint_path, "data": checkpoint}
+    except Exception as exc:
+        _debug(f"watermark_checkpoint:prepare_error:{exc}")
+        return None
+
+
+def _watermark_checkpoint_split(checkpoint, all_files, input_root, output_root, actual_strategy, settings, is_single_input):
+    if not checkpoint:
+        return list(all_files), []
+
+    def output_getter(src):
+        return _watermark_planned_output_path(
+            src,
+            input_root,
+            output_root,
+            actual_strategy,
+            settings,
+            is_single_input=is_single_input,
+        )
+
+    return _watermark_checkpoint_split_files(all_files, checkpoint.get("data"), output_getter)
+
+
+def _watermark_checkpoint_mark(checkpoint, source, output, status):
+    if not checkpoint:
+        return
+    try:
+        _watermark_checkpoint_mark_item(checkpoint["path"], source, output, status)
+    except Exception as exc:
+        _debug(f"watermark_checkpoint:item_error:{exc}")
+
+
+def _watermark_checkpoint_finish(checkpoint, state, processed, total, message=""):
+    if not checkpoint:
+        return
+    try:
+        _watermark_checkpoint_mark_state(checkpoint["path"], state, processed, total, message)
+        if state == "completed":
+            _watermark_checkpoint_clear(checkpoint["path"])
+    except Exception as exc:
+        _debug(f"watermark_checkpoint:state_error:{exc}")
+
+
+def _clear_watermark_checkpoint_for_app(app):
+    if getattr(app, "is_running", False):
+        try:
+            app.log("[断点续传] 当前任务仍在运行，请先按停止，再清除断点。")
+        except Exception:
+            pass
+        return False
+    try:
+        input_value = _normalize_input_path_value(app.input_path.get())
+    except Exception:
+        input_value = ""
+    if not input_value:
+        try:
+            app.log("[断点续传] 尚未选择输入文件或文件夹。")
+        except Exception:
+            pass
+        return False
+    is_single_input = os.path.isfile(input_value)
+    input_root = os.path.dirname(input_value) if is_single_input else input_value
+    requested_strategy = _get_task_output_strategy(app, "watermark")
+    actual_strategy = requested_strategy if is_single_input else "result_folder"
+    output_root = input_root if actual_strategy in {"same_dir", "overwrite"} else os.path.join(input_root, RESULT_FOLDER_NAME)
+    checkpoint_path = _watermark_checkpoint_path(input_value, output_root)
+    cleared = _watermark_checkpoint_clear(checkpoint_path)
+    try:
+        app.log(f"[断点续传] {'已清除' if cleared else '没有可清除的'}断点：{checkpoint_path}")
+    except Exception:
+        pass
+    return cleared
 
 
 def _watermark_make_pdf_packet(settings):
@@ -11089,7 +11702,7 @@ def _watermark_pdf_parallel_enabled(app, all_files, settings, is_single_input):
                 return False
         except Exception:
             return False
-    return _get_parallel_worker_count(len(all_files)) > 1
+    return _get_watermark_pdf_worker_count(len(all_files)) > 1
 
 
 def _write_watermark_failed_report(failed_items, input_root, output_root, actual_strategy, result):
@@ -11112,7 +11725,7 @@ def _write_watermark_failed_report(failed_items, input_root, output_root, actual
     _add_task_result_output(result, str(report_path))
 
 
-def _run_watermark_pdf_parallel_task(
+def _run_watermark_pdf_parallel_task_impl(
     app,
     all_files,
     input_root,
@@ -11125,6 +11738,8 @@ def _run_watermark_pdf_parallel_task(
     rule_skipped_files,
     type_skipped_files,
     unsupported_skipped_files,
+    checkpoint=None,
+    resumed_entries=None,
 ):
     pdf_settings = dict(settings)
     try:
@@ -11134,16 +11749,22 @@ def _run_watermark_pdf_parallel_task(
     except Exception:
         pdf_settings.pop("_pdf_packet_bytes", None)
 
-    workers = _get_parallel_worker_count(len(all_files))
+    workers = _get_watermark_pdf_worker_count(len(all_files))
     _watermark_log(app, logs, f"[批量并行] PDF 水印启用 {workers} 个线程。")
 
-    success_outputs = []
+    resumed_entries = list(resumed_entries or [])
+    success_outputs = [str(item.get("output")) for item in resumed_entries if item.get("output")]
     failed_items = []
-    skipped_items = []
+    skipped_items = [str(item.get("source")) for item in resumed_entries if item.get("source")]
     copied_skipped_outputs = []
     deferred_skipped_copy_items = []
-    processed_count = 0
+    processed_count = len(resumed_entries)
     jobs = []
+
+    if resumed_entries:
+        _watermark_log(app, logs, f"[断点续传] 已确认 {len(resumed_entries)} 个已完成文件，跳过逐文件处理。")
+        for item in resumed_entries:
+            _add_task_result_output(result, str(item.get("output") or ""))
 
     for file_path in all_files:
         if getattr(app, "stop_event", False):
@@ -11180,6 +11801,7 @@ def _run_watermark_pdf_parallel_task(
         if is_nonempty_file(target_path):
             success_outputs.append(str(target_path))
             skipped_items.append(str(src))
+            _watermark_checkpoint_mark(checkpoint, src, target_path, "skipped")
             _add_task_result_output(result, str(target_path))
             _watermark_log(app, logs, f"[批量水印] 断点续跑：已存在结果，跳过处理: {src.name} -> {target_path}")
             processed_count += 1
@@ -11210,47 +11832,73 @@ def _run_watermark_pdf_parallel_task(
         return item
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        future_map = {executor.submit(process_pdf_job, job): job for job in jobs}
-        for future in concurrent.futures.as_completed(future_map):
-            src, output_path = future_map[future]
+        # Keep only a small number of PDF rewrites queued.  Large folders used
+        # to create one Future per file, increasing memory use and making Stop
+        # wait for the entire already-submitted batch.
+        job_iterator = iter(jobs)
+        future_map = {}
+
+        def submit_next_job():
             try:
-                item = future.result()
-            except Exception as exc:
-                item = {
-                    "src": str(src),
-                    "name": src.name,
-                    "output": str(output_path),
-                    "status": f"ERROR:{exc}",
-                    "kind": "failed",
-                    "copied_output": "",
-                }
-            kind = item.get("kind")
-            src_text = item.get("src") or str(src)
-            output_text = item.get("output") or str(output_path)
-            if kind == "success":
-                success_outputs.append(output_text)
-                _add_task_result_output(result, output_text)
-                _watermark_log(app, logs, f"[批量水印] 成功: {item.get('name') or Path(src_text).name} -> {output_text}")
-                if settings.get("delete_source"):
-                    try:
-                        Path(src_text).unlink()
-                    except Exception as delete_exc:
-                        _watermark_log(app, logs, f"[批量水印] 删除源文件失败: {Path(src_text).name} | {delete_exc}")
-            elif kind == "skipped":
-                copied_output = item.get("copied_output") or ""
-                if copied_output:
-                    copied_skipped_outputs.append(copied_output)
-                    _add_task_result_output(result, copied_output)
-                    _watermark_log(app, logs, f"[批量水印] 受保护文件无法加水印，已保留原文件: {Path(src_text).name} -> {copied_output}")
-                elif _get_watermark_copy_skipped_to_output(app):
-                    deferred_skipped_copy_items.append(src_text)
-                skipped_items.append(src_text)
-                _watermark_log(app, logs, f"[批量水印] 跳过: {Path(src_text).name} | {item.get('status')}")
-            else:
-                failed_items.append(src_text)
-                _watermark_log(app, logs, f"[批量水印] 失败: {Path(src_text).name} | {item.get('status') or 'unknown'}")
-            processed_count += 1
-            _watermark_update_progress(app, current_file=src_text, stage="添加水印", completed=processed_count, total=max(overall_total, 1))
+                job = next(job_iterator)
+            except StopIteration:
+                return False
+            future_map[executor.submit(process_pdf_job, job)] = job
+            return True
+
+        for _ in range(min(len(jobs), workers * WATERMARK_PDF_QUEUE_FACTOR)):
+            if not submit_next_job():
+                break
+
+        while future_map:
+            done, _ = concurrent.futures.wait(
+                future_map,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for future in done:
+                src, output_path = future_map.pop(future)
+                try:
+                    item = future.result()
+                except Exception as exc:
+                    item = {
+                        "src": str(src),
+                        "name": src.name,
+                        "output": str(output_path),
+                        "status": f"ERROR:{exc}",
+                        "kind": "failed",
+                        "copied_output": "",
+                    }
+                kind = item.get("kind")
+                src_text = item.get("src") or str(src)
+                output_text = item.get("output") or str(output_path)
+                if kind == "success":
+                    success_outputs.append(output_text)
+                    _watermark_checkpoint_mark(checkpoint, src_text, output_text, "success")
+                    _add_task_result_output(result, output_text)
+                    _watermark_log(app, logs, f"[批量水印] 成功: {item.get('name') or Path(src_text).name} -> {output_text}")
+                    if settings.get("delete_source"):
+                        try:
+                            Path(src_text).unlink()
+                        except Exception as delete_exc:
+                            _watermark_log(app, logs, f"[批量水印] 删除源文件失败: {Path(src_text).name} | {delete_exc}")
+                elif kind == "skipped":
+                    _watermark_checkpoint_mark(checkpoint, src_text, output_text, "skipped")
+                    copied_output = item.get("copied_output") or ""
+                    if copied_output:
+                        copied_skipped_outputs.append(copied_output)
+                        _add_task_result_output(result, copied_output)
+                        _watermark_log(app, logs, f"[批量水印] 受保护文件无法加水印，已保留原文件: {Path(src_text).name} -> {copied_output}")
+                    elif _get_watermark_copy_skipped_to_output(app):
+                        deferred_skipped_copy_items.append(src_text)
+                    skipped_items.append(src_text)
+                    _watermark_log(app, logs, f"[批量水印] 跳过: {Path(src_text).name} | {item.get('status')}")
+                else:
+                    failed_items.append(src_text)
+                    _watermark_log(app, logs, f"[批量水印] 失败: {Path(src_text).name} | {item.get('status') or 'unknown'}")
+                processed_count += 1
+                _watermark_update_progress(app, current_file=src_text, stage="添加水印", completed=processed_count, total=max(overall_total, 1))
+                if not getattr(app, "stop_event", False):
+                    submit_next_job()
 
     if rule_skipped_files:
         copied_skipped, failed_copies = _copy_watermark_skipped_files(app, rule_skipped_files, input_root, output_root, actual_strategy, logs, result)
@@ -11289,7 +11937,70 @@ def _run_watermark_pdf_parallel_task(
         _set_task_result_finished(result, "success", message="批量水印完成", detail="批量水印完成")
     else:
         _set_task_result_finished(result, "skipped", message="没有生成新的水印文件", detail="没有生成新的水印文件", skipped=True)
+    _flush_watermark_ui_logs(app, force=True)
     return result
+
+
+def _run_watermark_pdf_parallel_task(
+    app,
+    all_files,
+    input_root,
+    output_root,
+    actual_strategy,
+    settings,
+    logs,
+    result,
+    overall_total,
+    rule_skipped_files,
+    type_skipped_files,
+    unsupported_skipped_files,
+    checkpoint=None,
+    resumed_entries=None,
+):
+    try:
+        task_result = _run_watermark_pdf_parallel_task_impl(
+            app,
+            all_files,
+            input_root,
+            output_root,
+            actual_strategy,
+            settings,
+            logs,
+            result,
+            overall_total,
+            rule_skipped_files,
+            type_skipped_files,
+            unsupported_skipped_files,
+            checkpoint=checkpoint,
+            resumed_entries=resumed_entries,
+        )
+    except Exception as exc:
+        _watermark_checkpoint_finish(
+            checkpoint,
+            "interrupted",
+            int(result.get("processed_count") or 0),
+            overall_total,
+            f"exception:{type(exc).__name__}",
+        )
+        raise
+
+    if getattr(app, "stop_event", False):
+        checkpoint_state = "paused"
+        checkpoint_message = "user_stop"
+    elif result.get("failed_items"):
+        checkpoint_state = "failed"
+        checkpoint_message = "failed_items"
+    else:
+        checkpoint_state = "completed"
+        checkpoint_message = "completed"
+    _watermark_checkpoint_finish(
+        checkpoint,
+        checkpoint_state,
+        int(result.get("processed_count") or 0),
+        overall_total,
+        checkpoint_message,
+    )
+    return task_result
 
 
 def _run_watermark_task(app, input_value):
@@ -11301,6 +12012,8 @@ def _run_watermark_task(app, input_value):
     output_root = input_root if actual_strategy in {"same_dir", "overwrite"} else os.path.join(input_root, RESULT_FOLDER_NAME)
     settings = _get_watermark_settings(app)
     logs = []
+    _flush_watermark_ui_logs(app, force=True)
+    app._fx_watermark_ui_log_pending = []
 
     result = _get_last_task_result(app)
     if result is None:
@@ -11321,7 +12034,6 @@ def _run_watermark_task(app, input_value):
     previous_skip_value = None
     restore_skip_value = False
     previous_rule_loading = getattr(app, "_fx_wm_filename_rule_loading", False)
-    input_files = _collect_watermark_input_files(normalized_input)
     try:
         app._fx_wm_filename_rule_runtime = filename_rule
         app._fx_wm_filename_rule_skipped_files = []
@@ -11352,22 +12064,58 @@ def _run_watermark_task(app, input_value):
         if item_key:
             known_file_keys.add(item_key)
     unsupported_skipped_files = []
-    for item in input_files:
-        item_key = _normalize_watermark_file_key(item)
-        if item_key and item_key not in known_file_keys:
-            unsupported_skipped_files.append(str(Path(_normalize_input_path_value(item))))
+    # A second full directory walk is only necessary when skipped unsupported
+    # files must be copied to the result folder.  Most watermark jobs do not
+    # enable that option, so avoid scanning a large tree twice before work starts.
+    if _get_watermark_copy_skipped_to_output(app):
+        for item in _collect_watermark_input_files(normalized_input):
+            item_key = _normalize_watermark_file_key(item)
+            if item_key and item_key not in known_file_keys:
+                unsupported_skipped_files.append(str(Path(_normalize_input_path_value(item))))
+    checkpoint = _watermark_checkpoint_context(
+        normalized_input,
+        input_root,
+        output_root,
+        actual_strategy,
+        settings,
+        len(all_files),
+    )
+    try:
+        app._fx_watermark_checkpoint_active = checkpoint
+    except Exception:
+        pass
+    previous_checkpoint_state = str((checkpoint or {}).get("data", {}).get("previous_state") or "")
+    if previous_checkpoint_state in {"running", "interrupted"}:
+        _watermark_log(
+            app,
+            logs,
+            f"[断点续传] 上次任务未正常结束（{previous_checkpoint_state}），将从已记录的完成项继续。",
+        )
+    all_files, resumed_entries = _watermark_checkpoint_split(
+        checkpoint,
+        all_files,
+        input_root,
+        output_root,
+        actual_strategy,
+        settings,
+        is_single_input,
+    )
+    resumed_count = len(resumed_entries)
+    result["resumed_count"] = resumed_count
     total = len(all_files)
-    overall_total = total + len(rule_skipped_files) + len(type_skipped_files) + len(unsupported_skipped_files)
-    if total <= 0 and not rule_skipped_files and not type_skipped_files and not unsupported_skipped_files:
+    overall_total = total + resumed_count + len(rule_skipped_files) + len(type_skipped_files) + len(unsupported_skipped_files)
+    if total <= 0 and resumed_count <= 0 and not rule_skipped_files and not type_skipped_files and not unsupported_skipped_files:
         _watermark_log(app, logs, "[批量水印] 未找到可处理文件")
         _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=1)
         _set_task_result_finished(result, "skipped", message="未找到可处理文件", detail="未找到可处理文件", skipped=True)
+        _watermark_checkpoint_finish(checkpoint, "completed", 0, overall_total, "no_files")
         return result
-
     if actual_strategy == "result_folder" or ((rule_skipped_files or type_skipped_files or unsupported_skipped_files) and _get_watermark_copy_skipped_to_output(app)):
         os.makedirs(output_root, exist_ok=True)
 
     _watermark_log(app, logs, f"[批量水印] 将处理 {total} 个文件 | 输出策略：{_get_output_strategy_label(actual_strategy)}")
+    if resumed_count:
+        _watermark_log(app, logs, f"[断点续传] 已确认 {resumed_count} 个已完成文件，跳过逐文件处理。")
     if settings.get("copy_guard_enabled"):
         strength_label = WATERMARK_COPY_GUARD_STRENGTH_LABELS.get(
             settings.get("copy_guard_strength", "standard"),
@@ -11402,17 +12150,26 @@ def _run_watermark_task(app, input_value):
             rule_skipped_files,
             type_skipped_files,
             unsupported_skipped_files,
+            checkpoint=checkpoint,
+            resumed_entries=resumed_entries,
         )
 
-    success_outputs = []
+    success_outputs = [str(item.get("output")) for item in resumed_entries if item.get("output")]
     failed_items = []
-    skipped_items = []
+    skipped_items = [str(item.get("source")) for item in resumed_entries if item.get("source")]
     copied_skipped_outputs = []
     deferred_skipped_copy_items = []
-    processed_count = 0
+    processed_count = resumed_count
+    for item in resumed_entries:
+        _add_task_result_output(result, str(item.get("output") or ""))
     word_app = None
     ppt_app = None
     pythoncom_initialized = False
+    parallel_executor = None
+    parallel_future_map = {}
+    parallel_pdf_jobs = []
+    parallel_pdf_job_index = 0
+    serial_files = list(all_files)
 
     def get_word_app():
         nonlocal word_app, pythoncom_initialized
@@ -11436,8 +12193,143 @@ def _run_watermark_task(app, input_value):
                 pass
         return ppt_app
 
+    def process_parallel_pdf_job(job):
+        src, output_path, pdf_settings = job
+        status = _watermark_process_pdf(src, output_path, pdf_settings)
+        kind = _watermark_status_kind(status)
+        item = {
+            "src": str(src),
+            "name": src.name,
+            "output": str(output_path),
+            "status": status,
+            "kind": kind,
+            "copied_output": "",
+        }
+        if kind == "skipped" and _watermark_should_preserve_original(status) and output_path.resolve() != src.resolve():
+            try:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(output_path))
+                item["copied_output"] = str(output_path)
+            except Exception as exc:
+                item["kind"] = "failed"
+                item["status"] = f"ERROR:preserve original failed: {exc}"
+        return item
+
+    def record_parallel_pdf_result(future):
+        nonlocal processed_count
+        src, output_path, _pdf_settings = parallel_future_map.pop(future)
+        try:
+            item = future.result()
+        except Exception as exc:
+            item = {
+                "src": str(src),
+                "name": src.name,
+                "output": str(output_path),
+                "status": f"ERROR:{exc}",
+                "kind": "failed",
+                "copied_output": "",
+            }
+        kind = item.get("kind")
+        src_text = item.get("src") or str(src)
+        output_text = item.get("output") or str(output_path)
+        if kind == "success":
+            success_outputs.append(output_text)
+            _watermark_checkpoint_mark(checkpoint, src_text, output_text, "success")
+            _add_task_result_output(result, output_text)
+            _watermark_log(app, logs, f"[批量水印] 成功: {item.get('name') or Path(src_text).name} -> {output_text}")
+            if settings.get("delete_source"):
+                try:
+                    Path(src_text).unlink()
+                except Exception as delete_exc:
+                    _watermark_log(app, logs, f"[批量水印] 删除源文件失败: {Path(src_text).name} | {delete_exc}")
+        elif kind == "skipped":
+            _watermark_checkpoint_mark(checkpoint, src_text, output_text, "skipped")
+            copied_output = item.get("copied_output") or ""
+            if copied_output:
+                copied_skipped_outputs.append(copied_output)
+                _add_task_result_output(result, copied_output)
+                _watermark_log(app, logs, f"[批量水印] 受保护文件无法加水印，已保留原文件: {Path(src_text).name} -> {copied_output}")
+            elif _get_watermark_copy_skipped_to_output(app):
+                deferred_skipped_copy_items.append(src_text)
+            skipped_items.append(src_text)
+            _watermark_log(app, logs, f"[批量水印] 跳过: {Path(src_text).name} | {item.get('status')}")
+        else:
+            failed_items.append(src_text)
+            _watermark_log(app, logs, f"[批量水印] 失败: {Path(src_text).name} | {item.get('status') or 'unknown'}")
+        processed_count += 1
+        _watermark_update_progress(app, current_file=src_text, stage="添加水印", completed=processed_count, total=max(overall_total, 1))
+
+    pdf_files = []
+    office_files = []
+    for file_path in all_files:
+        try:
+            is_pdf = Path(_normalize_input_path_value(file_path)).suffix.lower() in WATERMARK_PDF_EXTS
+        except Exception:
+            is_pdf = False
+        (pdf_files if is_pdf else office_files).append(file_path)
+    use_mixed_pdf_parallel = (
+        not is_single_input
+        and _is_parallel_enabled(app)
+        and not settings.get("convert_pdf")
+        and len(pdf_files) > 1
+        and bool(office_files)
+        and _get_watermark_pdf_worker_count(len(pdf_files)) > 1
+    )
+    if use_mixed_pdf_parallel:
+        pdf_settings = dict(settings)
+        try:
+            packet = _watermark_make_pdf_packet(settings)
+            packet.seek(0)
+            pdf_settings["_pdf_packet_bytes"] = packet.getvalue()
+        except Exception:
+            pdf_settings.pop("_pdf_packet_bytes", None)
+        serial_files = office_files
+        for file_path in pdf_files:
+            if getattr(app, "stop_event", False):
+                break
+            src = Path(_normalize_input_path_value(file_path))
+            src = _resolve_watermark_source_path(src, input_root)
+            target_path = Path(
+                _build_watermark_output_path(
+                    src,
+                    input_root,
+                    output_root,
+                    actual_strategy,
+                    convert_to_pdf=False,
+                    single_input=False,
+                )
+            )
+            try:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+            except Exception as exc:
+                failed_items.append(str(src))
+                processed_count += 1
+                _watermark_log(app, logs, f"[批量水印] 失败: {src.name} | 输出路径准备失败: {_watermark_format_path_error(target_path.parent, exc)}")
+                continue
+            if not src.exists():
+                failed_items.append(str(src))
+                processed_count += 1
+                _watermark_log(app, logs, f"[批量水印] 失败: {src.name} | 源文件不存在")
+                continue
+            if is_nonempty_file(target_path):
+                success_outputs.append(str(target_path))
+                skipped_items.append(str(src))
+                _watermark_checkpoint_mark(checkpoint, src, target_path, "skipped")
+                _add_task_result_output(result, str(target_path))
+                processed_count += 1
+                _watermark_log(app, logs, f"[批量水印] 断点续跑：已存在结果，跳过处理: {src.name} -> {target_path}")
+                continue
+            parallel_pdf_jobs.append((src, target_path, pdf_settings))
+        if parallel_pdf_jobs:
+            workers = _get_watermark_pdf_worker_count(len(parallel_pdf_jobs))
+            _watermark_log(app, logs, f"[批量并行] PDF 水印启用 {workers} 个线程，Word/PPT 保持单线程。")
+            parallel_executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+            for job in parallel_pdf_jobs[: workers * WATERMARK_PDF_QUEUE_FACTOR]:
+                parallel_future_map[parallel_executor.submit(process_parallel_pdf_job, job)] = job
+            parallel_pdf_job_index = min(len(parallel_pdf_jobs), workers * WATERMARK_PDF_QUEUE_FACTOR)
+
     try:
-        for index, file_path in enumerate(all_files, start=1):
+        for index, file_path in enumerate(serial_files, start=1):
             if getattr(app, "stop_event", False):
                 break
             src = Path(_normalize_input_path_value(file_path))
@@ -11528,7 +12420,7 @@ def _run_watermark_task(app, input_value):
                 app,
                 current_file=str(src),
                 stage="添加水印",
-                completed=index - 1,
+                completed=processed_count,
                 total=max(overall_total, 1),
             )
             try:
@@ -11538,6 +12430,7 @@ def _run_watermark_task(app, input_value):
             if not same_file_output and is_nonempty_file(output_path):
                 success_outputs.append(str(output_path))
                 skipped_items.append(str(src))
+                _watermark_checkpoint_mark(checkpoint, src, output_path, "skipped")
                 _add_task_result_output(result, str(output_path))
                 _watermark_log(app, logs, f"[批量水印] 断点续跑：已存在结果，跳过处理: {src.name} -> {output_path}")
                 processed_count += 1
@@ -11609,6 +12502,7 @@ def _run_watermark_task(app, input_value):
                         except Exception as delete_exc:
                             _watermark_log(app, logs, f"[批量水印] 删除源文件失败: {src.name} | {delete_exc}")
                     success_outputs.append(str(output_path))
+                    _watermark_checkpoint_mark(checkpoint, src, output_path, "success")
                     _add_task_result_output(result, str(output_path))
                     _watermark_log(app, logs, f"[批量水印] 成功: {src.name} -> {output_path}")
                 elif kind == "skipped":
@@ -11646,6 +12540,22 @@ def _run_watermark_task(app, input_value):
                     completed=processed_count,
                     total=max(overall_total, 1),
                 )
+
+        if parallel_executor is not None:
+            workers = _get_watermark_pdf_worker_count(len(pdf_files))
+            while parallel_future_map:
+                done, _ = concurrent.futures.wait(
+                    parallel_future_map,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for future in done:
+                    record_parallel_pdf_result(future)
+                    if parallel_pdf_job_index < len(parallel_pdf_jobs) and not getattr(app, "stop_event", False):
+                        job = parallel_pdf_jobs[parallel_pdf_job_index]
+                        parallel_pdf_job_index += 1
+                        parallel_future_map[parallel_executor.submit(process_parallel_pdf_job, job)] = job
+            parallel_executor.shutdown(wait=True)
+            parallel_executor = None
 
         if rule_skipped_files:
             copied_skipped, failed_copies = _copy_watermark_skipped_files(
@@ -11726,21 +12636,42 @@ def _run_watermark_task(app, input_value):
             skipped=len(skipped_items),
         )
         if getattr(app, "stop_event", False):
+            _watermark_checkpoint_finish(checkpoint, "paused", processed_count, overall_total, "user_stop")
             _set_task_result_finished(result, "stopped", message="用户停止批量水印任务", detail="用户停止批量水印任务", stopped=True)
         elif failed_items:
+            _watermark_checkpoint_finish(checkpoint, "failed", processed_count, overall_total, "failed_items")
             _set_task_result_finished(
-                result,
-                "failed",
-                message=f"批量水印失败 {len(failed_items)} 个文件",
-                detail=f"批量水印失败 {len(failed_items)} 个文件",
-                error=f"failed_items={len(failed_items)}",
-            )
+                    result,
+                    "failed",
+                    message=f"批量水印失败 {len(failed_items)} 个文件",
+                    detail=f"批量水印失败 {len(failed_items)} 个文件",
+                    error=f"failed_items={len(failed_items)}",
+                )
         elif success_outputs or copied_skipped_outputs:
+            _watermark_checkpoint_finish(checkpoint, "completed", processed_count, overall_total, "completed")
             _set_task_result_finished(result, "success", message="批量水印完成", detail="批量水印完成")
         else:
+            _watermark_checkpoint_finish(checkpoint, "completed", processed_count, overall_total, "completed")
             _set_task_result_finished(result, "skipped", message="没有生成新的水印文件", detail="没有生成新的水印文件", skipped=True)
+        _flush_watermark_ui_logs(app, force=True)
         return result
+    except Exception as exc:
+        _watermark_checkpoint_finish(
+            checkpoint,
+            "interrupted",
+            processed_count,
+            overall_total,
+            f"exception:{type(exc).__name__}",
+        )
+        raise
     finally:
+        if parallel_executor is not None:
+            try:
+                parallel_executor.shutdown(wait=True, cancel_futures=True)
+            except TypeError:
+                parallel_executor.shutdown(wait=True)
+            except Exception:
+                pass
         try:
             if word_app is not None:
                 word_app.Quit()
@@ -11776,8 +12707,21 @@ def _patch_watermark_task():
                     self.log(f"[批量水印] 严重错误: {exc}")
                 except Exception:
                     pass
+                checkpoint = getattr(self, "_fx_watermark_checkpoint_active", None)
+                _watermark_checkpoint_finish(
+                    checkpoint,
+                    "interrupted",
+                    int((_get_last_task_result(self) or {}).get("processed_count") or 0),
+                    int((_get_last_task_result(self) or {}).get("total_count") or 0),
+                    f"exception:{type(exc).__name__}",
+                )
                 _finalize_current_task_result(self, "failed", message=str(exc), detail=str(exc), error=str(exc))
             finally:
+                try:
+                    self._fx_watermark_checkpoint_active = None
+                except Exception:
+                    pass
+                _set_watermark_checkpoint_action_state(self, "normal")
                 try:
                     self.reset_ui()
                 except Exception:
@@ -14302,6 +15246,63 @@ def _install_progress_status_label(app):
     app._fx_progress_status_ready = True
 
 
+def _fit_queue_bottom_action_widths(app, action_row=None):
+    row = action_row
+    if row is None:
+        try:
+            for child in app.bottom_bar.winfo_children():
+                if isinstance(child, customtkinter.CTkFrame) and child.winfo_children():
+                    row = child
+                    break
+        except Exception:
+            row = None
+    if row is None:
+        return
+
+    try:
+        row.pack_configure(fill="x", expand=True)
+    except Exception:
+        pass
+    try:
+        row.update_idletasks()
+        available = int(row.winfo_width())
+    except Exception:
+        available = 0
+
+    if available >= 1160:
+        widths = {
+            "btn_run": 220,
+            "btn_stop": 178,
+            "wm_clear_checkpoint_button": 116,
+            "btn_queue_add": 96,
+            "btn_queue_panel": 116,
+        }
+    elif available >= 980:
+        widths = {
+            "btn_run": 198,
+            "btn_stop": 162,
+            "wm_clear_checkpoint_button": 106,
+            "btn_queue_add": 92,
+            "btn_queue_panel": 112,
+        }
+    else:
+        widths = {
+            "btn_run": 178,
+            "btn_stop": 148,
+            "wm_clear_checkpoint_button": 98,
+            "btn_queue_add": 88,
+            "btn_queue_panel": 108,
+        }
+    for attr, width in widths.items():
+        widget = getattr(app, attr, None)
+        if widget is None:
+            continue
+        try:
+            widget.configure(width=width)
+        except Exception:
+            pass
+
+
 def _install_queue_bottom_actions(app):
     _ensure_queue_state(app)
     if getattr(app, "_fx_queue_actions_ready", False):
@@ -14350,6 +15351,11 @@ def _install_queue_bottom_actions(app):
         _debug(f"queue:bottom_actions_error:{exc}")
         return
     app._fx_queue_actions_ready = True
+    _fit_queue_bottom_action_widths(app, action_row)
+    try:
+        app.after(250, lambda target=app: _fit_queue_bottom_action_widths(target, action_row))
+    except Exception:
+        pass
     _refresh_queue_status_summary(app)
 
 
@@ -14907,6 +15913,8 @@ def _patch_sidebar_build_performance():
 
 
 _patch_sidebar_build_performance()
+
+_patch_log_display_behavior()
 
 try:
     _wrap_callable(customtkinter.CTk, "__init__", "ctk_init")

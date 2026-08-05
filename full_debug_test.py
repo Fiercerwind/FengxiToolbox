@@ -54,6 +54,7 @@ from tools.fx_resume import (
     is_nonempty_file as is_nonempty_file_module,
     outputs_are_complete as outputs_are_complete_module,
 )
+import tools.fx_watermark_core as watermark_core_module
 from tools.fx_watermark_core import (
     COPY_GUARD_METADATA_KEY as COPY_GUARD_METADATA_KEY_MODULE,
     COPY_GUARD_METADATA_VALUE as COPY_GUARD_METADATA_VALUE_MODULE,
@@ -66,6 +67,15 @@ from tools.fx_watermark_core import (
     create_watermark_packet as create_watermark_packet_module,
     normalize_copy_guard_strength as normalize_copy_guard_strength_module,
     normalize_watermark_page_range as normalize_watermark_page_range_module,
+)
+from tools.fx_watermark_checkpoint import (
+    build_checkpoint_identity as build_watermark_checkpoint_identity_module,
+    clear_checkpoint as clear_watermark_checkpoint_module,
+    load_checkpoint as load_watermark_checkpoint_module,
+    mark_item as mark_watermark_checkpoint_item_module,
+    mark_state as mark_watermark_checkpoint_state_module,
+    prepare_checkpoint as prepare_watermark_checkpoint_module,
+    split_resumable_files as split_watermark_checkpoint_files_module,
 )
 from tools.fx_zip_core import (
     estimate_zip_progress_units as estimate_zip_progress_units_module,
@@ -285,6 +295,95 @@ def main():
         payload = {"case": name, "ok": bool(ok), "detail": str(detail), "skipped": bool(skipped)}
         results.append(payload)
         print(json.dumps(payload, ensure_ascii=True), flush=True)
+
+    checkpoint_root = root / "watermark_checkpoint"
+    checkpoint_root.mkdir()
+    checkpoint_source_a = checkpoint_root / "source_a.pdf"
+    checkpoint_source_b = checkpoint_root / "source_b.pdf"
+    checkpoint_output_a = checkpoint_root / "output_a.pdf"
+    checkpoint_output_b = checkpoint_root / "output_b.pdf"
+    checkpoint_source_a.write_bytes(b"source-a")
+    checkpoint_source_b.write_bytes(b"source-b")
+    checkpoint_output_a.write_bytes(b"output-a")
+    checkpoint_output_b.write_bytes(b"output-b")
+    checkpoint_path = checkpoint_root / "resume.jsonl"
+    checkpoint_settings = {"text": "checkpoint", "font_size": 60, "copy_guard_enabled": False}
+    checkpoint_identity = build_watermark_checkpoint_identity_module(
+        checkpoint_root,
+        "result_folder",
+        checkpoint_settings,
+    )
+    checkpoint_data = prepare_watermark_checkpoint_module(
+        checkpoint_path,
+        checkpoint_root,
+        "result_folder",
+        checkpoint_identity,
+        2,
+    )
+    mark_watermark_checkpoint_item_module(checkpoint_path, checkpoint_source_a, checkpoint_output_a, "success")
+    mark_watermark_checkpoint_state_module(checkpoint_path, "paused", 1, 2, "user_stop")
+    checkpoint_loaded = load_watermark_checkpoint_module(checkpoint_path)
+    checkpoint_pending, checkpoint_resumed = split_watermark_checkpoint_files_module(
+        [checkpoint_source_a, checkpoint_source_b],
+        checkpoint_loaded,
+        lambda source: checkpoint_root / f"output_{Path(source).stem[-1]}.pdf",
+    )
+    record(
+        "watermark_checkpoint_paused_resume",
+        checkpoint_loaded.get("state") == "paused"
+        and checkpoint_data.get("previous_state") == ""
+        and [Path(item).name for item in checkpoint_pending] == [checkpoint_source_b.name]
+        and [item.get("source") for item in checkpoint_resumed] == [str(checkpoint_source_a)],
+        {"state": checkpoint_loaded.get("state"), "pending": [str(item) for item in checkpoint_pending], "resumed": checkpoint_resumed},
+    )
+    mark_watermark_checkpoint_item_module(checkpoint_path, checkpoint_source_b, checkpoint_output_b, "success")
+    mark_watermark_checkpoint_state_module(checkpoint_path, "completed", 2, 2, "completed")
+    checkpoint_completed = load_watermark_checkpoint_module(checkpoint_path)
+    completed_pending, completed_resumed = split_watermark_checkpoint_files_module(
+        [checkpoint_source_a, checkpoint_source_b],
+        checkpoint_completed,
+        lambda source: checkpoint_root / f"output_{Path(source).stem[-1]}.pdf",
+    )
+    record(
+        "watermark_checkpoint_completed_reuse",
+        checkpoint_completed.get("state") == "completed"
+        and not completed_pending
+        and len(completed_resumed) == 2,
+        {"state": checkpoint_completed.get("state"), "resumed": completed_resumed},
+    )
+    checkpoint_source_a.write_bytes(b"source-a-changed")
+    changed_pending, changed_resumed = split_watermark_checkpoint_files_module(
+        [checkpoint_source_a, checkpoint_source_b],
+        checkpoint_completed,
+        lambda source: checkpoint_root / f"output_{Path(source).stem[-1]}.pdf",
+    )
+    checkpoint_output_b.unlink()
+    missing_output_pending, missing_output_resumed = split_watermark_checkpoint_files_module(
+        [checkpoint_source_a, checkpoint_source_b],
+        checkpoint_completed,
+        lambda source: checkpoint_root / f"output_{Path(source).stem[-1]}.pdf",
+    )
+    record(
+        "watermark_checkpoint_revalidates_changed_or_missing",
+        [Path(item).name for item in changed_pending] == [checkpoint_source_a.name]
+        and len(changed_resumed) == 1
+        and {Path(item).name for item in missing_output_pending} == {checkpoint_source_a.name, checkpoint_source_b.name}
+        and not missing_output_resumed,
+        {
+            "changed_pending": [str(item) for item in changed_pending],
+            "changed_resumed": changed_resumed,
+            "missing_output_pending": [str(item) for item in missing_output_pending],
+        },
+    )
+    clear_watermark_checkpoint_module(checkpoint_path)
+    checkpoint_cleared = load_watermark_checkpoint_module(checkpoint_path)
+    record(
+        "watermark_checkpoint_clear_starts_over",
+        checkpoint_cleared.get("header") is None
+        and checkpoint_cleared.get("state") == ""
+        and not checkpoint_cleared.get("items"),
+        checkpoint_cleared,
+    )
 
     runtime_run_process = mod._unwrap_runtime_run_process(mod.FengxiToolboxApp.run_process)
     runtime_progress_map = mod._build_runtime_progress_site_map(runtime_run_process)
@@ -537,6 +636,149 @@ def main():
         and wrap_result == 5
         and wrap_logs == ["wrap_probe:start", "wrap_probe:done"],
         {"ok": wrap_ok, "result": wrap_result, "logs": wrap_logs},
+    )
+
+    normalized_log_sample = mod._normalize_log_display_text("🎯 [目标锁定] ✅ [系统提示] ⚠️ [提示]")
+
+    class FakeLogScrollWidget:
+        def __init__(self):
+            self.view = (0.0, 1.0)
+            self.moved_to = None
+            self._textbox = FakeLogScrollTarget()
+            self._y_scrollbar = FakeLogScrollTarget()
+            self._y_scrollbar._canvas = FakeLogScrollTarget()
+
+        def yview(self):
+            return self.view
+
+        def yview_moveto(self, fraction):
+            self.moved_to = fraction
+
+    class FakeLogScrollTarget:
+        def __init__(self):
+            self.bound_events = []
+
+        def bind(self, event_name, callback, add=None):
+            self.bound_events.append((event_name, callback, add))
+
+    class FakeLogScrollApp:
+        def __init__(self, widget):
+            self.log_box = widget
+            self._fx_log_follow_tail = True
+
+    fake_log_widget = FakeLogScrollWidget()
+    fake_log_app = FakeLogScrollApp(fake_log_widget)
+    fake_log_widget.view = (0.22, 0.55)
+    mod._sync_log_scroll_state(fake_log_app)
+    mod._restore_log_scroll_after_append(fake_log_app, 0.22)
+    record(
+        "log_display_normalizes_icons_and_preserves_scroll",
+        "🎯" not in normalized_log_sample
+        and "✅" not in normalized_log_sample
+        and "⚠" not in normalized_log_sample
+        and "[目标]" in normalized_log_sample
+        and fake_log_app._fx_log_follow_tail is False
+        and fake_log_widget.moved_to == 0.22,
+        {
+            "normalized": normalized_log_sample,
+            "follow_tail": fake_log_app._fx_log_follow_tail,
+            "restored_anchor": fake_log_widget.moved_to,
+        },
+    )
+    scrollbar_app = FakeLogScrollApp(FakeLogScrollWidget())
+    mod._bind_log_scroll_tracking(scrollbar_app)
+    record(
+        "log_display_tracks_ctk_y_scrollbar",
+        any(event[0] == "<ButtonRelease-1>" for event in scrollbar_app.log_box._y_scrollbar._canvas.bound_events),
+        [event[0] for event in scrollbar_app.log_box._y_scrollbar._canvas.bound_events],
+    )
+
+    class PreviewValue:
+        def __init__(self, value):
+            self.value = value
+
+        def get(self):
+            return self.value
+
+    class PreviewText:
+        def __init__(self, value):
+            self.value = value
+
+        def get(self, *_args):
+            return self.value
+
+    preview_probe = type(
+        "PreviewProbe",
+        (),
+        {
+            "wm_text": PreviewText("第一行\n第二行"),
+            "wm_color_var": PreviewValue("#C0C0C0"),
+            "slider_size": PreviewValue(60),
+            "slider_opacity": PreviewValue(0.18),
+            "slider_angle": PreviewValue(45),
+            "selected_font": PreviewValue(""),
+        },
+    )()
+    recorded_preview_multiline = []
+    original_image_draw = mod.ImageDraw.Draw
+
+    class RecordingDraw:
+        def __init__(self, delegate):
+            self.delegate = delegate
+
+        def multiline_text(self, position, text, *args, **kwargs):
+            recorded_preview_multiline.append(str(text))
+            return self.delegate.multiline_text(position, text, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.delegate, name)
+
+    def recording_image_draw(target):
+        return RecordingDraw(original_image_draw(target))
+
+    mod.ImageDraw.Draw = recording_image_draw
+    try:
+        preview_probe_image = mod._make_watermark_preview_image(preview_probe)
+    finally:
+        mod.ImageDraw.Draw = original_image_draw
+    record(
+        "watermark_preview_preserves_newlines",
+        preview_probe_image.size == (360, 92) and any("第一行\n第二行" in item for item in recorded_preview_multiline),
+        {"size": preview_probe_image.size, "multiline": recorded_preview_multiline},
+    )
+
+    result_filter_root = root / "watermark_result_filter"
+    result_filter_root.mkdir()
+    (result_filter_root / "keep.pdf").write_bytes(b"keep")
+    result_filter_folder = result_filter_root / mod.RESULT_FOLDER_NAME
+    result_filter_folder.mkdir()
+    (result_filter_folder / "old.pdf").write_bytes(b"old")
+    nested_result_filter_folder = result_filter_root / "source" / mod.RESULT_FOLDER_NAME
+    nested_result_filter_folder.mkdir(parents=True)
+    (nested_result_filter_folder / "nested.pdf").write_bytes(b"nested")
+    filtered_result_inputs, excluded_result_inputs = mod._filter_watermark_result_folder_inputs(
+        result_filter_root,
+        [
+            str(result_filter_root / "keep.pdf"),
+            str(result_filter_folder / "old.pdf"),
+            str(nested_result_filter_folder / "nested.pdf"),
+        ],
+    )
+    direct_result_inputs, direct_result_excluded = mod._filter_watermark_result_folder_inputs(
+        result_filter_folder,
+        [str(result_filter_folder / "old.pdf")],
+    )
+    record(
+        "watermark_scan_excludes_generated_result_folders",
+        filtered_result_inputs == [str(result_filter_root / "keep.pdf")]
+        and len(excluded_result_inputs) == 2
+        and direct_result_inputs == []
+        and len(direct_result_excluded) == 1,
+        {
+            "filtered": filtered_result_inputs,
+            "excluded": excluded_result_inputs,
+            "direct_result": direct_result_inputs,
+        },
     )
 
     class FakeCtk:
@@ -1406,8 +1648,8 @@ def main():
         and wm_copy_guard_settings.get("copy_guard_strength") == "strong"
         and "复制干扰层" in wm_copy_guard_preview
         and str(getattr(app.wm_copy_guard_strength_control, "_state", "")) == "normal"
-        and "全选整页/整份" in str(wm_copy_guard_hint.cget("text") if wm_copy_guard_hint is not None else "")
-        and "截图后重新 OCR 不受影响" in str(wm_copy_guard_hint.cget("text") if wm_copy_guard_hint is not None else ""),
+        and "PDF 插入不可见文本块" in str(wm_copy_guard_hint.cget("text") if wm_copy_guard_hint is not None else "")
+        and "强力：PDF 每页 14 个" in str(wm_copy_guard_hint.cget("text") if wm_copy_guard_hint is not None else ""),
         {
             "manager": wm_copy_guard_frame.winfo_manager() if wm_copy_guard_frame is not None else None,
             "copy_guard_index": copy_guard_index,
@@ -2101,6 +2343,22 @@ def main():
         and len(fake_repair_docs.calls[2]) >= 14
         and bool(fake_repair_docs.calls[2][13]),
         [len(args) for args in fake_repair_docs.calls],
+    )
+
+    class FastWordContent:
+        Start = 100
+        Text = "VISIBLE ONE\r\rVISIBLE TWO\x07\rTAIL"
+
+        @property
+        def Paragraphs(self):
+            raise AssertionError("fast Word paragraph scan must not access Paragraphs")
+
+    fast_word_doc = type("FastWordDoc", (), {"Content": FastWordContent()})()
+    fast_word_ranges = wm_core_module._word_meaningful_paragraph_ranges(fast_word_doc)
+    record(
+        "word_paragraph_scan_reads_body_text_once",
+        fast_word_ranges == [(100, 112), (113, 126), (126, 130)],
+        fast_word_ranges,
     )
 
     wm_protected_root = root / "watermark_protected_preserve"
@@ -2826,6 +3084,67 @@ def main():
         },
     )
 
+    copy_guard_one_pass_out = root / "copy_guard_one_pass_output.pdf"
+    legacy_interleave_calls = []
+    original_legacy_interleave = watermark_core_module._add_interleaved_copy_guard_to_pdf
+
+    def reject_legacy_copy_guard_interleave(*_args, **_kwargs):
+        legacy_interleave_calls.append(True)
+        return "ERROR:legacy copy guard second pass was invoked"
+
+    watermark_core_module._add_interleaved_copy_guard_to_pdf = reject_legacy_copy_guard_interleave
+    try:
+        copy_guard_one_pass_status = mod.add_watermark_to_pdf(
+            str(copy_guard_src),
+            str(copy_guard_one_pass_out),
+            mod.create_watermark_packet("", "Helvetica", 12, 0.0, 0),
+            page_range="first",
+            check_text="",
+            copy_guard=True,
+            copy_guard_strength="standard",
+        )
+    finally:
+        watermark_core_module._add_interleaved_copy_guard_to_pdf = original_legacy_interleave
+    copy_guard_one_pass_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(copy_guard_one_pass_out)).pages) if copy_guard_one_pass_out.exists() else ""
+    record(
+        "pdf_copy_guard_uses_single_write_path",
+        copy_guard_one_pass_status == "SUCCESS"
+        and not legacy_interleave_calls
+        and "NORMAL CUSTOMER VISIBLE LINE 06" in copy_guard_one_pass_text
+        and COPY_GUARD_TEXT_PREFIX_MODULE in copy_guard_one_pass_text,
+        {
+            "status": copy_guard_one_pass_status,
+            "legacy_interleave_calls": len(legacy_interleave_calls),
+            "output_exists": copy_guard_one_pass_out.exists(),
+            "text_length": len(copy_guard_one_pass_text),
+        },
+    )
+
+    copy_guard_fast_preflight_out = root / "copy_guard_fast_preflight_output.pdf"
+    original_copy_guard_reader = watermark_core_module.PdfReader
+
+    def reject_copy_guard_pypdf_preflight(*_args, **_kwargs):
+        raise AssertionError("copy guard fast path should not construct PdfReader")
+
+    watermark_core_module.PdfReader = reject_copy_guard_pypdf_preflight
+    try:
+        copy_guard_fast_preflight_status = mod.add_watermark_to_pdf(
+            str(copy_guard_src),
+            str(copy_guard_fast_preflight_out),
+            mod.create_watermark_packet("FAST PRECHECK", "Helvetica", 12, 0.15, 0),
+            page_range="all",
+            check_text="FAST PRECHECK",
+            copy_guard=True,
+            copy_guard_strength="standard",
+        )
+    finally:
+        watermark_core_module.PdfReader = original_copy_guard_reader
+    record(
+        "pdf_copy_guard_fast_preflight_avoids_pypdf_reader",
+        copy_guard_fast_preflight_status == "SUCCESS" and copy_guard_fast_preflight_out.exists(),
+        {"status": copy_guard_fast_preflight_status, "output": str(copy_guard_fast_preflight_out)},
+    )
+
     copy_guard_upgrade_out = root / "copy_guard_upgrade_existing_watermark.pdf"
     copy_guard_upgrade_status = mod.add_watermark_to_pdf(
         str(pdf_out),
@@ -3423,6 +3742,51 @@ def main():
         },
     )
     app.wm_copy_guard_enabled_var.set(False)
+
+    mixed_wm_root = root / "mixed_parallel_watermark"
+    mixed_wm_root.mkdir()
+    make_pdf(mixed_wm_root / "pdf_a.pdf", ["mixed parallel pdf a"])
+    make_pdf(mixed_wm_root / "pdf_b.pdf", ["mixed parallel pdf b"])
+    mixed_wm_docx = mixed_wm_root / "office.docx"
+    mixed_doc = Document()
+    mixed_doc.add_paragraph("mixed parallel office")
+    mixed_doc.save(mixed_wm_docx)
+    mod._safe_named_widget_set(app, "wm_text", "MIXED PARALLEL WM")
+    mod._safe_var_set(app, "output_strategy_var", mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["result_folder"])
+    mod._safe_var_set(app, "wm_convert_pdf", False)
+    mod._safe_var_set(app, "wm_delete_var", False)
+    mod._safe_var_set(app, "wm_skip_pdf_type_var", False)
+    mod._safe_var_set(app, "wm_skip_word_type_var", False)
+    mod._safe_var_set(app, "wm_skip_ppt_type_var", False)
+    mod._safe_var_set(app, "wm_overwrite_var", "force")
+    app.current_task = "watermark"
+    app.enable_multithread.set(True)
+    mixed_executor_workers = []
+    original_executor = mod.concurrent.futures.ThreadPoolExecutor
+
+    class RecordingMixedWatermarkExecutor(original_executor):
+        def __init__(self, *args, **kwargs):
+            mixed_executor_workers.append(kwargs.get("max_workers") if "max_workers" in kwargs else (args[0] if args else None))
+            super().__init__(*args, **kwargs)
+
+    mod.concurrent.futures.ThreadPoolExecutor = RecordingMixedWatermarkExecutor
+    try:
+        app.run_process(str(mixed_wm_root), "watermark")
+    finally:
+        mod.concurrent.futures.ThreadPoolExecutor = original_executor
+        app.enable_multithread.set(False)
+    mixed_wm_result = dict(getattr(app, "_fx_last_task_result", {}) or {})
+    mixed_wm_folder = mixed_wm_root / mod.RESULT_FOLDER_NAME
+    record(
+        "watermark_mixed_folder_splits_pdf_and_office",
+        any((value or 0) > 1 for value in mixed_executor_workers)
+        and mixed_wm_result.get("status") == "success"
+        and mixed_wm_result.get("success_count") == 3
+        and (mixed_wm_folder / "pdf_a.pdf").exists()
+        and (mixed_wm_folder / "pdf_b.pdf").exists()
+        and any(Path(item).name.endswith(".docx") for item in mixed_wm_result.get("outputs", [])),
+        {"workers": mixed_executor_workers, "result": mixed_wm_result},
+    )
 
     inp = root / "img_in"
     out = root / "img_out"

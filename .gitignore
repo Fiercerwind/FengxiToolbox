@@ -18,6 +18,7 @@ dist/
 dist*/
 
 tmp_*/
+tmp_*.pdf
 
 Thumbs.db
 Desktop.ini

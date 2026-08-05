@@ -305,18 +305,26 @@ def _copy_guard_page_size(page):
         return 0.0, 0.0, float(A4[0]), float(A4[1])
 
 
-def _add_interleaved_copy_guard_to_pdf(src_path, dst_path, strength, document_token):
-    """Interleave invisible blocks between existing text blocks using pikepdf.
+def _page_has_direct_text_resources(page):
+    """Return whether a page can contain directly selectable text.
 
-    PDF extractors follow content-stream order rather than visual coordinates.  Rewriting
-    only the parsed instruction list lets the blocks appear during a full-document copy,
-    while their left-edge coordinates keep ordinary visible-line selection clean.
+    Image-only pages have no text for a customer to copy.  Avoiding a complete
+    content-stream parse for them is important for large scanned PDF batches.
+    Text inside nested form XObjects was not interleaved by the previous
+    implementation either, so this preserves the existing protection scope.
     """
 
     try:
-        import pikepdf
-    except Exception as exc:
-        return f"ERROR:copy guard backend unavailable: {exc}"
+        resources = page.get("/Resources", None)
+        if resources is None:
+            return False
+        return bool(resources.get("/Font", None))
+    except Exception:
+        return True
+
+
+def _inject_copy_guard_into_pikepdf(pdf, pikepdf, strength, document_token):
+    """Add guard instructions to an already-open pikepdf document."""
 
     text_show_operators = {"Tj", "TJ", "'", '"'}
     font = pikepdf.Dictionary(
@@ -327,77 +335,183 @@ def _add_interleaved_copy_guard_to_pdf(src_path, dst_path, strength, document_to
             "/Encoding": pikepdf.Name("/WinAnsiEncoding"),
         }
     )
+    for page_index, page in enumerate(pdf.pages):
+        if not _page_has_direct_text_resources(page):
+            continue
+        instructions = list(pikepdf.parse_content_stream(page))
+        text_block_indexes = []
+        block_has_text = False
+        for index, instruction in enumerate(instructions):
+            operator = str(instruction.operator)
+            if operator == "BT":
+                block_has_text = False
+            elif operator in text_show_operators:
+                block_has_text = True
+            elif operator == "ET":
+                if block_has_text:
+                    # Keep every original BT...ET text block intact, so copying one
+                    # paragraph/text block does not cross into a guard block.
+                    text_block_indexes.append(index)
+                block_has_text = False
+        lines = _copy_guard_noise_lines(strength, page_index, document_token, allow_unicode=False)
+        left, bottom, _width, height = _copy_guard_page_size(page)
+        top_margin = min(12.0, max(2.0, height * 0.02))
+        available_height = max(1.0, height - (top_margin * 2.0))
+        step = available_height / max(1, len(lines) - 1) if len(lines) > 1 else 0.0
+        font_name = page.add_resource(font, pikepdf.Name("/Font"), prefix="FXCopyGuard")
+        insertions = {}
+
+        if text_block_indexes:
+            for line_index, line in enumerate(lines):
+                # Spread blocks through complete text blocks instead of appending them
+                # after the page. Duplicate anchors are intentional on short pages.
+                block_position = min(
+                    len(text_block_indexes) - 1,
+                    ((line_index + 1) * len(text_block_indexes)) // (len(lines) + 1),
+                )
+                anchor = text_block_indexes[block_position]
+                y_position = bottom + top_margin + (line_index * step)
+                insertions.setdefault(anchor, []).extend(
+                    _copy_guard_text_instruction_blocks(
+                        pikepdf,
+                        font_name,
+                        line,
+                        y_position,
+                    )
+                )
+        else:
+            # Image-only pages have no ordinary text to interleave with, but still
+            # receive the guard so their text layer remains consistently protected.
+            anchor = len(instructions) - 1
+            insertions[anchor] = []
+            for line_index, line in enumerate(lines):
+                y_position = bottom + top_margin + (line_index * step)
+                insertions[anchor].extend(
+                    _copy_guard_text_instruction_blocks(
+                        pikepdf,
+                        font_name,
+                        line,
+                        y_position,
+                    )
+                )
+
+        rewritten = []
+        for instruction_index, instruction in enumerate(instructions):
+            rewritten.append(instruction)
+            rewritten.extend(insertions.get(instruction_index, []))
+        if not instructions:
+            rewritten.extend(insertions.get(-1, []))
+        page.Contents = pdf.make_stream(pikepdf.unparse_content_stream(rewritten))
+
+
+def _pikepdf_docinfo_value(docinfo, key):
+    try:
+        return str(docinfo.get(key, "") or "")
+    except Exception:
+        return ""
+
+
+def _fast_copy_guard_preflight(src_path, check_text):
+    """Return watermark state without constructing a pypdf reader.
+
+    Copy-guard work is ultimately performed by pikepdf.  Reusing pikepdf for
+    the marker check removes one PDF backend open from the normal path.  MuPDF
+    is only used for the legacy first-page text fallback when metadata is absent.
+    ``None`` keeps the established pypdf/repair path as a compatibility fallback.
+    """
+
+    try:
+        import pikepdf
+    except Exception:
+        return None
+
     try:
         with pikepdf.Pdf.open(str(src_path)) as pdf:
-            for page_index, page in enumerate(pdf.pages):
-                instructions = list(pikepdf.parse_content_stream(page))
-                text_block_indexes = []
-                block_has_text = False
-                for index, instruction in enumerate(instructions):
-                    operator = str(instruction.operator)
-                    if operator == "BT":
-                        block_has_text = False
-                    elif operator in text_show_operators:
-                        block_has_text = True
-                    elif operator == "ET":
-                        if block_has_text:
-                            # Keep every original BT...ET text block intact, so copying one
-                            # paragraph/text block does not cross into a guard block.
-                            text_block_indexes.append(index)
-                        block_has_text = False
-                lines = _copy_guard_noise_lines(strength, page_index, document_token, allow_unicode=False)
-                left, bottom, _width, height = _copy_guard_page_size(page)
-                top_margin = min(12.0, max(2.0, height * 0.02))
-                available_height = max(1.0, height - (top_margin * 2.0))
-                step = available_height / max(1, len(lines) - 1) if len(lines) > 1 else 0.0
-                font_name = page.add_resource(font, pikepdf.Name("/Font"), prefix="FXCopyGuard")
-                insertions = {}
+            keywords = _pikepdf_docinfo_value(pdf.docinfo, "/Keywords")
+            creator = _pikepdf_docinfo_value(pdf.docinfo, "/Creator")
+            copy_guard_value = _pikepdf_docinfo_value(pdf.docinfo, COPY_GUARD_METADATA_KEY)
+            visible_exists = WATERMARK_MARKER in keywords or creator == WATERMARK_CREATOR
+            guard_exists = copy_guard_value == COPY_GUARD_METADATA_VALUE
+    except Exception:
+        return None
 
-                if text_block_indexes:
-                    for line_index, line in enumerate(lines):
-                        # Spread blocks through complete text blocks instead of appending them
-                        # after the page. Duplicate anchors are intentional on short pages.
-                        block_position = min(
-                            len(text_block_indexes) - 1,
-                            ((line_index + 1) * len(text_block_indexes)) // (len(lines) + 1),
-                        )
-                        anchor = text_block_indexes[block_position]
-                        y_position = bottom + top_margin + (line_index * step)
-                        insertions.setdefault(anchor, []).extend(
-                            _copy_guard_text_instruction_blocks(
-                                pikepdf,
-                                font_name,
-                                line,
-                                y_position,
-                            )
-                        )
-                else:
-                    # Image-only pages have no ordinary text to interleave with, but still
-                    # receive the guard so their text layer remains consistently protected.
-                    anchor = len(instructions) - 1
-                    insertions[anchor] = []
-                    for line_index, line in enumerate(lines):
-                        y_position = bottom + top_margin + (line_index * step)
-                        insertions[anchor].extend(
-                            _copy_guard_text_instruction_blocks(
-                                pikepdf,
-                                font_name,
-                                line,
-                                y_position,
-                            )
-                        )
+    if not visible_exists and check_text:
+        try:
+            import fitz
 
-                rewritten = []
-                for instruction_index, instruction in enumerate(instructions):
-                    rewritten.append(instruction)
-                    rewritten.extend(insertions.get(instruction_index, []))
-                if not instructions:
-                    rewritten.extend(insertions.get(-1, []))
-                page.Contents = pdf.make_stream(pikepdf.unparse_content_stream(rewritten))
+            with fitz.open(str(src_path)) as document:
+                if document.page_count:
+                    visible_exists = str(check_text) in (document[0].get_text("text") or "")
+        except Exception:
+            return None
+    return visible_exists, guard_exists
+
+
+def _add_interleaved_copy_guard_to_pdf(src_path, dst_path, strength, document_token):
+    """Interleave invisible blocks between existing text blocks using pikepdf."""
+
+    try:
+        import pikepdf
+    except Exception as exc:
+        return f"ERROR:copy guard backend unavailable: {exc}"
+
+    try:
+        with pikepdf.Pdf.open(str(src_path)) as pdf:
+            _inject_copy_guard_into_pikepdf(pdf, pikepdf, strength, document_token)
             pdf.save(str(dst_path))
         return "SUCCESS"
     except Exception as exc:
         return f"ERROR:copy guard interleave failed: {exc}"
+
+
+def _add_watermark_and_copy_guard_to_pdf(
+    src_path,
+    dst_path,
+    watermark_packet,
+    page_range,
+    copy_guard_strength,
+    document_token,
+):
+    """Apply the visible overlay and copy guard in one pikepdf write."""
+
+    try:
+        import pikepdf
+    except Exception as exc:
+        return f"ERROR:copy guard backend unavailable: {exc}"
+
+    watermark_pdf = None
+    try:
+        with pikepdf.Pdf.open(str(src_path)) as pdf:
+            watermark_page = None
+            if watermark_packet is not None:
+                watermark_packet.seek(0)
+                watermark_pdf = pikepdf.Pdf.open(watermark_packet)
+                watermark_page = watermark_pdf.pages[0]
+            target_pages = set(_select_watermark_page_indexes(len(pdf.pages), page_range))
+            if watermark_page is not None:
+                for index, page in enumerate(pdf.pages):
+                    if index in target_pages:
+                        page.add_overlay(watermark_page, push_stack=True, shrink=False, expand=False)
+
+            _inject_copy_guard_into_pikepdf(
+                pdf,
+                pikepdf,
+                copy_guard_strength,
+                document_token,
+            )
+            pdf.docinfo[pikepdf.Name("/Keywords")] = WATERMARK_MARKER
+            pdf.docinfo[pikepdf.Name("/Creator")] = WATERMARK_CREATOR
+            pdf.docinfo[pikepdf.Name(COPY_GUARD_METADATA_KEY)] = COPY_GUARD_METADATA_VALUE
+            pdf.save(str(dst_path))
+        return "SUCCESS"
+    except Exception as exc:
+        return f"ERROR:single-pass copy guard failed: {exc}"
+    finally:
+        if watermark_pdf is not None:
+            try:
+                watermark_pdf.close()
+            except Exception:
+                pass
 
 
 def _same_path(left, right):
@@ -552,15 +666,20 @@ def add_watermark_to_pdf(
         if not src_path.exists():
             return f"ERROR:source not found: {src_path}"
 
-        reader, repair_path, open_status = _open_pdf_reader_for_watermark(src_path)
-        if open_status:
-            return open_status
-        if reader is None:
-            return "ERROR:PDF reader unavailable"
-        visible_watermark_exists = _metadata_has_marker(reader.metadata)
-        if not visible_watermark_exists and check_text:
-            visible_watermark_exists = _first_page_contains(reader, check_text)
-        copy_guard_exists = _metadata_has_copy_guard(reader.metadata)
+        reader = None
+        preflight_state = _fast_copy_guard_preflight(src_path, check_text) if copy_guard else None
+        if preflight_state is not None:
+            visible_watermark_exists, copy_guard_exists = preflight_state
+        else:
+            reader, repair_path, open_status = _open_pdf_reader_for_watermark(src_path)
+            if open_status:
+                return open_status
+            if reader is None:
+                return "ERROR:PDF reader unavailable"
+            visible_watermark_exists = _metadata_has_marker(reader.metadata)
+            if not visible_watermark_exists and check_text:
+                visible_watermark_exists = _first_page_contains(reader, check_text)
+            copy_guard_exists = _metadata_has_copy_guard(reader.metadata)
         apply_visible_watermark = bool(force_mode or not visible_watermark_exists)
         apply_copy_guard = bool(copy_guard and (force_mode or not copy_guard_exists))
         if not apply_visible_watermark and not apply_copy_guard:
@@ -570,25 +689,7 @@ def add_watermark_to_pdf(
                 return "SKIP:already watermarked"
             return "SKIP:no watermark change requested"
 
-        watermark_page = None
-        if apply_visible_watermark:
-            if hasattr(watermark_packet, "seek"):
-                watermark_packet.seek(0)
-            watermark_reader = PdfReader(watermark_packet)
-            watermark_page = watermark_reader.pages[0]
-
-        writer = PdfWriter()
-        target_pages = _select_watermark_page_indexes(len(reader.pages), page_range)
         copy_guard_token = secrets.token_hex(16) if apply_copy_guard else ""
-        for index, page in enumerate(reader.pages):
-            if apply_visible_watermark and index in target_pages:
-                try:
-                    page.merge_page(watermark_page)
-                except AttributeError:
-                    page.mergePage(watermark_page)
-            writer.add_page(page)
-        writer.add_metadata(_writer_metadata(reader, copy_guard=copy_guard_exists or apply_copy_guard))
-
         dst_path.parent.mkdir(parents=True, exist_ok=True)
         output_path = dst_path
         temp_path = None
@@ -603,6 +704,46 @@ def add_watermark_to_pdf(
             temp_path = Path(handle.name)
             handle.close()
             output_path = temp_path
+
+        if apply_copy_guard:
+            one_pass_source = Path(repair_path) if repair_path is not None else src_path
+            one_pass_status = _add_watermark_and_copy_guard_to_pdf(
+                one_pass_source,
+                output_path,
+                watermark_packet if apply_visible_watermark else None,
+                page_range,
+                copy_guard_strength,
+                copy_guard_token,
+            )
+            if one_pass_status == "SUCCESS":
+                if temp_path is not None:
+                    os.replace(str(temp_path), str(dst_path))
+                return "SUCCESS"
+
+        if reader is None:
+            reader, repair_path, open_status = _open_pdf_reader_for_watermark(src_path)
+            if open_status:
+                return open_status
+            if reader is None:
+                return "ERROR:PDF reader unavailable"
+
+        watermark_page = None
+        if apply_visible_watermark:
+            if hasattr(watermark_packet, "seek"):
+                watermark_packet.seek(0)
+            watermark_reader = PdfReader(watermark_packet)
+            watermark_page = watermark_reader.pages[0]
+
+        writer = PdfWriter()
+        target_pages = _select_watermark_page_indexes(len(reader.pages), page_range)
+        for index, page in enumerate(reader.pages):
+            if apply_visible_watermark and index in target_pages:
+                try:
+                    page.merge_page(watermark_page)
+                except AttributeError:
+                    page.mergePage(watermark_page)
+            writer.add_page(page)
+        writer.add_metadata(_writer_metadata(reader, copy_guard=copy_guard_exists or apply_copy_guard))
 
         writer_output_path = output_path
         if apply_copy_guard:
@@ -752,6 +893,36 @@ def _mark_word_copy_guard(doc):
 
 
 def _word_meaningful_paragraph_ranges(doc):
+    """Return meaningful body paragraph ranges with one COM text read.
+
+    Accessing every Paragraph.Range property crosses the COM boundary several
+    times per paragraph. Word's body text already contains the paragraph marks,
+    so the same ranges can be reconstructed locally and the old path kept as a
+    fallback for unusual COM implementations.
+    """
+
+    try:
+        content = doc.Content
+        content_start = int(content.Start)
+        full_text = str(getattr(content, "Text", "") or "")
+        paragraphs = []
+        segment_start = 0
+        for index, character in enumerate(full_text):
+            if character != "\r":
+                continue
+            segment = full_text[segment_start:index]
+            if segment.replace("\r", "").replace("\x07", "").strip():
+                paragraphs.append((content_start + segment_start, content_start + index + 1))
+            segment_start = index + 1
+
+        if segment_start < len(full_text):
+            segment = full_text[segment_start:]
+            if segment.replace("\r", "").replace("\x07", "").strip():
+                paragraphs.append((content_start + segment_start, content_start + len(full_text)))
+        return paragraphs
+    except Exception:
+        pass
+
     paragraphs = []
     try:
         collection = doc.Content.Paragraphs

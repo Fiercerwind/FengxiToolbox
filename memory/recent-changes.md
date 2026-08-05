@@ -1,9 +1,39 @@
 # 最近变更
 
-## 2026-08-05 | pdf_file
-- 摘要：统一 OCR 页面方向修正名称
-- 文件：Fengxi_Toolbox.py, memory.md, memory/categories/pdf-file-meta-zip.md, memory/recent-changes.md
-- 说明：OCR 页面中的页面旋转开关、说明和日志统一为 `仅修正文本方向（不进行OCR）`；文字方向分类开关保持 `修正文本方向（OCR）`；内部变量和任务逻辑不变。
+## 2026-08-05 17:46:21 | watermark
+- 摘要：修复批量水印重复扫描结果目录导致嵌套输出
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory\recent-changes.md, memory\changes.jsonl
+- 说明：确认用户当前任务的断点记录中有 5227 个处理项，其中 1659 个源文件来自已有 `【处理完成】结果文件夹`，根因是实际 `app.collect_input_files()` 入口没有应用结果目录排除。现在批量水印会排除根目录或任意层级的结果目录；直接选中结果目录也不会再生成嵌套结果目录。已有用户目录未删除或移动。验证：py_compile、git diff --check、最小过滤回归通过；未打包，未停止运行中的 EXE。
+
+## 2026-08-05 17:35:47 | watermark
+- 摘要：修复水印预览框换行显示
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory\recent-changes.md, memory\changes.jsonl
+- 说明：预览不再把多行水印拼成单行分隔符，改用 Pillow 多行文本绘制；最多保留四行并按预览区域自动缩小字体，避免文字被裁切或覆盖参数标签。新增换行预览回归测试。验证：py_compile、git diff --check、最小多行绘制测试通过；未打包，运行中的 EXE 未受影响。
+
+## 2026-08-05 16:45:35 | runtime
+- 摘要：修复日志区滚动位置被新消息拉回底部
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory\recent-changes.md, memory\changes.jsonl
+- 说明：按 CTkTextbox 实际的 `_y_scrollbar._canvas` 监听右侧滚动条，滚动事件立即记录并在空闲时校准；新增滚动交互版本号，使用户滚动后旧日志恢复回调失效。新增右侧滚动条回归测试。验证：py_compile、git diff --check、最小滚动回归通过；未运行完整 Office 集成测试，未打包，运行中的 EXE 未受影响。
+
+## 2026-08-05 14:34:42 | runtime
+- 摘要：Fix output log mojibake and preserve manual scroll position
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory\recent-changes.md, memory\changes.jsonl
+- 说明：Loader-layer log patch replaces unsupported emoji decorations with stable Chinese labels, tracks log_box scrollbar state, and restores the user's non-tail anchor after new messages. No package was created. Validation: smoke 14/14; full debug 241/241.
+
+## 2026-08-05 14:13:59 | runtime
+- 摘要：Packaged and opened batch watermark throughput optimization build
+- 文件：dist_release_ascii\fx_toolbox\fx_toolbox.exe, Fengxi_Toolbox.py, tools\fx_watermark_core.py, full_debug_test.py, memory\categories\watermark-and-remove.md
+- 说明：完整 D 盘 onedir 打包完成，assets/fonts/README 收尾文件已核验；新版 EXE 已启动且 Responding=True。GitHub package sync counter is 2/5, so no GitHub push this time. Validation before package: smoke 14/14, full debug 240/240.
+
+## 2026-08-05 14:01:39 | watermark
+- 摘要：Batch watermark throughput optimization: bounded PDF queue, mixed PDF/Office split, fast copy-guard preflight, and batched UI logs
+- 文件：Fengxi_Toolbox.py, tools\fx_watermark_core.py, full_debug_test.py, memory\categories\watermark-and-remove.md
+- 说明：PDF watermark uses a 5-worker cap on the current 20-thread, 16GB SSD machine. No Office COM parallelism was introduced. Validation: smoke 14/14; full debug 240/240.
+
+## 2026-08-05 13:29:13 | watermark
+- 摘要：PDF 复制干扰层改为单次写入路径
+- 文件：tools\fx_watermark_core.py, full_debug_test.py, memory\categories\watermark-and-remove.md
+- 说明：PDF 干扰层将可见水印覆盖、文本块间乱码插入和元数据写入合并为一次 pikepdf 保存；异常时保留旧双阶段路径回退。新增回归阻止旧二次处理函数被调用。完整回归 238/238，冒烟 14/14；未打包，运行中的 EXE 未受影响。
 
 ## 2026-08-05 09:32:31 | runtime
 - 摘要：打包并启动独立PDF角度修正版
@@ -119,3 +149,15 @@
 - 摘要：Add first page plus one random page watermark range
 - 文件：Fengxi_Toolbox.py, tools/fx_watermark_core.py, full_debug_test.py, memory/categories/watermark-and-remove.md
 - 说明：Batch watermark now supports page_range=first_random: watermark page 1 plus exactly one random non-first page when available. Covered by UI, PDF, and Word regressions; full_debug_test 213/213.
+## 2026-08-05 | watermark
+- Summary: Speed up direct Word watermarking with copy guard enabled
+- Files: tools/fx_watermark_core.py, full_debug_test.py, memory/categories/watermark-and-remove.md, memory/changes.jsonl
+- Details: Word copy-guard paragraph discovery now reads Document.Content.Text once and reconstructs paragraph ranges locally, avoiding repeated COM access to Content.Paragraphs, Range.Text, Range.Start, and Range.End. The previous COM scan remains as a fallback for unusual Word COM implementations. The guard is still inserted only between meaningful body paragraphs. Validation: py_compile passed; smoke_test.py 14/14; full_debug_test.py 242/242; a real 1200-paragraph Word probe improved from about 30.4s to 2.6s with standard copy guard. No package was created.
+## 2026-08-05 | watermark
+- Summary: Add persistent batch watermark checkpoint resume
+- Files: Fengxi_Toolbox.py, tools/fx_watermark_checkpoint.py, full_debug_test.py, memory/categories/watermark-and-remove.md, memory/recent-changes.md, memory/changes.jsonl
+- Details: Batch watermark now records per-file completion and plan identity in JSONL. User Stop is `paused`, normal completion is `completed`, failures are `failed`, exceptions are `interrupted`, and forced termination leaves `running`; the next run resumes only valid completed entries. The panel adds `清除断点并重新开始` to explicitly abandon the checkpoint. No package was created. Validation: smoke 14/14; full debug 246/246.
+## 2026-08-05 | runtime
+- Summary: Package persistent batch watermark checkpoint build
+- Files: dist_release_ascii/fx_toolbox/fx_toolbox.exe, Fengxi_Toolbox.py, tools/fx_watermark_checkpoint.py, full_debug_test.py
+- Details: D-drive onedir package completed at `dist_release_ascii\\fx_toolbox`; runtime assets and README were copied. Package sync counter is `3/5`, so GitHub was not pushed. The old EXE was closed before packaging. No user input/output folders were touched.
