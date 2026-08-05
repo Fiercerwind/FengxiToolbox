@@ -1,5 +1,30 @@
 # 最近变更
 
+## 2026-08-05 | pdf_file
+- 摘要：统一 OCR 页面方向修正名称
+- 文件：Fengxi_Toolbox.py, memory.md, memory/categories/pdf-file-meta-zip.md, memory/recent-changes.md
+- 说明：OCR 页面中的页面旋转开关、说明和日志统一为 `仅修正文本方向（不进行OCR）`；文字方向分类开关保持 `修正文本方向（OCR）`；内部变量和任务逻辑不变。
+
+## 2026-08-05 09:32:31 | runtime
+- 摘要：打包并启动独立PDF角度修正版
+- 文件：dist_release_ascii\fx_toolbox\fx_toolbox.exe, package.bat, memory\recent-changes.md, memory\changes.jsonl
+- 说明：完成PDF角度修正独立入口集成后的onedir打包；PyInstaller产物检查无fx_pdf_rotation模块警告，发布版EXE启动正常，GitHub打包计数为2/5。验证：smoke_test 14/14，full_debug_test 237/237。
+
+## 2026-08-05 09:28:54 | pdf_file
+- 摘要：将PDF角度修正独立为PDF工具模式
+- 文件：Fengxi_Toolbox.py, tools\fx_pdf_rotation.py, tools\fx_pdf_rotation_task.py, tools\fx_pdf_ocr.py, tools\fx_pdf_ocr_task.py, fx_toolbox.spec, full_debug_test.py, memory.md, memory\categories\pdf-file-meta-zip.md, memory\debug-status.md
+- 说明：新增独立PDF角度修正任务，不加载OCR、不重新识别文字；通用PyMuPDF旋转核心从OCR模块拆到tools/fx_pdf_rotation.py，独立任务复制到结果文件夹后修正并支持加密密码、断点续跑和删除源文件开关。PDF页新增第六个入口。验证：smoke_test 14/14，full_debug_test 237/237。
+
+## 2026-07-22 23:21:09 | repo
+- 摘要：修复打包计数同步路径参数
+- 文件：package.bat, memory\categories\repo-sync-release.md
+- 说明：首次实际打包发现package.bat直接传递带尾部反斜杠的%~dp0会让PowerShell收到混入引号的非法路径；改为%~dp0.，并手动登记本次成功打包。当前GitHub同步计数为1/5。
+
+## 2026-07-22 23:18:01 | pdf_file
+- 摘要：PDF OCR新增页面角度修正
+- 文件：tools\fx_pdf_ocr.py, tools\fx_pdf_ocr_task.py, Fengxi_Toolbox.py, full_debug_test.py, memory\categories\pdf-file-meta-zip.md, memory\debug-status.md
+- 说明：基于本地ocr目录的PyMuPDF remove_rotation方案，在OCR输出完成后将页面/Rotate烘焙进画面和透明文字层；新增默认开启的Noteful兼容开关、设置记忆和已有输出断点续跑修正。真实312页样本抽样验证页面尺寸、文字与渲染像素一致。验证：full_debug_test 236/236，smoke_test 14/14。
+
 ## 2026-07-11 20:43:28 | watermark-and-remove
 - 摘要：复制干扰层支持 Word 段落边界与混合乱码
 - 文件：tools\fx_watermark_core.py, Fengxi_Toolbox.py, full_debug_test.py, memory\categories\watermark-and-remove.md, memory\debug-status.md

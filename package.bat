@@ -100,7 +100,7 @@ echo =======================================================
 echo.
 
 echo Recording successful package for GitHub sync...
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\fx_package_sync.ps1" -RepoRoot "%~dp0"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\fx_package_sync.ps1" -RepoRoot "%~dp0."
 if %errorlevel% neq 0 (
     color 0E
     echo [WARNING] Package completed, but the GitHub sync counter could not be updated.

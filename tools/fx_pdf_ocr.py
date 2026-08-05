@@ -14,6 +14,7 @@ from io import BytesIO, StringIO
 from pathlib import Path
 
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from tools.fx_pdf_rotation import normalize_pdf_page_rotation
 
 
 MIN_RENDER_SIZE = 1080

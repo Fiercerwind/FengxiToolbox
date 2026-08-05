@@ -9,7 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from tools.fx_pdf_ocr import FengxiPdfOcrEngine, write_pdf_ocr_comparison_report
+from tools.fx_pdf_ocr import (
+    FengxiPdfOcrEngine,
+    normalize_pdf_page_rotation,
+    write_pdf_ocr_comparison_report,
+)
 from tools.fx_resume import is_nonempty_file
 
 
@@ -26,6 +30,7 @@ class PdfOcrTaskOptions:
     cpu_threads: int = 4
     preprocess_mode: str = "auto"
     layered: bool = True
+    normalize_page_rotation: bool = False
 
 
 @dataclass
@@ -86,6 +91,16 @@ def _run_compare_report(src, report_path, options: PdfOcrTaskOptions):
     )
 
 
+def _normalize_rotation_if_enabled(dst, options: PdfOcrTaskOptions):
+    if not options.normalize_page_rotation:
+        return {
+            "normalized": False,
+            "changed_pages": 0,
+            "disabled": True,
+        }
+    return normalize_pdf_page_rotation(dst)
+
+
 def run_pdf_ocr_task_core(
     pdf_files,
     input_root,
@@ -125,13 +140,30 @@ def run_pdf_ocr_task_core(
     if len(completed_before_start) == total:
         for zero_index, (src, dst) in enumerate(completed_before_start):
             _call(callbacks.on_file_started if callbacks else None, src, dst, zero_index, total)
-            result["outputs"].append(dst)
-            result["processed_count"] += 1
-            result["success_count"] += 1
-            result["skipped_count"] += 1
-            _call(callbacks.on_file_finished if callbacks else None, src, dst, {"resumed": True, "backend_usage": {}})
-            _call(callbacks.on_file_completed if callbacks else None, src, dst, zero_index, total)
-        result.update({"status": "success", "message": f"{result['skipped_count']} existing pdf output(s) reused"})
+            rel = os.path.relpath(src, str(input_root))
+            try:
+                rotation_result = _normalize_rotation_if_enabled(dst, options)
+            except Exception as exc:
+                result["failed_items"].append(rel)
+                result["failed_count"] += 1
+                _call(callbacks.on_file_failed if callbacks else None, src, dst, rel, exc)
+            else:
+                result["outputs"].append(dst)
+                result["success_count"] += 1
+                result["skipped_count"] += 1
+                _call(
+                    callbacks.on_file_finished if callbacks else None,
+                    src,
+                    dst,
+                    {"resumed": True, "backend_usage": {}, "rotation_normalization": rotation_result},
+                )
+            finally:
+                result["processed_count"] += 1
+                _call(callbacks.on_file_completed if callbacks else None, src, dst, zero_index, total)
+        if result["failed_count"]:
+            result.update({"status": "failed", "message": f"{result['failed_count']} pdf files failed"})
+        else:
+            result.update({"status": "success", "message": f"{result['skipped_count']} existing pdf output(s) reused"})
         result["duration_seconds"] = round(time.time() - started_at, 4)
         return result
 
@@ -161,12 +193,19 @@ def run_pdf_ocr_task_core(
             _call(callbacks.on_file_started if callbacks else None, src, dst, zero_index, total)
 
             should_count_completion = True
+            had_existing_output = is_nonempty_file(dst)
             try:
-                if is_nonempty_file(dst):
+                if had_existing_output:
+                    rotation_result = _normalize_rotation_if_enabled(dst, options)
                     result["success_count"] += 1
                     result["skipped_count"] += 1
                     result["outputs"].append(dst)
-                    _call(callbacks.on_file_finished if callbacks else None, src, dst, {"resumed": True, "backend_usage": {}})
+                    _call(
+                        callbacks.on_file_finished if callbacks else None,
+                        src,
+                        dst,
+                        {"resumed": True, "backend_usage": {}, "rotation_normalization": rotation_result},
+                    )
                     continue
 
                 if options.compare_report:
@@ -192,6 +231,7 @@ def run_pdf_ocr_task_core(
                     progress_callback=_page_progress,
                     stop_checker=lambda: _stop_requested(callbacks),
                 )
+                ocr_result["rotation_normalization"] = _normalize_rotation_if_enabled(dst, options)
             except KeyboardInterrupt:
                 should_count_completion = False
                 result["stopped"] = True
@@ -201,10 +241,11 @@ def run_pdf_ocr_task_core(
             except Exception as exc:
                 result["failed_items"].append(rel)
                 result["failed_count"] += 1
-                try:
-                    shutil.copy2(src, dst)
-                except Exception:
-                    pass
+                if not had_existing_output:
+                    try:
+                        shutil.copy2(src, dst)
+                    except Exception:
+                        pass
                 _call(callbacks.on_file_failed if callbacks else None, src, dst, rel, exc)
             else:
                 result["success_count"] += 1

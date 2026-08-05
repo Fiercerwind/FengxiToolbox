@@ -141,7 +141,12 @@ from tools.fx_pdf_ocr_task import (
     build_pdf_ocr_output_path,
     run_pdf_ocr_task_core,
 )
+from tools.fx_pdf_ocr import normalize_pdf_page_rotation
 import tools.fx_pdf_ocr_task as pdf_ocr_task_module
+from tools.fx_pdf_rotation_task import (
+    PdfRotationTaskOptions,
+    run_pdf_rotation_task_core,
+)
 from tools.fx_image_pdf_task import (
     ImagePdfTaskCallbacks,
     ImagePdfTaskOptions,
@@ -764,11 +769,13 @@ def main():
     record(
         "feature_registry_preview_labels",
         mod._get_feature_preview_mode_label("pdf", "ocr") == "OCR 搜索版 PDF"
+        and mod._get_feature_preview_mode_label("pdf", "rotation") == "仅修正文本方向（不进行OCR）"
         and mod._get_feature_preview_mode_label("image", "merge_pdf") == "多图合并 PDF"
         and mod._get_feature_preview_mode_label("convert", "imgs2pdf") == "多图合并 ➔ PDF电子书"
         and mod._get_feature_label("remove_wm") == "去除水印",
         {
             "pdf_ocr": mod._get_feature_preview_mode_label("pdf", "ocr"),
+            "pdf_rotation": mod._get_feature_preview_mode_label("pdf", "rotation"),
             "image_merge": mod._get_feature_preview_mode_label("image", "merge_pdf"),
             "convert_imgs": mod._get_feature_preview_mode_label("convert", "imgs2pdf"),
             "remove_wm": mod._get_feature_label("remove_wm"),
@@ -782,6 +789,8 @@ def main():
     help_required_terms = [
         "任务预览",
         "OCR 搜索版 PDF",
+        "修正文本方向（OCR）",
+        "仅修正文本方向（不进行OCR）",
         "图像增强",
         "质量回退",
         "任务队列",
@@ -1449,12 +1458,14 @@ def main():
     app.pdf_ocr_model_root.set(str(root / "ocr_models_probe"))
     app.pdf_ocr_cls.set(True)
     app.pdf_ocr_compare_report.set(True)
+    app.pdf_ocr_normalize_rotation.set(True)
     ocr_last = mod._save_last_settings_category(app, "ocr")
     app.pdf_ocr_backend.set(backend_values[0] if backend_values else chosen_backend)
     app.pdf_ocr_preprocess.set(preprocess_values[0] if preprocess_values else chosen_preprocess)
     app.pdf_ocr_model_root.set("")
     app.pdf_ocr_cls.set(False)
     app.pdf_ocr_compare_report.set(False)
+    app.pdf_ocr_normalize_rotation.set(False)
     ocr_apply_ok, _ocr_apply_message = mod._restore_last_settings_category(app, "ocr")
     record(
         "last_settings_ocr_save_restore",
@@ -1467,7 +1478,8 @@ def main():
         and app.pdf_ocr_preprocess.get() == chosen_preprocess
         and app.pdf_ocr_model_root.get() == str(root / "ocr_models_probe")
         and bool(app.pdf_ocr_cls.get())
-        and bool(app.pdf_ocr_compare_report.get()),
+        and bool(app.pdf_ocr_compare_report.get())
+        and bool(app.pdf_ocr_normalize_rotation.get()),
         {
             "backend": app.pdf_ocr_backend.get(),
             "language": app.pdf_ocr_language.get(),
@@ -1493,6 +1505,7 @@ def main():
             "拆分为单页 PDF (Split)",
             "PDF 加密 (Encrypt)",
             "PDF 压缩",
+            "仅修正文本方向（不进行OCR）",
             "OCR 搜索版 PDF",
         ]
         pdf_mode_buttons = {}
@@ -2864,6 +2877,77 @@ def main():
         {
             "module": getattr(compress_pdf_file_module, "__module__", ""),
             "output_module": getattr(build_pdf_compress_output_path_module, "__module__", ""),
+        },
+    )
+    import fitz
+
+    rotation_probe = root / "ocr_rotation_probe.pdf"
+    rotation_doc = fitz.open()
+    rotation_page = rotation_doc.new_page(width=200, height=100)
+    rotation_page.insert_text((24, 48), "Fengxi OCR rotation probe")
+    rotation_page.set_rotation(90)
+    rotation_doc.save(rotation_probe)
+    rotation_doc.close()
+    with fitz.open(rotation_probe) as before_rotation_doc:
+        before_rotation = before_rotation_doc[0].rotation
+        before_rect = tuple(round(value, 2) for value in before_rotation_doc[0].rect)
+        before_pixmap_size = (before_rotation_doc[0].get_pixmap().width, before_rotation_doc[0].get_pixmap().height)
+    rotation_result = normalize_pdf_page_rotation(rotation_probe)
+    second_rotation_result = normalize_pdf_page_rotation(rotation_probe)
+    with fitz.open(rotation_probe) as after_rotation_doc:
+        after_rotation = after_rotation_doc[0].rotation
+        after_rect = tuple(round(value, 2) for value in after_rotation_doc[0].rect)
+        after_pixmap_size = (after_rotation_doc[0].get_pixmap().width, after_rotation_doc[0].get_pixmap().height)
+        after_text = after_rotation_doc[0].get_text()
+    record(
+        "pdf_ocr_page_rotation_normalization",
+        before_rotation == 90
+        and after_rotation == 0
+        and before_rect == after_rect
+        and before_pixmap_size == after_pixmap_size
+        and "Fengxi OCR rotation probe" in after_text
+        and rotation_result.get("changed_pages") == 1
+        and rotation_result.get("normalized") is True
+        and second_rotation_result.get("normalized") is False,
+        {
+            "before_rotation": before_rotation,
+            "after_rotation": after_rotation,
+            "before_rect": before_rect,
+            "after_rect": after_rect,
+            "result": rotation_result,
+        },
+    )
+    standalone_rotation_src = root / "rotation_task" / "nested" / "input.pdf"
+    standalone_rotation_src.parent.mkdir(parents=True)
+    standalone_doc = fitz.open()
+    standalone_page = standalone_doc.new_page(width=240, height=120)
+    standalone_page.insert_text((24, 56), "Standalone rotation task")
+    standalone_page.set_rotation(270)
+    standalone_doc.save(standalone_rotation_src)
+    standalone_doc.close()
+    standalone_rotation_output_root = root / "rotation_task_out"
+    standalone_rotation_result = run_pdf_rotation_task_core(
+        [str(standalone_rotation_src)],
+        root / "rotation_task",
+        standalone_rotation_output_root,
+        PdfRotationTaskOptions(),
+    )
+    standalone_rotation_output = standalone_rotation_output_root / "nested" / "input.pdf"
+    with fitz.open(standalone_rotation_src) as standalone_source_doc, fitz.open(standalone_rotation_output) as standalone_output_doc:
+        standalone_source_rotation = standalone_source_doc[0].rotation
+        standalone_output_rotation = standalone_output_doc[0].rotation
+        standalone_output_text = standalone_output_doc[0].get_text()
+    record(
+        "pdf_rotation_task_standalone",
+        standalone_rotation_result.get("status") == "success"
+        and standalone_rotation_result.get("success_count") == 1
+        and standalone_source_rotation == 270
+        and standalone_output_rotation == 0
+        and "Standalone rotation task" in standalone_output_text,
+        {
+            "result": standalone_rotation_result,
+            "source_rotation": standalone_source_rotation,
+            "output_rotation": standalone_output_rotation,
         },
     )
     ocr_task_src = root / "ocr_task_module" / "nested" / "scan.pdf"

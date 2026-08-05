@@ -29,6 +29,7 @@
 - 第 5 次成功打包会调用 `tools/fx_git_sync.ps1` 执行提交、拉取变基和推送；同步成功后计数重置为 `0/5`。
 - 若 GitHub 同步失败，计数保留，下一次成功打包会继续重试，避免遗漏已完成的 5 次打包。
 - 原每日计划任务 `FengxiToolbox Auto Sync to GitHub` 已移除，避免定时任务绕开此规则。
+- `package.bat` 调用计数脚本时必须使用 `-RepoRoot "%~dp0."`，不能直接传尾部为反斜杠的 `"%~dp0"`；后者在 Windows 参数解析中会让路径混入引号并导致 `Resolve-Path` 报非法字符。2026-07-22 已在首次实际打包时修复并确认计数为 `1/5`。
 
 ## 版本发布
 - 版本标签发布脚本：`tools/fx_release_version.ps1`

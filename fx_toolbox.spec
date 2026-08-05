@@ -51,7 +51,8 @@ hiddenimports = [
     'pywinstyles', 'rapidocr', 'reportlab.lib.pagesizes', 'reportlab.pdfbase',
     'reportlab.pdfbase.ttfonts', 'reportlab.pdfgen', 'tkinter', 'tkinter.filedialog',
     'tkinter.font', 'tkinter.messagebox', 'tkinter.ttk', 'windnd',
-    'win32com.client'
+    'win32com.client', 'tools.fx_pdf_ocr_task', 'tools.fx_pdf_rotation_task',
+    'tools.fx_pdf_rotation'
 ]
 for module_name in (
     'moviepy',

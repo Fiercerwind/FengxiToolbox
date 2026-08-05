@@ -2098,3 +2098,20 @@
 - Regression added for mixed noise and real Word COM behavior: full text includes eight guard paragraphs, first visible paragraph copy is clean, guard is positioned before the last visible paragraph, formatting is standard text layer (not hidden), and reapplication is skipped.
 - Validation: `python full_debug_test.py` passed 235/235 and `python smoke_test.py` passed 14/14.
 - `package.bat` completed successfully; the refreshed packaged EXE launched responsive as PID 44724.
+
+## 2026-07-22 PDF OCR rotation normalization validation
+- Source reference: local `ocr/normalize_pdf_rotation.py`, using PyMuPDF `page.remove_rotation()` to bake `/Rotate` into page content and reset rotation metadata.
+- Fengxi integration adds an OCR-page switch, task option, atomic output normalization, existing-output resume support, and OCR setting persistence.
+- Real read-only inspection of the provided files:
+  - original layered PDF: 312 pages, rotation distribution `{270: 312}`;
+  - Noteful-compatible PDF: 312 pages, rotation distribution `{0: 312}`;
+  - sampled pages 1/157/312 retained the same visual page dimensions and extracted-text lengths.
+- A temporary 3-page sample from the real original was normalized with the Fengxi implementation. Before/after page rectangles, extracted text, and half-scale rendered pixel hashes were identical; rotations changed from `[270, 270, 270]` to `[0, 0, 0]`.
+- Validation: py_compile passed; `python full_debug_test.py` passed 236/236; `python smoke_test.py` passed 14/14.
+
+## 2026-08-05 standalone PDF rotation correction
+- Extracted the shared `normalize_pdf_page_rotation(...)` implementation into `tools/fx_pdf_rotation.py` so standalone PDF correction does not depend on OCR runtime initialization.
+- Added `tools/fx_pdf_rotation_task.py` and a sixth PDF mode, `仅修正文本方向（不进行OCR）`; the task copies source PDFs to the result folder, supports passwords/resume/delete-source, and normalizes only the output.
+- Added PyInstaller hidden imports for the dynamic standalone task modules.
+- Regression: standalone fixture source remained at rotation 270, output became rotation 0, extracted text remained present; the app PDF navigation showed all six modes.
+- Validation: `python -m py_compile` passed; `python smoke_test.py` passed 14/14; `python full_debug_test.py` passed 237/237.

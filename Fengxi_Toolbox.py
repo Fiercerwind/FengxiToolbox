@@ -340,6 +340,7 @@ INLINE_HELP_SECTIONS = (
             "适用场景：扫描件、图片型 PDF、无法搜索文字的资料。",
             "推荐设置：后端选择 auto，图像增强选择 auto；低质量扫描件可尝试 scan，清晰原件可改为 off。",
             "处理方式：保留原页面画面，并叠加透明文字层，生成可搜索的新 PDF。",
+            "修正文本方向（OCR）：开启后由 OCR 后端判断并校正文字方向；关闭后不执行文字方向分类。",
             "质量回退：auto 会优先尝试最快路径，识别质量偏低时会继续尝试备用后端。",
             "对比报告：开启后会记录后端、图像增强候选和质量评分，便于判断哪条 OCR 路线效果更好。",
             "常见失败原因：OCR 依赖不可用、PDF 加密、页面图片损坏、路径权限不足或文档过大。",
@@ -348,11 +349,14 @@ INLINE_HELP_SECTIONS = (
     (
         "PDF：压缩、合并、拆分、加密",
         (
+            "仅修正文本方向（不进行OCR）：这是独立于 OCR 的页面兼容功能，不需要加载 OCR 模型，也不会重新识别文字。",
+            "仅修正文本方向（不进行OCR）会把页面的 90/180/270 度显示旋转写入页面内容并归零旋转值，适合修复 Noteful 等软件中的画面与文字层方向错位。",
+            "处理结果会先复制到结果文件夹再修正，默认不改原 PDF；加密 PDF 请在左侧填写密码。",
             "PDF 压缩：可分别选择 PDF 压缩程度和图片压缩程度，适合分享、归档和上传限制场景。",
             "PDF 合并：按页面当前规则收集 PDF 后合成为一个文件，建议先检查文件名排序。",
             "PDF 拆分：适合把多页资料拆成独立文件。",
             "PDF 加密：请牢记密码，生成后如果忘记密码，工具箱不会替你找回。",
-            "多文件压缩在开启批量并行时可提速；合并和 OCR 为了稳定性默认按单线程执行。",
+            "多文件压缩在开启批量并行时可提速；合并、OCR 和角度修正为了稳定性默认按单线程执行。",
         ),
     ),
     (
@@ -610,6 +614,7 @@ FEATURE_REGISTRY = {
             "detail": {
                 "merge": ("forced_single", "PDF 合并需要保持文件顺序与输出一致，已强制单线程。"),
                 "ocr": ("forced_single", "OCR 会占用大量 CPU/内存，当前采用单线程稳定处理。"),
+                "rotation": ("forced_single", "PDF 页面角度修正按文件顺序稳定处理。"),
             },
         },
         "preview_modes": {
@@ -618,6 +623,7 @@ FEATURE_REGISTRY = {
             "encrypt": "加密",
             "compress": "PDF 压缩",
             "ocr": "OCR 搜索版 PDF",
+            "rotation": "仅修正文本方向（不进行OCR）",
         },
         "risk_flags": ("delete_source",),
     },
@@ -6164,6 +6170,10 @@ def _run_pdf_ocr_task(app, input_folder):
     if getattr(app, "pdf_ocr_compare_report", None) is not None:
         compare_report = bool(app.pdf_ocr_compare_report.get())
 
+    normalize_page_rotation = True
+    if getattr(app, "pdf_ocr_normalize_rotation", None) is not None:
+        normalize_page_rotation = bool(app.pdf_ocr_normalize_rotation.get())
+
     preprocess_display = ""
     if getattr(app, "pdf_ocr_preprocess", None) is not None:
         preprocess_display = app.pdf_ocr_preprocess.get().strip()
@@ -6187,6 +6197,7 @@ def _run_pdf_ocr_task(app, input_folder):
         cpu_threads=cpu_threads,
         preprocess_mode=preprocess_mode,
         layered=True,
+        normalize_page_rotation=normalize_page_rotation,
     )
     tracker = _get_active_progress_tracker(app)
     total = len(pdf_files)
@@ -6197,8 +6208,8 @@ def _run_pdf_ocr_task(app, input_folder):
         app.log(f"🤖 [OCR] 风兮模型目录：{resolved_model_root}")
         app.log(f"🧩 [OCR] 后端：{engine_backend_key}{' (自动选择)' if backend_key == 'auto' else ''}")
         app.log(
-            f"🧠 [OCR] 模型：{language_config} | 模式：{extraction_mode} | 图像增强：{preprocess_mode} | 方向纠正：{'开' if use_cls else '关'}"
-            f" | 对比报告：{'开' if compare_report else '关'}"
+            f"🧠 [OCR] 模型：{language_config} | 模式：{extraction_mode} | 图像增强：{preprocess_mode} | 修正文本方向（OCR）：{'开' if use_cls else '关'}"
+            f" | 仅修正文本方向（不进行OCR）：{'开' if normalize_page_rotation else '关'} | 对比报告：{'开' if compare_report else '关'}"
         )
 
     def _on_file_started(src, _dst, _index, _total):
@@ -6241,6 +6252,10 @@ def _run_pdf_ocr_task(app, input_folder):
         usage_text = ", ".join(f"{key}:{value}" for key, value in sorted((ocr_result.get("backend_usage") or {}).items()))
         if usage_text:
             app.log(f"🧭 [OCR] 实际后端使用：{usage_text}")
+        rotation_result = dict(ocr_result.get("rotation_normalization") or {})
+        changed_pages = int(rotation_result.get("changed_pages") or 0)
+        if changed_pages:
+            app.log(f"🧭 [OCR] 仅修正文本方向（不进行OCR）已修正 {changed_pages} 页，兼容 Noteful 等阅读器")
         app.log(f"✅ [OCR] 已生成可搜索 PDF：{os.path.basename(src)}")
 
     def _on_file_failed(src, _dst, _rel, exc):
@@ -6309,6 +6324,115 @@ def _run_pdf_ocr_task(app, input_folder):
     else:
         _set_task_result_counts(result, processed=processed_count, success=success_count, failed=len(failed_list), skipped=skipped_count)
         _set_task_result_finished(result, "stopped", message="用户停止 OCR 任务", detail="用户停止 OCR 任务", stopped=True)
+
+
+def _run_pdf_rotation_task(app, input_folder):
+    from tools.fx_pdf_rotation_task import (
+        PdfRotationTaskCallbacks,
+        PdfRotationTaskOptions,
+        run_pdf_rotation_task_core,
+    )
+
+    normalized_input, input_root, output_folder, resolved_strategy = _resolve_output_root_for_task(
+        input_folder,
+        "pdf",
+        _get_task_output_strategy(app, "pdf"),
+    )
+    result = _get_last_task_result(app)
+    if result is None:
+        result = _start_task_result(app, normalized_input, "pdf")
+    _set_task_result_output_strategy(result, "pdf", resolved_strategy)
+    _set_task_result_output_root(result, output_folder)
+    os.makedirs(output_folder, exist_ok=True)
+    all_files = app.collect_input_files(normalized_input, "pdf")
+    pdf_files = [f for f in all_files if f.lower().endswith(".pdf")]
+    if not pdf_files:
+        app.log("⚠️ [提示] 未找到可修正角度的 PDF 文件")
+        _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=1)
+        _set_task_result_finished(result, "skipped", message="未找到可修正角度的 PDF 文件", detail="未找到可修正角度的 PDF 文件", skipped=True)
+        return
+
+    password = ""
+    if getattr(app, "pdf_pwd_entry", None) is not None:
+        try:
+            password = app.pdf_pwd_entry.get().strip()
+        except Exception:
+            password = ""
+    delete_source = False
+    if getattr(app, "pdf_delete_var", None) is not None:
+        try:
+            delete_source = bool(app.pdf_delete_var.get())
+        except Exception:
+            delete_source = False
+
+    tracker = _get_active_progress_tracker(app)
+    total = len(pdf_files)
+    app.log(f"🧭 [仅修正文本方向（不进行OCR）] 共 {total} 个 PDF，输出到结果文件夹；原文件保持不变。")
+
+    def _on_file_started(src, _dst, _index, _total):
+        app.log(f"📄 [仅修正文本方向（不进行OCR）] 正在处理：{os.path.basename(src)}")
+        if tracker is not None:
+            tracker.set_current_item(src, "仅修正文本方向（不进行OCR）")
+            tracker.set_current_item_fraction(0.02, stage="仅修正文本方向（不进行OCR）", current_file=src)
+
+    def _on_file_finished(src, dst, payload):
+        _add_task_result_output(result, dst)
+        rotation_result = dict(payload.get("rotation_normalization") or {})
+        changed_pages = int(rotation_result.get("changed_pages") or 0)
+        if payload.get("resumed"):
+            app.log(f"⏭️ [仅修正文本方向（不进行OCR）] 已复用结果：{os.path.basename(dst)}")
+        elif changed_pages:
+            app.log(f"✅ [仅修正文本方向（不进行OCR）] {os.path.basename(src)}：修正 {changed_pages} 页")
+        else:
+            app.log(f"✅ [仅修正文本方向（不进行OCR）] {os.path.basename(src)}：未发现页面旋转，已复制结果")
+
+    def _on_file_failed(src, _dst, _rel, exc):
+        app.log(f"❌ [失败] 仅修正文本方向（不进行OCR）错误：{os.path.basename(src)}：{exc}")
+
+    def _on_file_completed(_src, _dst, index, total_count):
+        if tracker is not None:
+            tracker.complete_units(1)
+        else:
+            app.progress_bar.set((index + 1) / total_count)
+
+    core_result = run_pdf_rotation_task_core(
+        pdf_files,
+        input_root,
+        output_folder,
+        PdfRotationTaskOptions(password=password, delete_source=delete_source),
+        PdfRotationTaskCallbacks(
+            stop_requested=lambda: app.stop_event,
+            on_file_started=_on_file_started,
+            on_file_finished=_on_file_finished,
+            on_file_failed=_on_file_failed,
+            on_file_completed=_on_file_completed,
+        ),
+    )
+    failed_list = list(core_result.get("failed_items") or [])
+    success_count = int(core_result.get("success_count") or 0)
+    processed_count = int(core_result.get("processed_count") or 0)
+    skipped_count = int(core_result.get("skipped_count") or 0)
+
+    if failed_list:
+        result["failed_items"] = list(failed_list)
+        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=len(failed_list), skipped=skipped_count)
+        report_path = _write_failed_report(output_folder, failed_list)
+        if report_path:
+            _add_task_result_output(result, report_path)
+        _set_task_result_finished(
+            result,
+            "failed",
+            message=f"仅修正文本方向（不进行OCR）结束，但有 {len(failed_list)} 个文件处理失败。",
+            detail=f"失败 {len(failed_list)} 个文件",
+            error=f"失败 {len(failed_list)} 个文件",
+        )
+    elif core_result.get("stopped") or app.stop_event:
+        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=0, skipped=skipped_count)
+        _set_task_result_finished(result, "stopped", message="用户停止仅修正文本方向（不进行OCR）任务", detail="用户停止仅修正文本方向（不进行OCR）任务", stopped=True)
+    else:
+        _set_task_result_counts(result, processed=processed_count, success=success_count, failed=0, skipped=skipped_count)
+        app.log(f"🎉 [完成] 仅修正文本方向（不进行OCR）完成，共修正 {core_result.get('changed_pages', 0)} 页。")
+        _set_task_result_finished(result, "success", message="仅修正文本方向（不进行OCR）已完成", detail=f"成功处理 {success_count} 个文件")
 
 
 def _is_parallel_enabled(app):
@@ -7066,6 +7190,7 @@ def _patch_pdf_ocr_mode():
             self.pdf_ocr_preprocess = tkinter.StringVar(value=get_default_preprocess_display())
             self.pdf_ocr_cls = tkinter.BooleanVar(value=False)
             self.pdf_ocr_compare_report = tkinter.BooleanVar(value=False)
+            self.pdf_ocr_normalize_rotation = tkinter.BooleanVar(value=True)
 
             base_controls = list(body.winfo_children())
             merge_text = base_controls[0].cget("text")
@@ -7154,6 +7279,7 @@ def _patch_pdf_ocr_mode():
             make_mode_button("split", split_text, "逐页拆分输出")
             make_mode_button("encrypt", encrypt_text, "设置打开密码")
             make_mode_button("compress", "PDF 压缩", "压缩体积和图片")
+            make_mode_button("rotation", "仅修正文本方向（不进行OCR）", "不进行 OCR，仅修正页面方向")
             make_mode_button("ocr", "OCR 搜索版 PDF", "生成可搜索文字层")
 
             shared_panel = customtkinter.CTkFrame(base_panel, fg_color="transparent")
@@ -7278,6 +7404,20 @@ def _patch_pdf_ocr_mode():
                 compress_panel,
                 "提示：如果 PDF 主要由扫描图片组成，调高图片压缩更有效；如果 PDF 主要是文字，PDF 压缩程度通常更关键。若选择“图片化压缩”，页面会转成图片，适合上传分享，不适合复制、搜索或编辑文本。",
             )
+
+            rotation_panel = create_detail_panel("rotation", "仅修正文本方向（不进行OCR）")
+            add_panel_note(
+                rotation_panel,
+                "把 PDF 页面依赖的 90/180/270 度旋转写入页面内容，并将页面旋转值归零。适合修复 OCR 文件在 Noteful 等笔记软件中画面与文字层方向不一致的问题；本功能不需要 OCR，不重新识别文字。",
+            )
+            customtkinter.CTkLabel(
+                rotation_panel,
+                text="处理结果：复制到结果文件夹后再修正，原 PDF 默认保持不变。若输入 PDF 已加密，请在左侧填写密码。",
+                text_color=COLOR_TEXT_SOFT,
+                font=customtkinter.CTkFont(size=11),
+                justify="left",
+                wraplength=620,
+            ).pack(anchor="w", fill="x", padx=8, pady=(2, 8))
 
             ocr_panel = create_detail_panel("ocr", "OCR 配置")
 
@@ -7432,12 +7572,32 @@ def _patch_pdf_ocr_mode():
                 wraplength=560,
             ).pack(anchor="w", fill="x", padx=8, pady=(0, 6))
 
+            direction_switch_row = customtkinter.CTkFrame(ocr_panel, fg_color="transparent")
+            direction_switch_row.pack(fill="x", padx=8, pady=(0, 4))
+
             customtkinter.CTkSwitch(
-                ocr_panel,
-                text="纠正文本方向",
+                direction_switch_row,
+                text="修正文本方向（OCR）",
                 variable=self.pdf_ocr_cls,
                 **self._get_switch_style(),
-            ).pack(anchor="w", padx=8, pady=(0, 4))
+            ).pack(side="left", anchor="w")
+
+            rotation_switch_style = dict(self._get_switch_style())
+            rotation_switch_style.update(
+                {
+                    "fg_color": "#5B4936",
+                    "progress_color": "#B98245",
+                    "button_color": "#E6BF7C",
+                    "button_hover_color": "#F2D59B",
+                    "text_color": "#F0D09A",
+                }
+            )
+            customtkinter.CTkSwitch(
+                direction_switch_row,
+                text="仅修正文本方向（不进行OCR）",
+                variable=self.pdf_ocr_normalize_rotation,
+                **rotation_switch_style,
+            ).pack(side="right", anchor="e")
 
             customtkinter.CTkSwitch(
                 ocr_panel,
@@ -7489,7 +7649,7 @@ def _patch_pdf_ocr_mode():
 
             customtkinter.CTkLabel(
                 ocr_panel,
-                text="说明：生成双层可搜索 PDF，保留原页面画面并叠加透明文字层；自动增强会在识别偏弱时尝试去灰底、增强对比和降噪。",
+                text="说明：生成双层可搜索 PDF，保留原页面画面并叠加透明文字层；仅修正文本方向（不进行OCR）会把 90/180/270 度显示旋转写入页面内容，避免导入 Noteful 后文字层方向错位。",
                 text_color=COLOR_TEXT_SOFT,
                 font=customtkinter.CTkFont(size=10),
                 justify="left",
@@ -7514,6 +7674,14 @@ def _patch_pdf_ocr_mode():
                 if pdf_mode == "compress":
                     try:
                         _run_pdf_compress_task(self, input_folder)
+                    except Exception as exc:
+                        self.log(f"🔥 [严重错误] {exc}")
+                    finally:
+                        self.reset_ui()
+                    return
+                if pdf_mode == "rotation":
+                    try:
+                        _run_pdf_rotation_task(self, input_folder)
                     except Exception as exc:
                         self.log(f"🔥 [严重错误] {exc}")
                     finally:
@@ -11829,6 +11997,7 @@ def _capture_preset_settings(app, category=None):
                 "pdf_ocr_preprocess_key": getattr(app, "_fx_pdf_ocr_preprocess_map", {}).get(preprocess_display, ""),
                 "pdf_ocr_cls": bool(_safe_var_get(app, "pdf_ocr_cls", False)),
                 "pdf_ocr_compare_report": bool(_safe_var_get(app, "pdf_ocr_compare_report", False)),
+                "pdf_ocr_normalize_rotation": bool(_safe_var_get(app, "pdf_ocr_normalize_rotation", True)),
             }
         )
     elif category == "pdf_compress":
@@ -12021,6 +12190,7 @@ def _apply_preset_settings(app, preset, switch_task=True):
         )
         _safe_var_set(app, "pdf_ocr_cls", bool(settings.get("pdf_ocr_cls", False)))
         _safe_var_set(app, "pdf_ocr_compare_report", bool(settings.get("pdf_ocr_compare_report", False)))
+        _safe_var_set(app, "pdf_ocr_normalize_rotation", bool(settings.get("pdf_ocr_normalize_rotation", True)))
     elif category == "pdf_compress":
         _select_pdf_preset_mode(app, "compress")
         _safe_named_widget_set(app, "pdf_pwd_entry", settings.get("pdf_pwd_entry", ""))

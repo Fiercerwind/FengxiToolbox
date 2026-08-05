@@ -621,3 +621,22 @@
   - Deflate level 6, sequential execution, job-based progress, stop timing, per-job failure continuation, and source-data safety.
 - Regression `zip_help_documents_complete_implementation_rules` locks both documentation surfaces to the shared source and checks critical terms.
 - Validation: py_compile passed, smoke test 14/14, full debug test 230/230.
+
+## 2026-07-22 PDF OCR 页面角度修正
+- PDF OCR 页面新增默认开启的 `仅修正文本方向（不进行OCR）` 开关，并纳入 OCR 上次设置保存/恢复。
+- 该功能解决依赖 PDF `/Rotate=90/180/270` 显示方向的 OCR 文件在部分笔记软件中出现“画面正常、透明文字层旋转错位”的问题。
+- 实现时机是 OCR 文字层生成完成后：`tools/fx_pdf_ocr.py::normalize_pdf_page_rotation(...)` 使用 PyMuPDF `page.remove_rotation()` 将页面旋转烘焙进画面、文字层和坐标，再把页面旋转值归零。
+- 原输入 PDF 始终不改；只规范化任务输出。保存先写同目录临时 PDF，验证页数不变且所有页面旋转为 0 后再原子替换，失败时清理临时文件。
+- 开启时也会检查断点续跑的已有 OCR 输出，因此旧结果可直接补做角度修正而无需重新加载 OCR 引擎；若修正失败，保留已有输出且按单文件失败处理。
+- 没有页面旋转值的 PDF 不重写，避免无意义的体积变化和耗时。
+- 此功能不同于 `修正文本方向（OCR）`：后者是 OCR 后端的文字方向分类，前者是最终 PDF 页面与隐藏文字层的旋转兼容修正。
+- 外部真实样本验证：原 OCR 文件 312 页均为 `/Rotate=270`，兼容文件 312 页均为 0；抽取首页、中间页、末页运行新逻辑后，页面尺寸、提取文字和渲染像素哈希完全一致。
+- 回归：`pdf_ocr_page_rotation_normalization`；验证通过 `full_debug_test.py 236/236`、`smoke_test.py 14/14`。
+
+## 2026-08-05 仅修正文本方向独立化
+- `PDF 工具`新增独立模式 `仅修正文本方向（不进行OCR）`，不需要 OCR、不加载 OCR 模型，也不会重新识别文字。
+- 通用核心已从 OCR 文件中拆到 `tools/fx_pdf_rotation.py`；OCR 角度开关和独立模式共同复用 `normalize_pdf_page_rotation(...)`。
+- 独立任务位于 `tools/fx_pdf_rotation_task.py`：收集 PDF 后先复制到结果文件夹，再把页面 `/Rotate` 烘焙进页面内容并归零；原 PDF 默认保持不变。
+- 支持加密 PDF 密码、已有结果断点续跑和原有“处理后删除源文件”开关；已有结果修正失败时会从源 PDF 恢复结果再重试，不会改写源文件。
+- PDF 工具页左侧现在有合并、拆分、加密、压缩、仅修正文本方向（不进行OCR）、OCR 六个入口；OCR 中的页面角度修正仍默认开启，但不再是唯一入口。
+- 回归新增 `pdf_rotation_task_standalone` 和独立模式导航检查；验证通过 `full_debug_test.py 237/237`、独立任务小样本源文件保持 270 度、结果归零。
