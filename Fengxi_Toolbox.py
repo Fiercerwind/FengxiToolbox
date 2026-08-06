@@ -206,6 +206,9 @@ DEFAULT_STARTUP_TAB = "watermark"
 STARTUP_LAYOUT_FIRST_DELAY_MS = 450
 STARTUP_LAYOUT_STAGE_DELAY_MS = 90
 STARTUP_DEFAULT_TAB_INIT_DELAY_MS = 30
+# Keep the first launch at the compact size used by the current UI screenshot.
+STARTUP_DEFAULT_WINDOW_WIDTH = 1380
+STARTUP_DEFAULT_WINDOW_HEIGHT = 870
 LAZY_TAB_SPECS = {
     "watermark": {"init": "init_watermark_ui"},
     "remove_wm": {"init": "init_remove_wm_ui"},
@@ -2345,10 +2348,10 @@ def _apply_native_window_icons(window, ico_path):
         user32.SendMessageW.argtypes = (
             ctypes.c_void_p,
             ctypes.c_uint,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_ssize_t,
         )
-        user32.SendMessageW.restype = ctypes.c_void_p
+        user32.SendMessageW.restype = ctypes.c_ssize_t
         user32.SetClassLongPtrW.argtypes = (
             ctypes.c_void_p,
             ctypes.c_int,
@@ -2362,11 +2365,14 @@ def _apply_native_window_icons(window, ico_path):
         if not icon_big and not icon_small:
             return False
         root_value = user32.GetAncestor(ctypes.c_void_p(hwnd), 2)
-        root_hwnd = int(root_value.value if root_value else hwnd)
+        if root_value:
+            root_hwnd = int(root_value.value if hasattr(root_value, "value") else root_value)
+        else:
+            root_hwnd = hwnd
         if icon_big:
-            user32.SendMessageW(ctypes.c_void_p(root_hwnd), 0x0080, ctypes.c_void_p(1), icon_big)
+            user32.SendMessageW(ctypes.c_void_p(root_hwnd), 0x0080, 1, icon_big)
         if icon_small:
-            user32.SendMessageW(ctypes.c_void_p(root_hwnd), 0x0080, ctypes.c_void_p(0), icon_small)
+            user32.SendMessageW(ctypes.c_void_p(root_hwnd), 0x0080, 0, icon_small)
         # Tk registers a shared TkTopLevel class. Keep the class icon aligned too,
         # otherwise Windows may keep showing the default icon in the title/task bar.
         if icon_big:
@@ -2376,8 +2382,8 @@ def _apply_native_window_icons(window, ico_path):
         window._fx_native_icon_handles = (icon_big, icon_small)
         window._fx_native_icon_hwnd = root_hwnd
         get_icon = user32.SendMessageW
-        observed_big = get_icon(ctypes.c_void_p(root_hwnd), 0x007F, ctypes.c_void_p(1), 0)
-        observed_small = get_icon(ctypes.c_void_p(root_hwnd), 0x007F, ctypes.c_void_p(0), 0)
+        observed_big = get_icon(ctypes.c_void_p(root_hwnd), 0x007F, 1, 0)
+        observed_small = get_icon(ctypes.c_void_p(root_hwnd), 0x007F, 0, 0)
         _debug(
             "native_window_icon:hwnd=%s,root=%s,big=%s,small=%s,observed_big=%s,observed_small=%s"
             % (hwnd, root_hwnd, icon_big, icon_small, observed_big, observed_small)
@@ -2426,8 +2432,9 @@ def _apply_app_icon_after_first_paint(app):
     """Apply the taskbar icon after the main window has had a chance to map."""
     started_at = time.perf_counter()
     try:
-        _apply_app_icon_native(app)
         _apply_app_icon_png(app)
+        # iconphoto may clear WM_SETICON, so native icons must be the final write.
+        _apply_app_icon_native(app)
         _debug("startup:icon_png_applied_deferred")
     except Exception as exc:
         _debug(f"startup:icon_apply_deferred_error:{exc}")
@@ -15850,6 +15857,14 @@ def _ensure_lazy_tab_initialized(app, task_name):
 def _show_ready_window(app):
     started_at = time.perf_counter()
     _install_fast_close_protocol(app)
+    try:
+        app.geometry(f"{STARTUP_DEFAULT_WINDOW_WIDTH}x{STARTUP_DEFAULT_WINDOW_HEIGHT}")
+        _debug(
+            "startup:default_geometry:%sx%s"
+            % (STARTUP_DEFAULT_WINDOW_WIDTH, STARTUP_DEFAULT_WINDOW_HEIGHT)
+        )
+    except Exception as exc:
+        _debug(f"startup:default_geometry_error:{exc}")
     try:
         app.update_idletasks()
     except Exception as exc:
