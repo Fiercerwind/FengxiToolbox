@@ -2318,14 +2318,88 @@ def _resolve_app_asset(name):
     return base_dir / "assets" / name
 
 
-def _apply_app_icon(app):
+def _apply_native_window_icons(window, ico_path):
+    """Set instance and class icons after Tk has created the native window."""
+    try:
+        try:
+            top_window = window.winfo_toplevel()
+        except Exception:
+            top_window = window
+        try:
+            top_window.update_idletasks()
+        except Exception:
+            pass
+        hwnd = int(top_window.winfo_id())
+        user32 = ctypes.windll.user32
+        user32.GetAncestor.argtypes = (ctypes.c_void_p, ctypes.c_uint)
+        user32.GetAncestor.restype = ctypes.c_void_p
+        user32.LoadImageW.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_wchar_p,
+            ctypes.c_uint,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint,
+        )
+        user32.LoadImageW.restype = ctypes.c_void_p
+        user32.SendMessageW.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        )
+        user32.SendMessageW.restype = ctypes.c_void_p
+        user32.SetClassLongPtrW.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        )
+        user32.SetClassLongPtrW.restype = ctypes.c_void_p
+        load_from_file = 0x00000010
+        image_icon = 1
+        icon_big = user32.LoadImageW(None, str(ico_path), image_icon, 32, 32, load_from_file)
+        icon_small = user32.LoadImageW(None, str(ico_path), image_icon, 16, 16, load_from_file)
+        if not icon_big and not icon_small:
+            return False
+        root_value = user32.GetAncestor(ctypes.c_void_p(hwnd), 2)
+        root_hwnd = int(root_value.value if root_value else hwnd)
+        if icon_big:
+            user32.SendMessageW(ctypes.c_void_p(root_hwnd), 0x0080, ctypes.c_void_p(1), icon_big)
+        if icon_small:
+            user32.SendMessageW(ctypes.c_void_p(root_hwnd), 0x0080, ctypes.c_void_p(0), icon_small)
+        # Tk registers a shared TkTopLevel class. Keep the class icon aligned too,
+        # otherwise Windows may keep showing the default icon in the title/task bar.
+        if icon_big:
+            user32.SetClassLongPtrW(ctypes.c_void_p(root_hwnd), -14, icon_big)
+        if icon_small:
+            user32.SetClassLongPtrW(ctypes.c_void_p(root_hwnd), -34, icon_small)
+        window._fx_native_icon_handles = (icon_big, icon_small)
+        window._fx_native_icon_hwnd = root_hwnd
+        get_icon = user32.SendMessageW
+        observed_big = get_icon(ctypes.c_void_p(root_hwnd), 0x007F, ctypes.c_void_p(1), 0)
+        observed_small = get_icon(ctypes.c_void_p(root_hwnd), 0x007F, ctypes.c_void_p(0), 0)
+        _debug(
+            "native_window_icon:hwnd=%s,root=%s,big=%s,small=%s,observed_big=%s,observed_small=%s"
+            % (hwnd, root_hwnd, icon_big, icon_small, observed_big, observed_small)
+        )
+        return True
+    except Exception as exc:
+        _debug(f"native_window_icon:error:{exc}")
+        return False
+
+
+def _apply_app_icon_bitmap(app):
     ico_path = _resolve_app_asset(APP_ICON_ICO)
-    png_path = _resolve_app_asset(APP_ICON_PNG)
     try:
         if ico_path.exists():
             app.iconbitmap(default=str(ico_path))
+            _apply_native_window_icons(app, ico_path)
     except Exception as exc:
         _debug(f"app_icon:iconbitmap_error:{exc}")
+
+
+def _apply_app_icon_png(app):
+    png_path = _resolve_app_asset(APP_ICON_PNG)
     try:
         if png_path.exists():
             app._fx_window_icon = tkinter.PhotoImage(file=str(png_path))
@@ -2334,12 +2408,27 @@ def _apply_app_icon(app):
         _debug(f"app_icon:iconphoto_error:{exc}")
 
 
+def _apply_app_icon_native(app):
+    ico_path = _resolve_app_asset(APP_ICON_ICO)
+    try:
+        if ico_path.exists():
+            _apply_native_window_icons(app, ico_path)
+    except Exception as exc:
+        _debug(f"app_icon:native_icon_error:{exc}")
+
+
+def _apply_app_icon(app):
+    _apply_app_icon_bitmap(app)
+    _apply_app_icon_png(app)
+
+
 def _apply_app_icon_after_first_paint(app):
     """Apply the taskbar icon after the main window has had a chance to map."""
     started_at = time.perf_counter()
     try:
-        _apply_app_icon(app)
-        _debug("startup:icon_applied_deferred")
+        _apply_app_icon_native(app)
+        _apply_app_icon_png(app)
+        _debug("startup:icon_png_applied_deferred")
     except Exception as exc:
         _debug(f"startup:icon_apply_deferred_error:{exc}")
     finally:
@@ -2358,6 +2447,7 @@ def _apply_window_icon(window):
     try:
         if ico_path.exists():
             window.iconbitmap(default=str(ico_path))
+            _apply_native_window_icons(window, ico_path)
     except Exception as exc:
         _debug(f"window_icon:iconbitmap_error:{exc}")
     try:
@@ -16132,6 +16222,10 @@ if __name__ == "__main__":
     app = FengxiToolboxApp()
     _record_performance("main_create_app", started_at=main_step_started_at)
     _debug("main:app_created")
+    main_step_started_at = time.perf_counter()
+    _apply_app_icon_bitmap(app)
+    _record_performance("main_icon_bitmap_apply", started_at=main_step_started_at)
+    _debug("main:icon_bitmap_applied")
     main_step_started_at = time.perf_counter()
     _apply_release_identity(app)
     _record_performance("main_release_identity", started_at=main_step_started_at)
