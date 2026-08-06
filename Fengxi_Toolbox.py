@@ -206,9 +206,11 @@ DEFAULT_STARTUP_TAB = "watermark"
 STARTUP_LAYOUT_FIRST_DELAY_MS = 450
 STARTUP_LAYOUT_STAGE_DELAY_MS = 90
 STARTUP_DEFAULT_TAB_INIT_DELAY_MS = 30
-# Keep the first launch at the compact size used by the current UI screenshot.
-STARTUP_DEFAULT_WINDOW_WIDTH = 1380
-STARTUP_DEFAULT_WINDOW_HEIGHT = 870
+# About 70% of the desktop area while preserving room for the fixed log panel.
+STARTUP_DEFAULT_WINDOW_WIDTH_RATIO = 0.80
+STARTUP_DEFAULT_WINDOW_HEIGHT_RATIO = 0.88
+STARTUP_DEFAULT_WINDOW_MIN_WIDTH = 960
+STARTUP_DEFAULT_WINDOW_MIN_HEIGHT = 680
 LAZY_TAB_SPECS = {
     "watermark": {"init": "init_watermark_ui"},
     "remove_wm": {"init": "init_remove_wm_ui"},
@@ -15854,24 +15856,42 @@ def _ensure_lazy_tab_initialized(app, task_name):
     return True
 
 
+def _apply_startup_default_geometry(app):
+    """Apply the compact default after Tk has measured the original layout."""
+    try:
+        app.update_idletasks()
+        viewport_width = int(app.winfo_vrootwidth() or app.winfo_screenwidth())
+        viewport_height = int(app.winfo_vrootheight() or app.winfo_screenheight())
+        window_scaling = 1.0
+        get_window_scaling = getattr(app, "_get_window_scaling", None)
+        if callable(get_window_scaling):
+            window_scaling = max(0.1, float(get_window_scaling()))
+        width = max(
+            STARTUP_DEFAULT_WINDOW_MIN_WIDTH,
+            int(round(viewport_width * STARTUP_DEFAULT_WINDOW_WIDTH_RATIO / window_scaling)),
+        )
+        height = max(
+            STARTUP_DEFAULT_WINDOW_MIN_HEIGHT,
+            int(round(viewport_height * STARTUP_DEFAULT_WINDOW_HEIGHT_RATIO / window_scaling)),
+        )
+        app.minsize(1, 1)
+        app.geometry(f"{width}x{height}")
+        app._fx_startup_geometry_locked = True
+        _debug(f"startup:default_geometry:{width}x{height}:scale={window_scaling:.2f}")
+        return width, height
+    except Exception as exc:
+        _debug(f"startup:default_geometry_error:{exc}")
+        return None
+
+
 def _show_ready_window(app):
     started_at = time.perf_counter()
     _install_fast_close_protocol(app)
-    try:
-        app.geometry(f"{STARTUP_DEFAULT_WINDOW_WIDTH}x{STARTUP_DEFAULT_WINDOW_HEIGHT}")
-        _debug(
-            "startup:default_geometry:%sx%s"
-            % (STARTUP_DEFAULT_WINDOW_WIDTH, STARTUP_DEFAULT_WINDOW_HEIGHT)
-        )
-    except Exception as exc:
-        _debug(f"startup:default_geometry_error:{exc}")
-    try:
-        app.update_idletasks()
-    except Exception as exc:
-        _debug(f"startup:update_idletasks_error:{exc}")
+    _apply_startup_default_geometry(app)
     try:
         app.deiconify()
-        _ensure_startup_window_visible(app)
+        if not getattr(app, "_fx_startup_geometry_locked", False):
+            _ensure_startup_window_visible(app)
         app.lift()
         try:
             app.focus_force()
@@ -15885,7 +15905,8 @@ def _show_ready_window(app):
     except Exception as exc:
         _debug(f"startup:window_show_error:{exc}")
     try:
-        app.after(100, lambda target=app: _ensure_startup_window_visible(target))
+        if not getattr(app, "_fx_startup_geometry_locked", False):
+            app.after(100, lambda target=app: _ensure_startup_window_visible(target))
     except Exception:
         pass
     try:
