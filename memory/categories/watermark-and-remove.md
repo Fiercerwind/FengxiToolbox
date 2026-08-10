@@ -528,3 +528,10 @@
 - The Batch Watermark panel exposes `清除断点并重新开始`. This is the explicit abandon-resume action; it removes only the checkpoint metadata and does not delete or modify user outputs.
 - In-place overwrite intentionally does not enable output-based checkpoint reuse because the source itself is modified.
 - Validation: `python -m py_compile Fengxi_Toolbox.py tools\\fx_watermark_checkpoint.py full_debug_test.py`; `python smoke_test.py` 14/14; `python full_debug_test.py` 246/246. No package was created.
+
+## 2026-08-10 Batch watermark adaptive page-size switch
+- 批量水印页新增 `适配特殊页面尺寸` 开关，默认开启并纳入上次设置记忆与断点身份。
+- 开启后，PDF 水印按每页实际 MediaBox 宽高和方向生成尺寸变体，并按 A4 相对比例调整字号后居中叠加；关闭时保留旧固定 A4 水印行为。
+- 同一 PDF 内相同的宽度、高度和旋转角度只生成一次水印层并复用，避免按页生成导致速度下降；标准 A4 页面继续复用原有水印包。
+- pikepdf 单次写入路径和 pypdf 兼容回退路径都支持该选项；Word/PPT 路径不改变，只有转换为 PDF 后才使用 PDF 页面适配。
+- 回归覆盖：混合横竖特殊尺寸 PDF 的居中比例、尺寸变体缓存次数、UI 开关、上次设置记忆。

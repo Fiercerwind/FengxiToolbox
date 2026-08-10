@@ -1495,6 +1495,7 @@ def main():
     app.wm_skip_word_type_var.set(False)
     app.wm_skip_ppt_type_var.set(True)
     app.wm_color_var.set("#336699")
+    app.wm_adaptive_page_size_var.set(False)
     for slider_name, slider_value in (("slider_size", 66), ("slider_opacity", 0.31), ("slider_angle", 27)):
         mod._safe_named_widget_set(app, slider_name, slider_value)
         slider = getattr(app, slider_name, None)
@@ -1521,6 +1522,7 @@ def main():
         and auto_watermark_settings.get("wm_skip_word_type_var") is False
         and auto_watermark_settings.get("wm_skip_ppt_type_var") is True
         and auto_watermark_settings.get("wm_color_var") == "#336699"
+        and auto_watermark_settings.get("wm_adaptive_page_size_var") is False
         and abs(float(auto_watermark_settings.get("slider_size", 0)) - float(app.slider_size.get())) < 0.01
         and abs(float(auto_watermark_settings.get("slider_opacity", 0)) - float(app.slider_opacity.get())) < 0.01
         and abs(float(auto_watermark_settings.get("slider_angle", 0)) - float(app.slider_angle.get())) < 0.01,
@@ -1541,6 +1543,7 @@ def main():
     app.wm_color_var.set("#2A7FFF")
     app.wm_copy_guard_enabled_var.set(True)
     app.wm_copy_guard_strength_var.set("强力")
+    app.wm_adaptive_page_size_var.set(True)
     mod._safe_named_widget_set(app, "slider_size", 72)
     mod._safe_named_widget_set(app, "slider_opacity", 0.22)
     mod._safe_named_widget_set(app, "slider_angle", 30)
@@ -1556,6 +1559,7 @@ def main():
     app.wm_color_var.set("#C0C0C0")
     app.wm_copy_guard_enabled_var.set(False)
     app.wm_copy_guard_strength_var.set("轻度")
+    app.wm_adaptive_page_size_var.set(False)
     mod._safe_named_widget_set(app, "slider_size", 20)
     apply_ok, apply_message = mod._restore_last_settings_category(app, "watermark")
     loaded_last = mod._load_last_settings().get("watermark")
@@ -1573,6 +1577,7 @@ def main():
         and app.wm_color_var.get() == "#2A7FFF"
         and app.wm_copy_guard_enabled_var.get() is True
         and app.wm_copy_guard_strength_var.get() == "强力"
+        and app.wm_adaptive_page_size_var.get() is True
         and abs(float(app.slider_size.get()) - saved_slider_size) < 0.01,
         {
             "message": apply_message,
@@ -1664,6 +1669,45 @@ def main():
             "text_index": text_index,
             "settings": wm_copy_guard_settings,
             "preview": wm_copy_guard_preview,
+        },
+    )
+    wm_adaptive_frame = getattr(app, "_fx_wm_adaptive_page_size_frame", None)
+    wm_right_panel = mod._find_watermark_settings_panel(app, app.tab_wm, wm_text_panel)
+    wm_adaptive_settings = mod._get_watermark_settings(app)
+    wm_compatibility_switch = next(
+        (
+            child
+            for child in wm_right_panel.winfo_children()
+            if getattr(child, "_fx_wm_shared_row_member", False)
+        ),
+        None,
+    )
+    try:
+        wm_compatibility_pack = wm_compatibility_switch.pack_info()
+        wm_adaptive_switch_pack = app.wm_adaptive_page_size_switch.pack_info()
+    except Exception:
+        wm_compatibility_pack = {}
+        wm_adaptive_switch_pack = {}
+    record(
+        "watermark_adaptive_page_size_ui_and_settings",
+        wm_adaptive_frame is not None
+        and wm_adaptive_frame.master == wm_right_panel
+        and wm_adaptive_frame.winfo_manager() == "pack"
+        and wm_compatibility_switch is not None
+        and wm_compatibility_pack.get("in") == wm_adaptive_frame
+        and wm_adaptive_switch_pack.get("in") == wm_adaptive_frame
+        and wm_compatibility_pack.get("side") == "left"
+        and wm_adaptive_switch_pack.get("side") == "right"
+        and app.wm_adaptive_page_size_var.get() is True
+        and wm_adaptive_settings.get("adaptive_page_size") is True
+        and str(app.wm_adaptive_page_size_switch.cget("text")) == "适配特殊页面尺寸",
+        {
+            "manager": wm_adaptive_frame.winfo_manager() if wm_adaptive_frame is not None else None,
+            "parent_is_settings_panel": wm_adaptive_frame.master == wm_right_panel if wm_adaptive_frame is not None else False,
+            "compatibility_side": wm_compatibility_pack.get("side"),
+            "adaptive_side": wm_adaptive_switch_pack.get("side"),
+            "enabled": app.wm_adaptive_page_size_var.get(),
+            "settings": wm_adaptive_settings,
         },
     )
     wm_range_random_radio = getattr(app, "_fx_wm_range_random_radio", None)
@@ -3022,6 +3066,86 @@ def main():
         and random_page_pixels[0] > random_page_pixels[1] + 5000
         and random_page_pixels[2] > random_page_pixels[1] + 5000,
         {"status": random_status, "pixels": random_page_pixels},
+    )
+
+    adaptive_src = root / "sample_adaptive_page_sizes.pdf"
+    adaptive_canvas = canvas.Canvas(str(adaptive_src), pagesize=(4096, 3072))
+    adaptive_sizes = ((4096, 3072), (4096, 3072), (3072, 4096), (3072, 4096))
+    for page_size in adaptive_sizes:
+        adaptive_canvas.setPageSize(page_size)
+        adaptive_canvas.drawString(100, 100, "ADAPTIVE SOURCE")
+        adaptive_canvas.showPage()
+    adaptive_canvas.save()
+    adaptive_out = root / "sample_adaptive_page_sizes_wm.pdf"
+    adaptive_packet = mod.create_watermark_packet("FXADAPT", "Helvetica", 60, 0.9, 45, color="#FF2020")
+    adaptive_spec = {
+        "content": "FXADAPT",
+        "font_name": "Helvetica",
+        "font_size": 60,
+        "opacity": 0.9,
+        "angle": 45,
+        "color": "#FF2020",
+    }
+    import tools.fx_watermark_core as wm_core_for_adaptive
+
+    adaptive_packet_calls = []
+    original_adaptive_packet_factory = wm_core_for_adaptive._create_adaptive_watermark_packet
+
+    def counted_adaptive_packet(*args, **kwargs):
+        adaptive_packet_calls.append((tuple(args[1]), kwargs.get("page_rotation", 0)))
+        return original_adaptive_packet_factory(*args, **kwargs)
+
+    wm_core_for_adaptive._create_adaptive_watermark_packet = counted_adaptive_packet
+    try:
+        adaptive_status = mod.add_watermark_to_pdf(
+            str(adaptive_src),
+            str(adaptive_out),
+            adaptive_packet,
+            page_range="all",
+            check_text="FXADAPT",
+            force_mode=True,
+            copy_guard=True,
+            copy_guard_strength="light",
+            adaptive_page_size=True,
+            watermark_spec=adaptive_spec,
+        )
+    finally:
+        wm_core_for_adaptive._create_adaptive_watermark_packet = original_adaptive_packet_factory
+    import fitz as fitz_adaptive
+
+    adaptive_centers = []
+    adaptive_width_ratios = []
+    with fitz_adaptive.open(str(adaptive_out)) as adaptive_document:
+        for adaptive_page in adaptive_document:
+            matches = [
+                block
+                for block in adaptive_page.get_text("blocks")
+                if "FXADAPT" in str(block[4])
+            ]
+            if not matches:
+                adaptive_centers.append((0.0, 0.0))
+                adaptive_width_ratios.append(0.0)
+                continue
+            x0, y0, x1, y1 = [float(value) for value in matches[0][:4]]
+            adaptive_centers.append(
+                (
+                    ((x0 + x1) / 2.0) / adaptive_page.rect.width,
+                    ((y0 + y1) / 2.0) / adaptive_page.rect.height,
+                )
+            )
+            adaptive_width_ratios.append((x1 - x0) / adaptive_page.rect.width)
+    record(
+        "pdf_watermark_adaptive_page_size_center_and_cache",
+        adaptive_status == "SUCCESS"
+        and len(adaptive_packet_calls) == 2
+        and all(0.40 <= center_x <= 0.60 and 0.40 <= center_y <= 0.60 for center_x, center_y in adaptive_centers)
+        and all(width_ratio >= 0.25 for width_ratio in adaptive_width_ratios),
+        {
+            "status": adaptive_status,
+            "packet_calls": adaptive_packet_calls,
+            "centers": adaptive_centers,
+            "width_ratios": adaptive_width_ratios,
+        },
     )
 
     copy_guard_pdf_noise = copy_guard_noise_lines_module("strong", 0, "pdf-noise-probe", allow_unicode=True)

@@ -202,16 +202,33 @@ def create_watermark_packet(
     *,
     font_path_resolver=None,
     color=None,
+    page_size=None,
+    scale_font_to_page=False,
+    page_rotation=0,
 ):
     """Build a one-page PDF watermark packet."""
 
     packet = io.BytesIO()
-    page_width, page_height = A4
-    pdf = canvas.Canvas(packet, pagesize=A4)
+    try:
+        page_width = max(1.0, float(page_size[0]))
+        page_height = max(1.0, float(page_size[1]))
+    except Exception:
+        page_width, page_height = A4
+    pdf = canvas.Canvas(packet, pagesize=(page_width, page_height))
     resolved_font = _resolve_reportlab_font(font_name, font_path_resolver=font_path_resolver)
     size = max(1.0, _safe_float(font_size, 36.0))
+    normalized_rotation = int(_safe_float(page_rotation, 0.0)) % 360
+    if scale_font_to_page:
+        visible_width, visible_height = page_width, page_height
+        if normalized_rotation in {90, 270}:
+            visible_width, visible_height = visible_height, visible_width
+        if visible_width > visible_height:
+            base_width, base_height = A4[1], A4[0]
+        else:
+            base_width, base_height = A4
+        size *= max(0.01, min(visible_width / base_width, visible_height / base_height))
     alpha = max(0.0, min(1.0, _safe_float(opacity, 0.2)))
-    rotation = _safe_float(angle, 45.0)
+    rotation = _safe_float(angle, 45.0) - normalized_rotation
     text = str(content or "")
     lines = text.splitlines() or [""]
 
@@ -294,6 +311,67 @@ def create_copy_guard_packet(page_size, strength="standard", page_index=0, docum
     pdf.save()
     packet.seek(0)
     return packet
+
+
+def _page_geometry(page):
+    """Return raw page width, height and normalized rotation."""
+
+    box = None
+    for name in ("mediabox", "MediaBox"):
+        try:
+            box = getattr(page, name)
+        except Exception:
+            box = None
+        if box is not None:
+            break
+    if box is None:
+        try:
+            box = page.obj.get("/MediaBox")
+        except Exception:
+            box = None
+    try:
+        left, bottom, right, top = [float(value) for value in box]
+        width = max(1.0, abs(right - left))
+        height = max(1.0, abs(top - bottom))
+    except Exception:
+        width, height = A4
+
+    rotation = 0
+    for getter in (
+        lambda: getattr(page, "rotation"),
+        lambda: page.get("/Rotate", 0),
+        lambda: page.obj.get("/Rotate", 0),
+    ):
+        try:
+            rotation = int(float(getter() or 0)) % 360
+            break
+        except Exception:
+            continue
+    return width, height, rotation
+
+
+def _is_default_a4_page(width, height, rotation=0):
+    if int(rotation or 0) % 360:
+        return False
+    width_tolerance = max(2.0, A4[0] * 0.01)
+    height_tolerance = max(2.0, A4[1] * 0.01)
+    return abs(float(width) - A4[0]) <= width_tolerance and abs(float(height) - A4[1]) <= height_tolerance
+
+
+def _create_adaptive_watermark_packet(watermark_spec, page_size, page_rotation=0, font_path_resolver=None):
+    spec = dict(watermark_spec or {})
+    return create_watermark_packet(
+        spec.get("content", ""),
+        spec.get("font_name", ""),
+        spec.get("font_size", 36.0),
+        spec.get("opacity", 0.2),
+        spec.get("angle", 45.0),
+        font_path_resolver=font_path_resolver,
+        color=spec.get("color"),
+        page_size=page_size,
+        scale_font_to_page=True,
+        page_rotation=page_rotation,
+    )
 
 
 def _copy_guard_text_instruction_blocks(pikepdf, font_name, line, y_position):
@@ -502,6 +580,9 @@ def _add_watermark_and_copy_guard_to_pdf(
     page_range,
     copy_guard_strength,
     document_token,
+    adaptive_page_size=False,
+    watermark_spec=None,
+    font_path_resolver=None,
 ):
     """Apply the visible overlay and copy guard in one pikepdf write."""
 
@@ -511,6 +592,7 @@ def _add_watermark_and_copy_guard_to_pdf(
         return f"ERROR:copy guard backend unavailable: {exc}"
 
     watermark_pdf = None
+    adaptive_watermark_pdfs = {}
     try:
         with pikepdf.Pdf.open(str(src_path)) as pdf:
             watermark_page = None
@@ -519,10 +601,28 @@ def _add_watermark_and_copy_guard_to_pdf(
                 watermark_pdf = pikepdf.Pdf.open(watermark_packet)
                 watermark_page = watermark_pdf.pages[0]
             target_pages = set(_select_watermark_page_indexes(len(pdf.pages), page_range))
-            if watermark_page is not None:
+            if watermark_page is not None or (adaptive_page_size and watermark_spec):
                 for index, page in enumerate(pdf.pages):
                     if index in target_pages:
-                        page.add_overlay(watermark_page, push_stack=True, shrink=False, expand=False)
+                        overlay_page = watermark_page
+                        if adaptive_page_size and watermark_spec:
+                            width, height, rotation = _page_geometry(page)
+                            if not _is_default_a4_page(width, height, rotation):
+                                cache_key = (round(width, 3), round(height, 3), rotation)
+                                cached = adaptive_watermark_pdfs.get(cache_key)
+                                if cached is None:
+                                    packet = _create_adaptive_watermark_packet(
+                                        watermark_spec,
+                                        (width, height),
+                                        page_rotation=rotation,
+                                        font_path_resolver=font_path_resolver,
+                                    )
+                                    adaptive_pdf = pikepdf.Pdf.open(packet)
+                                    cached = (adaptive_pdf, packet)
+                                    adaptive_watermark_pdfs[cache_key] = cached
+                                overlay_page = cached[0].pages[0]
+                        if overlay_page is not None:
+                            page.add_overlay(overlay_page, push_stack=True, shrink=False, expand=False)
 
             _inject_copy_guard_into_pikepdf(
                 pdf,
@@ -538,6 +638,11 @@ def _add_watermark_and_copy_guard_to_pdf(
     except Exception as exc:
         return f"ERROR:single-pass copy guard failed: {exc}"
     finally:
+        for adaptive_pdf, _packet in adaptive_watermark_pdfs.values():
+            try:
+                adaptive_pdf.close()
+            except Exception:
+                pass
         if watermark_pdf is not None:
             try:
                 watermark_pdf.close()
@@ -687,6 +792,9 @@ def add_watermark_to_pdf(
     force_mode=False,
     copy_guard=False,
     copy_guard_strength="standard",
+    adaptive_page_size=False,
+    watermark_spec=None,
+    font_path_resolver=None,
 ):
     """Apply the watermark packet to a PDF and return a runtime-compatible status."""
 
@@ -745,6 +853,9 @@ def add_watermark_to_pdf(
                 page_range,
                 copy_guard_strength,
                 copy_guard_token,
+                adaptive_page_size=adaptive_page_size,
+                watermark_spec=watermark_spec,
+                font_path_resolver=font_path_resolver,
             )
             if one_pass_status == "SUCCESS":
                 if temp_path is not None:
@@ -759,6 +870,7 @@ def add_watermark_to_pdf(
                 return "ERROR:PDF reader unavailable"
 
         watermark_page = None
+        watermark_reader = None
         if apply_visible_watermark:
             if hasattr(watermark_packet, "seek"):
                 watermark_packet.seek(0)
@@ -767,12 +879,30 @@ def add_watermark_to_pdf(
 
         writer = PdfWriter()
         target_pages = _select_watermark_page_indexes(len(reader.pages), page_range)
+        adaptive_watermark_pages = {}
         for index, page in enumerate(reader.pages):
             if apply_visible_watermark and index in target_pages:
+                overlay_page = watermark_page
+                if adaptive_page_size and watermark_spec:
+                    width, height, rotation = _page_geometry(page)
+                    if not _is_default_a4_page(width, height, rotation):
+                        cache_key = (round(width, 3), round(height, 3), rotation)
+                        cached = adaptive_watermark_pages.get(cache_key)
+                        if cached is None:
+                            packet = _create_adaptive_watermark_packet(
+                                watermark_spec,
+                                (width, height),
+                                page_rotation=rotation,
+                                font_path_resolver=font_path_resolver,
+                            )
+                            adaptive_reader = PdfReader(packet)
+                            cached = (adaptive_reader.pages[0], adaptive_reader, packet)
+                            adaptive_watermark_pages[cache_key] = cached
+                        overlay_page = cached[0]
                 try:
-                    page.merge_page(watermark_page)
+                    page.merge_page(overlay_page)
                 except AttributeError:
-                    page.mergePage(watermark_page)
+                    page.mergePage(overlay_page)
             writer.add_page(page)
         writer.add_metadata(_writer_metadata(reader, copy_guard=copy_guard_exists or apply_copy_guard))
 

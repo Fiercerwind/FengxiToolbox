@@ -383,6 +383,7 @@ INLINE_HELP_SECTIONS = (
             "复制干扰层作用于 PDF、直接输出的 Word，以及先转成 PDF 的 Word/PPT。PDF 使用不可见文本；Word 使用 1pt 白色文本段落，在常规白底文档中不显色，深色/彩色页面可能看见白字。",
             "干扰只放在段落/文本块之间：局部拖选一行正文或单独复制一段正文通常不受影响；全选整页、复制整份文件或直接提取文字时会混入干扰块。",
             "干扰内容混合数字、字母、符号、乱码样式字符；Word 还会混入汉字片段。复制干扰层不能阻止截图后重新 OCR；轻度、标准、强力只控制每页干扰块数量，默认关闭。",
+            "适配特殊页面尺寸：开启后 PDF 会按每页实际宽高和方向居中并等比例调整水印字号；同一 PDF 内相同尺寸只生成一次水印层，普通 A4 页面继续复用标准路径。",
             "水印内容、字号、透明度、角度、跳过规则和输出策略都会自动记住上一次设置。",
             "这是稳定区功能，除非明确要求，不应改动核心加水印处理逻辑。",
         ),
@@ -3376,7 +3377,13 @@ def _tighten_watermark_tab_layout(app, tab):
         (child for child in right_children if getattr(child, "_fx_wm_filename_rule_controls", False)),
         None,
     )
+    adaptive_page_size_controls = next(
+        (child for child in right_children if getattr(child, "_fx_wm_adaptive_page_size_controls", False)),
+        None,
+    )
     for child in right_children:
+        if getattr(child, "_fx_wm_shared_row_member", False):
+            continue
         try:
             current = child.pack_info()
         except Exception:
@@ -3412,12 +3419,22 @@ def _tighten_watermark_tab_layout(app, tab):
     for index in (3, 5, 6, 7):
         if index < len(right_children):
             try:
-                if right_children[index] is filename_rule_controls:
+                if (
+                    right_children[index] is filename_rule_controls
+                    or getattr(right_children[index], "_fx_wm_shared_row_member", False)
+                ):
                     continue
                 right_children[index].configure(height=30)
                 right_children[index].pack_configure(anchor="w", padx=24, pady=(0, 1))
             except Exception:
                 pass
+    if adaptive_page_size_controls is not None:
+        try:
+            adaptive_page_size_controls.configure(height=30)
+            adaptive_page_size_controls.pack_propagate(False)
+            adaptive_page_size_controls.pack_configure(fill="x", padx=24, pady=(0, 1))
+        except Exception:
+            pass
     if len(right_children) > 4:
         try:
             if right_children[4] is not filename_rule_controls:
@@ -3604,6 +3621,8 @@ def add_watermark_to_pdf(
     force_mode=False,
     copy_guard=False,
     copy_guard_strength="standard",
+    adaptive_page_size=False,
+    watermark_spec=None,
 ):
     return _watermark_core_add_watermark_to_pdf(
         src,
@@ -3614,6 +3633,9 @@ def add_watermark_to_pdf(
         force_mode=force_mode,
         copy_guard=copy_guard,
         copy_guard_strength=copy_guard_strength,
+        adaptive_page_size=adaptive_page_size,
+        watermark_spec=watermark_spec,
+        font_path_resolver=get_font_path_by_name,
     )
 
 
@@ -11598,6 +11620,97 @@ def _patch_watermark_copy_guard_ui():
 _patch_watermark_copy_guard_ui()
 
 
+def _install_watermark_adaptive_page_size_ui(app):
+    if getattr(app, "_fx_wm_adaptive_page_size_ui_ready", False):
+        return getattr(app, "_fx_wm_adaptive_page_size_frame", None)
+    tab = getattr(app, "tab_wm", None)
+    if tab is None:
+        return None
+    left_panel = _find_watermark_text_panel(app, tab)
+    parent = _find_watermark_settings_panel(app, tab, left_panel)
+    if parent is None:
+        return None
+    if getattr(app, "wm_adaptive_page_size_var", None) is None:
+        app.wm_adaptive_page_size_var = tkinter.BooleanVar(value=True)
+
+    frame = customtkinter.CTkFrame(parent, fg_color="transparent", height=32)
+    frame._fx_wm_adaptive_page_size_controls = True
+    try:
+        frame.pack_propagate(False)
+    except Exception:
+        pass
+
+    def changed(*_args):
+        try:
+            _schedule_watermark_last_settings_persistence(app)
+        except Exception:
+            pass
+
+    switch = customtkinter.CTkSwitch(
+        frame,
+        text="适配特殊页面尺寸",
+        variable=app.wm_adaptive_page_size_var,
+        command=changed,
+        height=30,
+        font=customtkinter.CTkFont(size=11, weight="bold"),
+    )
+    parent_children = list(parent.winfo_children())
+
+    def widget_text(widget):
+        try:
+            return str(widget.cget("text"))
+        except Exception:
+            return ""
+
+    compatibility_switch = next(
+        (
+            child
+            for child in parent_children
+            if "兼容模式" in widget_text(child)
+        ),
+        None,
+    )
+    if compatibility_switch is not None:
+        frame.pack(fill="x", padx=24, pady=(0, 1), before=compatibility_switch)
+        compatibility_switch.pack_forget()
+        compatibility_switch._fx_wm_shared_row_member = True
+        compatibility_switch.pack(in_=frame, side="left", anchor="w")
+        switch.pack(side="right", anchor="e")
+    else:
+        switch.pack(anchor="w", fill="x")
+        frame.pack(fill="x", padx=24, pady=(0, 1))
+
+    app.wm_adaptive_page_size_switch = switch
+    app._fx_wm_adaptive_page_size_frame = frame
+    app._fx_wm_adaptive_page_size_ui_ready = True
+    _tighten_watermark_tab_layout(app, tab)
+    return frame
+
+
+def _patch_watermark_adaptive_page_size_ui():
+    try:
+        original_init_watermark_ui = FengxiToolboxApp.init_watermark_ui
+    except Exception as exc:
+        _debug(f"watermark_adaptive_page_size:patch_missing:{exc}")
+        return
+    if getattr(original_init_watermark_ui, "__fx_wm_adaptive_page_size_patch__", False):
+        return
+
+    def patched_init_watermark_ui(self):
+        original_init_watermark_ui(self)
+        try:
+            _install_watermark_adaptive_page_size_ui(self)
+        except Exception as exc:
+            _debug(f"watermark_adaptive_page_size:init_error:{exc}")
+
+    patched_init_watermark_ui.__fx_wm_adaptive_page_size_patch__ = True
+    FengxiToolboxApp.init_watermark_ui = patched_init_watermark_ui
+    _debug("patch_watermark_adaptive_page_size:installed")
+
+
+_patch_watermark_adaptive_page_size_ui()
+
+
 def _get_watermark_settings(app):
     text = _read_watermark_text_widget(app) or str(_safe_named_widget_get(app, "wm_text", "") or "")
     font_name = str(_safe_var_get(app, "selected_font", "") or "").strip()
@@ -11625,6 +11738,7 @@ def _get_watermark_settings(app):
         "delete_source": bool(_safe_var_get(app, "wm_delete_var", False)),
         "copy_guard_enabled": bool(_safe_var_get(app, "wm_copy_guard_enabled_var", False)),
         "copy_guard_strength": _get_watermark_copy_guard_strength(app),
+        "adaptive_page_size": bool(_safe_var_get(app, "wm_adaptive_page_size_var", True)),
     }
 
 
@@ -11749,6 +11863,14 @@ def _watermark_make_pdf_packet(settings):
 
 def _watermark_process_pdf(src, dst, settings):
     packet = _watermark_make_pdf_packet(settings)
+    watermark_spec = {
+        "content": settings["text"],
+        "font_name": settings["font_name"],
+        "font_size": settings["font_size"],
+        "opacity": settings["opacity"],
+        "angle": settings["angle"],
+        "color": settings.get("color", WATERMARK_DEFAULT_COLOR),
+    }
     return add_watermark_to_pdf(
         str(src),
         str(dst),
@@ -11758,6 +11880,8 @@ def _watermark_process_pdf(src, dst, settings):
         force_mode=settings["force_mode"],
         copy_guard=settings.get("copy_guard_enabled", False),
         copy_guard_strength=settings.get("copy_guard_strength", "standard"),
+        adaptive_page_size=settings.get("adaptive_page_size", True),
+        watermark_spec=watermark_spec,
     )
 
 
@@ -12333,6 +12457,8 @@ def _run_watermark_task(app, input_value):
             logs,
             f"[复制干扰层] 已开启（{strength_label}）| 应用于 PDF、直接输出的 Word，以及转成 PDF 的 Word/PPT；默认显示和打印不变。",
         )
+    if settings.get("adaptive_page_size"):
+        _watermark_log(app, logs, "[页面适配] 已开启 | 特殊尺寸 PDF 将按页面大小居中水印，相同尺寸自动复用。")
     if rule_skipped_files:
         copy_hint = "会复制到输出文件夹" if _get_watermark_copy_skipped_to_output(app) else "仅跳过不复制"
         _watermark_log(app, logs, f"[批量水印] 文件名规则跳过 {len(rule_skipped_files)} 个文件 | {copy_hint}")
@@ -13149,6 +13275,7 @@ def _capture_preset_settings(app, category=None):
                     _get_watermark_copy_guard_strength(app),
                     "标准",
                 ),
+                "wm_adaptive_page_size_var": bool(_safe_var_get(app, "wm_adaptive_page_size_var", True)),
                 "slider_size": _safe_named_widget_get(app, "slider_size", 60),
                 "slider_opacity": _safe_named_widget_get(app, "slider_opacity", 0.08),
                 "slider_angle": _safe_named_widget_get(app, "slider_angle", 45),
@@ -13310,6 +13437,7 @@ def _apply_preset_settings(app, preset, switch_task=True):
             "wm_skip_word_type_var",
             "wm_skip_ppt_type_var",
             "wm_copy_guard_enabled_var",
+            "wm_adaptive_page_size_var",
         ):
             if name in settings:
                 _safe_var_set(app, name, bool(settings.get(name)))
@@ -13538,6 +13666,7 @@ def _install_watermark_last_settings_memory(app):
         "wm_color_var",
         "wm_copy_guard_enabled_var",
         "wm_copy_guard_strength_var",
+        "wm_adaptive_page_size_var",
         "output_strategy_var",
     )
     trace_ids = []
