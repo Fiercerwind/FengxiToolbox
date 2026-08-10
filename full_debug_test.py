@@ -939,6 +939,20 @@ def main():
     app.withdraw()
     app._fx_disable_fast_close_force_exit = True
     record("app_init", True, "current_task=" + str(getattr(app, "current_task", None)))
+    app.init_convert_ui()
+    convert_mode_values = []
+    for widget in mod._iter_child_widgets(app.tab_cv):
+        try:
+            if isinstance(widget, mod.customtkinter.CTkRadioButton):
+                convert_mode_values.append(str(widget.cget("value")))
+        except Exception:
+            pass
+    record(
+        "convert_duplicate_image_tools_card_removed",
+        not mod._widget_tree_contains_text(app.tab_cv, "图片处理工具")
+        and "imgs2pdf" in convert_mode_values,
+        {"mode_values": convert_mode_values},
+    )
 
     resume_probe = root / "resume_probe.txt"
     resume_probe.write_text("done", encoding="utf-8")
@@ -1671,41 +1685,55 @@ def main():
             "preview": wm_copy_guard_preview,
         },
     )
-    wm_adaptive_frame = getattr(app, "_fx_wm_adaptive_page_size_frame", None)
     wm_right_panel = mod._find_watermark_settings_panel(app, app.tab_wm, wm_text_panel)
     wm_adaptive_settings = mod._get_watermark_settings(app)
-    wm_compatibility_switch = next(
+    mod._position_watermark_adaptive_page_size_switch(app)
+    wm_right_children = list(wm_right_panel.winfo_children())
+    wm_compatibility_switch = getattr(app, "_fx_wm_compatibility_switch", None)
+
+    def wm_widget_text(widget):
+        try:
+            return str(widget.cget("text"))
+        except Exception:
+            return ""
+
+    wm_delete_switch = next(
         (
             child
-            for child in wm_right_panel.winfo_children()
-            if getattr(child, "_fx_wm_shared_row_member", False)
+            for child in wm_right_children
+            if "删除源文件" in wm_widget_text(child)
         ),
         None,
     )
     try:
         wm_compatibility_pack = wm_compatibility_switch.pack_info()
-        wm_adaptive_switch_pack = app.wm_adaptive_page_size_switch.pack_info()
+        wm_adaptive_switch_place = app.wm_adaptive_page_size_switch.place_info()
+        compatibility_before_delete = (
+            wm_right_children.index(wm_compatibility_switch)
+            < wm_right_children.index(wm_delete_switch)
+        )
     except Exception:
         wm_compatibility_pack = {}
-        wm_adaptive_switch_pack = {}
+        wm_adaptive_switch_place = {}
+        compatibility_before_delete = False
     record(
         "watermark_adaptive_page_size_ui_and_settings",
-        wm_adaptive_frame is not None
-        and wm_adaptive_frame.master == wm_right_panel
-        and wm_adaptive_frame.winfo_manager() == "pack"
+        app.wm_adaptive_page_size_switch.master == wm_right_panel
+        and app.wm_adaptive_page_size_switch.winfo_manager() == "place"
         and wm_compatibility_switch is not None
-        and wm_compatibility_pack.get("in") == wm_adaptive_frame
-        and wm_adaptive_switch_pack.get("in") == wm_adaptive_frame
-        and wm_compatibility_pack.get("side") == "left"
-        and wm_adaptive_switch_pack.get("side") == "right"
+        and wm_compatibility_switch.winfo_manager() == "pack"
+        and compatibility_before_delete
+        and str(wm_adaptive_switch_place.get("relx")) in {"1", "1.0"}
+        and wm_adaptive_switch_place.get("anchor") == "ne"
+        and int(wm_adaptive_switch_place.get("y", -1)) == int(wm_compatibility_switch.winfo_y())
         and app.wm_adaptive_page_size_var.get() is True
         and wm_adaptive_settings.get("adaptive_page_size") is True
         and str(app.wm_adaptive_page_size_switch.cget("text")) == "适配特殊页面尺寸",
         {
-            "manager": wm_adaptive_frame.winfo_manager() if wm_adaptive_frame is not None else None,
-            "parent_is_settings_panel": wm_adaptive_frame.master == wm_right_panel if wm_adaptive_frame is not None else False,
-            "compatibility_side": wm_compatibility_pack.get("side"),
-            "adaptive_side": wm_adaptive_switch_pack.get("side"),
+            "adaptive_manager": app.wm_adaptive_page_size_switch.winfo_manager(),
+            "compatibility_manager": wm_compatibility_switch.winfo_manager() if wm_compatibility_switch is not None else None,
+            "compatibility_before_delete": compatibility_before_delete,
+            "adaptive_place": wm_adaptive_switch_place,
             "enabled": app.wm_adaptive_page_size_var.get(),
             "settings": wm_adaptive_settings,
         },

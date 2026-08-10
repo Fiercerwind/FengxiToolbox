@@ -3377,13 +3377,7 @@ def _tighten_watermark_tab_layout(app, tab):
         (child for child in right_children if getattr(child, "_fx_wm_filename_rule_controls", False)),
         None,
     )
-    adaptive_page_size_controls = next(
-        (child for child in right_children if getattr(child, "_fx_wm_adaptive_page_size_controls", False)),
-        None,
-    )
     for child in right_children:
-        if getattr(child, "_fx_wm_shared_row_member", False):
-            continue
         try:
             current = child.pack_info()
         except Exception:
@@ -3419,22 +3413,12 @@ def _tighten_watermark_tab_layout(app, tab):
     for index in (3, 5, 6, 7):
         if index < len(right_children):
             try:
-                if (
-                    right_children[index] is filename_rule_controls
-                    or getattr(right_children[index], "_fx_wm_shared_row_member", False)
-                ):
+                if right_children[index] is filename_rule_controls:
                     continue
                 right_children[index].configure(height=30)
                 right_children[index].pack_configure(anchor="w", padx=24, pady=(0, 1))
             except Exception:
                 pass
-    if adaptive_page_size_controls is not None:
-        try:
-            adaptive_page_size_controls.configure(height=30)
-            adaptive_page_size_controls.pack_propagate(False)
-            adaptive_page_size_controls.pack_configure(fill="x", padx=24, pady=(0, 1))
-        except Exception:
-            pass
     if len(right_children) > 4:
         try:
             if right_children[4] is not filename_rule_controls:
@@ -8507,6 +8491,63 @@ def _patch_convert_mode_grid_cleanup():
 _patch_convert_mode_grid_cleanup()
 
 
+def _widget_tree_contains_text(widget, expected_text):
+    stack = [widget]
+    while stack:
+        current = stack.pop()
+        try:
+            if expected_text in str(current.cget("text")):
+                return True
+        except Exception:
+            pass
+        try:
+            stack.extend(current.winfo_children())
+        except Exception:
+            pass
+    return False
+
+
+def _remove_duplicate_convert_image_tools_card(app):
+    tab = getattr(app, "tab_cv", None)
+    if tab is None:
+        return False
+    removed = False
+    for card in list(tab.winfo_children()):
+        if not _widget_tree_contains_text(card, "图片处理工具"):
+            continue
+        try:
+            card.destroy()
+            removed = True
+        except Exception:
+            pass
+    return removed
+
+
+def _patch_remove_duplicate_convert_image_tools_card():
+    try:
+        original_init_convert_ui = FengxiToolboxApp.init_convert_ui
+    except Exception as exc:
+        _debug(f"patch_convert_image_tools_cleanup:missing:{exc}")
+        return
+
+    if getattr(original_init_convert_ui, "__fx_convert_image_tools_cleanup_patch__", False):
+        return
+
+    def patched_init_convert_ui(self):
+        original_init_convert_ui(self)
+        try:
+            _remove_duplicate_convert_image_tools_card(self)
+        except Exception as exc:
+            _debug(f"patch_convert_image_tools_cleanup:init_error:{exc}")
+
+    patched_init_convert_ui.__fx_convert_image_tools_cleanup_patch__ = True
+    FengxiToolboxApp.init_convert_ui = patched_init_convert_ui
+    _debug("patch_convert_image_tools_cleanup:installed")
+
+
+_patch_remove_duplicate_convert_image_tools_card()
+
+
 def _collect_audio_files(app, input_value):
     normalized_input = _normalize_input_path_value(input_value)
     return _audio_task_collect_files(normalized_input, collect_input_files=getattr(app, "collect_input_files", None))
@@ -11622,7 +11663,8 @@ _patch_watermark_copy_guard_ui()
 
 def _install_watermark_adaptive_page_size_ui(app):
     if getattr(app, "_fx_wm_adaptive_page_size_ui_ready", False):
-        return getattr(app, "_fx_wm_adaptive_page_size_frame", None)
+        _position_watermark_adaptive_page_size_switch(app)
+        return getattr(app, "_fx_wm_adaptive_page_size_switch", None)
     tab = getattr(app, "tab_wm", None)
     if tab is None:
         return None
@@ -11633,13 +11675,6 @@ def _install_watermark_adaptive_page_size_ui(app):
     if getattr(app, "wm_adaptive_page_size_var", None) is None:
         app.wm_adaptive_page_size_var = tkinter.BooleanVar(value=True)
 
-    frame = customtkinter.CTkFrame(parent, fg_color="transparent", height=32)
-    frame._fx_wm_adaptive_page_size_controls = True
-    try:
-        frame.pack_propagate(False)
-    except Exception:
-        pass
-
     def changed(*_args):
         try:
             _schedule_watermark_last_settings_persistence(app)
@@ -11647,14 +11682,32 @@ def _install_watermark_adaptive_page_size_ui(app):
             pass
 
     switch = customtkinter.CTkSwitch(
-        frame,
+        parent,
         text="适配特殊页面尺寸",
         variable=app.wm_adaptive_page_size_var,
         command=changed,
         height=30,
         font=customtkinter.CTkFont(size=11, weight="bold"),
     )
-    parent_children = list(parent.winfo_children())
+    app.wm_adaptive_page_size_switch = switch
+    app._fx_wm_adaptive_page_size_switch = switch
+    app._fx_wm_adaptive_page_size_ui_ready = True
+    try:
+        parent.bind(
+            "<Configure>",
+            lambda _event, target=app, panel=parent: panel.after_idle(
+                lambda: _position_watermark_adaptive_page_size_switch(target)
+            ),
+            add="+",
+        )
+    except Exception:
+        pass
+    _position_watermark_adaptive_page_size_switch(app)
+    return switch
+
+
+def _find_watermark_compatibility_switch(app, parent):
+    children = list(parent.winfo_children())
 
     def widget_text(widget):
         try:
@@ -11663,28 +11716,54 @@ def _install_watermark_adaptive_page_size_ui(app):
             return ""
 
     compatibility_switch = next(
-        (
-            child
-            for child in parent_children
-            if "兼容模式" in widget_text(child)
-        ),
+        (child for child in children if "兼容模式" in widget_text(child)),
         None,
     )
     if compatibility_switch is not None:
-        frame.pack(fill="x", padx=24, pady=(0, 1), before=compatibility_switch)
-        compatibility_switch.pack_forget()
-        compatibility_switch._fx_wm_shared_row_member = True
-        compatibility_switch.pack(in_=frame, side="left", anchor="w")
-        switch.pack(side="right", anchor="e")
-    else:
-        switch.pack(anchor="w", fill="x")
-        frame.pack(fill="x", padx=24, pady=(0, 1))
+        return compatibility_switch
 
-    app.wm_adaptive_page_size_switch = switch
-    app._fx_wm_adaptive_page_size_frame = frame
-    app._fx_wm_adaptive_page_size_ui_ready = True
-    _tighten_watermark_tab_layout(app, tab)
-    return frame
+    font_combo = getattr(app, "font_combo", None)
+    try:
+        font_index = children.index(font_combo)
+    except ValueError:
+        font_index = 4
+    return next(
+        (
+            child
+            for child in children[font_index + 1 :]
+            if type(child).__name__ == "CTkSwitch"
+            and child is not getattr(app, "wm_adaptive_page_size_switch", None)
+        ),
+        None,
+    )
+
+
+def _position_watermark_adaptive_page_size_switch(app):
+    switch = getattr(app, "wm_adaptive_page_size_switch", None)
+    parent = getattr(switch, "master", None)
+    if switch is None or parent is None:
+        return False
+    compatibility_switch = _find_watermark_compatibility_switch(app, parent)
+    if compatibility_switch is None:
+        try:
+            switch.place_forget()
+        except Exception:
+            pass
+        return False
+    app._fx_wm_compatibility_switch = compatibility_switch
+    try:
+        widget_scaling = float(switch._get_widget_scaling())
+        logical_y = float(compatibility_switch.winfo_y()) / max(0.1, widget_scaling)
+        switch.place(
+            relx=1.0,
+            x=-24,
+            y=max(0, logical_y),
+            anchor="ne",
+        )
+        switch.lift()
+        return True
+    except Exception:
+        return False
 
 
 def _patch_watermark_adaptive_page_size_ui():
@@ -11700,6 +11779,11 @@ def _patch_watermark_adaptive_page_size_ui():
         original_init_watermark_ui(self)
         try:
             _install_watermark_adaptive_page_size_ui(self)
+            for delay_ms in (300, 800, 1600):
+                self.after(
+                    delay_ms,
+                    lambda target=self: _install_watermark_adaptive_page_size_ui(target),
+                )
         except Exception as exc:
             _debug(f"watermark_adaptive_page_size:init_error:{exc}")
 
