@@ -1794,7 +1794,7 @@ def main():
     app.pdf_ocr_model_root.set(str(root / "ocr_models_probe"))
     app.pdf_ocr_cls.set(True)
     app.pdf_ocr_compare_report.set(True)
-    app.pdf_ocr_normalize_rotation.set(True)
+    app.pdf_ocr_normalize_rotation.set(False)
     ocr_last = mod._save_last_settings_category(app, "ocr")
     app.pdf_ocr_backend.set(backend_values[0] if backend_values else chosen_backend)
     app.pdf_ocr_preprocess.set(preprocess_values[0] if preprocess_values else chosen_preprocess)
@@ -1815,7 +1815,7 @@ def main():
         and app.pdf_ocr_model_root.get() == str(root / "ocr_models_probe")
         and bool(app.pdf_ocr_cls.get())
         and bool(app.pdf_ocr_compare_report.get())
-        and bool(app.pdf_ocr_normalize_rotation.get()),
+        and not bool(app.pdf_ocr_normalize_rotation.get()),
         {
             "backend": app.pdf_ocr_backend.get(),
             "language": app.pdf_ocr_language.get(),
@@ -1894,7 +1894,7 @@ def main():
             pass
     record("pdf_ocr_nav_button_visible", pdf_nav_visible_ok, pdf_nav_debug)
 
-    crypto_ui_debug = {}
+    file_manager_modes_debug = {}
     try:
         app.deiconify()
         app.geometry("1180x760+80+80")
@@ -1903,9 +1903,12 @@ def main():
             app.update_idletasks()
             app.update()
             time.sleep(0.05)
-        dedup_visible = mod._widget_tree_contains_text(app.tab_file, "重复文件清理 (Deduplicate)")
-
-        app.switch_tab("crypto", getattr(app, "btn_nav_crypto", None))
+        file_mode_buttons = getattr(app, "_fx_file_mode_buttons", {})
+        select_file_mode = getattr(app, "_fx_select_file_mode", None)
+        if callable(select_file_mode):
+            select_file_mode("encrypt")
+        else:
+            app.file_mode_var.set("encrypt")
         for _ in range(4):
             app.update_idletasks()
             app.update()
@@ -1914,35 +1917,37 @@ def main():
         if encrypt_entry is not None:
             encrypt_entry.delete(0, "end")
             encrypt_entry.insert(0, "visible-pass")
-        crypto_ui_debug = {
+        file_manager_modes_debug = {
             "task": getattr(app, "current_task", None),
-            "mode": app.crypto_mode_var.get(),
-            "sidebar_manager": app.btn_nav_crypto.winfo_manager(),
-            "sidebar_row": app.btn_nav_crypto.grid_info().get("row"),
+            "mode": app.file_mode_var.get(),
+            "mode_buttons": sorted(file_mode_buttons),
+            "mode_mapped": {value: bool(widget.winfo_ismapped()) for value, widget in file_mode_buttons.items()},
+            "vertical_navigation": len({int(widget.winfo_x()) for widget in file_mode_buttons.values()}) == 1,
+            "standalone_sidebar_removed": not hasattr(app, "btn_nav_crypto"),
             "password_mapped": bool(encrypt_entry.winfo_ismapped()) if encrypt_entry is not None else False,
             "confirm_removed": not hasattr(app, "file_crypto_confirm_entry"),
-            "dedup_visible": dedup_visible,
         }
-        crypto_ui_visible_ok = (
-            dedup_visible
-            and getattr(app, "current_task", None) == "crypto"
-            and app.crypto_mode_var.get() == "encrypt"
-            and app.btn_nav_crypto.winfo_manager() == "grid"
-            and int(app.btn_nav_crypto.grid_info().get("row", -1)) == 10
+        file_manager_modes_visible_ok = (
+            getattr(app, "current_task", None) == "file"
+            and app.file_mode_var.get() == "encrypt"
+            and set(file_mode_buttons) == {"rename", "dedup", "encrypt", "decrypt"}
+            and all(widget.winfo_ismapped() for widget in file_mode_buttons.values())
+            and len({int(widget.winfo_x()) for widget in file_mode_buttons.values()}) == 1
+            and not hasattr(app, "btn_nav_crypto")
             and encrypt_entry is not None
             and bool(encrypt_entry.winfo_ismapped())
             and encrypt_entry.get() == "visible-pass"
             and not hasattr(app, "file_crypto_confirm_entry")
         )
     except Exception as exc:
-        crypto_ui_visible_ok = False
-        crypto_ui_debug = {"error": str(exc)}
+        file_manager_modes_visible_ok = False
+        file_manager_modes_debug = {"error": str(exc)}
     finally:
         try:
             app.withdraw()
         except Exception:
             pass
-    record("file_dedup_and_standalone_crypto_visible", crypto_ui_visible_ok, crypto_ui_debug)
+    record("file_manager_encrypt_decrypt_modes_visible", file_manager_modes_visible_ok, file_manager_modes_debug)
 
     app.pdf_compress_level_var.set("强力")
     app.pdf_image_compress_level_var.set("轻度")
@@ -2223,6 +2228,27 @@ def main():
             "copied_txt": str(wm_unsupported_copied_txt),
             "copied_zip": str(wm_unsupported_copied_zip),
             "outputs": list(wm_unsupported_copy_result.get("outputs", [])),
+        },
+    )
+    direction_selector = getattr(app, "_fx_select_pdf_direction_mode", None)
+    direction_selector("rotation") if callable(direction_selector) else None
+    rotation_direction_selected = (
+        app.pdf_mode_var.get() == "rotation"
+        and not bool(app.pdf_ocr_cls.get())
+        and bool(app.pdf_ocr_normalize_rotation.get())
+    )
+    direction_selector("ocr") if callable(direction_selector) else None
+    record(
+        "pdf_direction_modes_are_mutually_exclusive",
+        bool(callable(direction_selector))
+        and rotation_direction_selected
+        and app.pdf_mode_var.get() == "ocr"
+        and bool(app.pdf_ocr_cls.get())
+        and not bool(app.pdf_ocr_normalize_rotation.get()),
+        {
+            "mode": app.pdf_mode_var.get(),
+            "ocr_direction": bool(app.pdf_ocr_cls.get()),
+            "rotation_only": bool(app.pdf_ocr_normalize_rotation.get()),
         },
     )
 
@@ -2616,6 +2642,30 @@ def main():
         and success_result.get("input") == str(queue_pdf)
         and "duration_seconds" in success_result,
         success_result,
+    )
+    legacy_rotation_task = {
+        "task_type": "pdf",
+        "input": str(queue_pdf),
+        "snapshot": {
+            "variables": {
+                "pdf_mode_var": "ocr",
+                "pdf_ocr_cls": True,
+                "pdf_ocr_normalize_rotation": True,
+            },
+            "widgets": {},
+        },
+    }
+    mod._queue_restore_app_state(app, legacy_rotation_task)
+    record(
+        "task_queue_legacy_rotation_state_migrates_without_ocr",
+        app.pdf_mode_var.get() == "rotation"
+        and not bool(app.pdf_ocr_cls.get())
+        and bool(app.pdf_ocr_normalize_rotation.get()),
+        {
+            "mode": app.pdf_mode_var.get(),
+            "ocr_direction": bool(app.pdf_ocr_cls.get()),
+            "rotation_only": bool(app.pdf_ocr_normalize_rotation.get()),
+        },
     )
     filtered_failed = mod._filter_queue_history_entries(
         getattr(app, "_fx_task_history", []),
@@ -5610,6 +5660,7 @@ def main():
 
     class FakePdfOcrEngine:
         backend_key = "fake_ocr"
+        ocr_call_count = 0
 
         def __init__(self, *args, **kwargs):
             self.backend_key = "fake_ocr"
@@ -5628,6 +5679,7 @@ def main():
             progress_callback=None,
             stop_checker=None,
         ):
+            type(self).ocr_call_count += 1
             shutil.copy2(src, dst)
             if callable(progress_callback):
                 progress_callback(1, 1)
@@ -5652,6 +5704,34 @@ def main():
     pdf_ocr_task_module.FengxiPdfOcrEngine = FakePdfOcrEngine
     pdf_ocr_task_module._run_compare_report = fake_compare_report
     try:
+        rotation_only_root = root / "pdf_rotation_only"
+        rotation_only_root.mkdir()
+        rotation_only_pdf = rotation_only_root / "rotation_only.pdf"
+        make_pdf(rotation_only_pdf, ["Rotation only must not OCR"])
+        app.current_task = "pdf"
+        app.pdf_mode_var.set("ocr")
+        app.pdf_ocr_cls.set(True)
+        app.pdf_ocr_normalize_rotation.set(True)
+        ocr_calls_before_rotation_only = FakePdfOcrEngine.ocr_call_count
+        app.run_process(str(rotation_only_root), "pdf")
+        rotation_only_out = rotation_only_root / mod.RESULT_FOLDER_NAME / "rotation_only.pdf"
+        record(
+            "pdf_rotation_only_legacy_state_never_calls_ocr",
+            wait_for(lambda: rotation_only_out.exists())
+            and FakePdfOcrEngine.ocr_call_count == ocr_calls_before_rotation_only
+            and app.pdf_mode_var.get() == "rotation"
+            and not bool(app.pdf_ocr_cls.get()),
+            {
+                "output": rotation_only_out,
+                "ocr_calls_before": ocr_calls_before_rotation_only,
+                "ocr_calls_after": FakePdfOcrEngine.ocr_call_count,
+                "mode": app.pdf_mode_var.get(),
+            },
+        )
+
+        # Restore a real OCR selection for the following OCR workflow probes.
+        app.pdf_mode_var.set("ocr")
+        app.pdf_ocr_normalize_rotation.set(False)
         if hasattr(app, "pdf_ocr_compare_report"):
             app.pdf_ocr_compare_report.set(True)
         app.pdf_ocr_mode.set("fullPage | 整页强制 OCR")

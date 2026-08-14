@@ -25,9 +25,9 @@
 ## 2026-07-22 按打包次数同步 GitHub
 - 用户明确要求：后续每成功打包 `3` 次才自动提交并推送一次 GitHub。
 - `package.bat` 在构建完全成功后调用 `tools/fx_package_sync.ps1`；构建失败不计数。
-- 计数文件位于本机 `%LOCALAPPDATA%\FengxiToolbox\package-sync-state.json`，不写入仓库、不随 Git 提交；本次同步后基线从 `0/5` 开始。
+- 计数文件位于本机 `%LOCALAPPDATA%\FengxiToolbox\package-sync-state.json`，不写入仓库、不随 Git 提交；同步成功后计数从 `0/3` 开始。
 - 第 3 次成功打包会调用 `tools/fx_git_sync.ps1` 执行提交、拉取变基和推送；同步成功后计数重置为 `0/3`。
-- 若 GitHub 同步失败，计数保留，下一次成功打包会继续重试，避免遗漏已完成的 5 次打包。
+- 若 GitHub 同步失败，计数保留，下一次成功打包会继续重试，避免遗漏已完成的 3 次打包。
 - 原每日计划任务 `FengxiToolbox Auto Sync to GitHub` 已移除，避免定时任务绕开此规则。
 - `package.bat` 调用计数脚本时必须使用 `-RepoRoot "%~dp0."`，不能直接传尾部为反斜杠的 `"%~dp0"`；后者在 Windows 参数解析中会让路径混入引号并导致 `Resolve-Path` 报非法字符。当前本机计数由 `%LOCALAPPDATA%\FengxiToolbox\package-sync-state.json` 保存。
 

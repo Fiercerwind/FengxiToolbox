@@ -228,7 +228,6 @@ LAZY_TAB_SPECS = {
     "image": {"init": "init_img_ui"},
     "meta": {"init": "init_meta_ui"},
     "file": {"init": "init_file_ui"},
-    "crypto": {"init": "init_crypto_ui"},
 }
 TAB_LAYOUT_ATTRS = {
     "watermark": "tab_wm",
@@ -240,12 +239,10 @@ TAB_LAYOUT_ATTRS = {
     "image": "tab_img",
     "meta": "tab_meta",
     "file": "tab_file",
-    "crypto": "tab_crypto",
 }
 LAZY_ATTR_PREFIXES = (
     ("pdf_", "pdf"),
     ("file_", "file"),
-    ("crypto_", "crypto"),
     ("zip_", "zip"),
     ("cv_", "convert"),
     ("rm_wm_", "remove_wm"),
@@ -264,7 +261,6 @@ SIDEBAR_BUTTON_SPECS = {
     "btn_nav_img": {"label": "图片工厂", "icon": "image"},
     "btn_nav_meta": {"label": "属性隐私", "icon": "lock"},
     "btn_nav_file": {"label": "文件管家", "icon": "folder"},
-    "btn_nav_crypto": {"label": "文件加密", "icon": "lock"},
 }
 SIDEBAR_AUX_BUTTON_SPECS = {
     "btn_help_proxy": {"label": "使用教程", "icon": "book"},
@@ -704,29 +700,17 @@ FEATURE_REGISTRY = {
             "hint": "文件重命名可并行处理；文件去重使用稳定单线程。",
             "detail": {
                 "dedup": ("forced_single", "文件去重需要全局哈希比对，已强制单线程。"),
+                "encrypt": ("forced_single", "文件加密按顺序写入，已强制单线程。"),
+                "decrypt": ("forced_single", "文件解密按顺序校验密码，已强制单线程。"),
             },
         },
         "preview_modes": {
             "rename": "批量重命名",
             "dedup": "重复文件清理",
+            "encrypt": "文件加密",
+            "decrypt": "文件解密",
         },
-        "risk_flags": ("dedup_delete",),
-    },
-    "crypto": {
-        "label": "文件加密",
-        "icon": "lock",
-        "page": "crypto",
-        "input": {"file": True, "folder": True, "drag_drop": True},
-        "output_strategy": {"supported": False, "force_result_folder": False},
-        "parallel": {
-            "mode": "forced_single",
-            "detail": {
-                "encrypt": ("forced_single", "文件加密按顺序写入，已强制单线程。"),
-                "decrypt": ("forced_single", "文件解密按顺序校验密码，已强制单线程。"),
-            },
-        },
-        "preview_modes": {"encrypt": "文件加密", "decrypt": "文件解密"},
-        "risk_flags": ("delete_source",),
+        "risk_flags": ("dedup_delete", "delete_source"),
     },
 }
 QUEUE_TASK_LABELS = {task_type: spec.get("label", task_type) for task_type, spec in FEATURE_REGISTRY.items()}
@@ -1739,7 +1723,6 @@ def _show_inline_help(app):
             "btn_nav_img",
             "btn_nav_meta",
             "btn_nav_file",
-            "btn_nav_crypto",
         ):
             nav = getattr(app, nav_name, None)
             if nav is not None:
@@ -1771,7 +1754,6 @@ def _show_inline_donate(app):
             "btn_nav_img",
             "btn_nav_meta",
             "btn_nav_file",
-            "btn_nav_crypto",
         ):
             nav = getattr(app, nav_name, None)
             if nav is not None:
@@ -2747,7 +2729,6 @@ def _apply_shell_layout_tightening(app):
         "btn_nav_img",
         "btn_nav_meta",
         "btn_nav_file",
-        "btn_nav_crypto",
     ):
         nav = getattr(app, nav_name, None)
         if nav is not None:
@@ -2765,14 +2746,6 @@ def _apply_shell_layout_tightening(app):
                 nav.grid_configure(padx=12, pady=3, sticky="ew")
             except Exception:
                 pass
-
-    crypto_nav = getattr(app, "btn_nav_crypto", None)
-    if crypto_nav is not None:
-        try:
-            app.sidebar_frame.grid_rowconfigure(10, minsize=0, weight=0)
-            crypto_nav.grid(row=10, column=0, padx=12, pady=3, sticky="ew")
-        except Exception:
-            pass
 
     if getattr(app, "btn_help", None) is not None:
         try:
@@ -2793,9 +2766,9 @@ def _apply_shell_layout_tightening(app):
             sidebar_button_font,
             "help",
         )
-        app.sidebar_frame.grid_rowconfigure(11, minsize=0, weight=1)
-        app.btn_help_proxy.grid(row=11, column=0, padx=12, pady=(7, 3), sticky="ew")
-        app.sidebar_frame.grid_rowconfigure(12, minsize=0, weight=0)
+        app.sidebar_frame.grid_rowconfigure(10, minsize=0, weight=1)
+        app.btn_help_proxy.grid(row=10, column=0, padx=12, pady=(7, 3), sticky="ew")
+        app.sidebar_frame.grid_rowconfigure(11, minsize=0, weight=0)
     if getattr(app, "btn_donate", None) is not None:
         try:
             app.btn_donate.configure(command=lambda target=app: _show_inline_donate(target))
@@ -2808,15 +2781,15 @@ def _apply_shell_layout_tightening(app):
             sidebar_button_font,
             "donate",
         )
-        app.btn_donate.grid_configure(row=12, padx=12, pady=(3, 7), sticky="ew")
+        app.btn_donate.grid_configure(row=11, padx=12, pady=(3, 7), sticky="ew")
 
     footer_candidates = app.sidebar_frame.winfo_children()
     if footer_candidates:
-        app.sidebar_frame.grid_rowconfigure(13, minsize=0, weight=0)
+        app.sidebar_frame.grid_rowconfigure(12, minsize=0, weight=0)
         for footer in footer_candidates:
             if isinstance(footer, customtkinter.CTkLabel):
                 try:
-                    footer.grid_configure(row=13, padx=12, pady=(10, 8), sticky="ew")
+                    footer.grid_configure(row=12, padx=12, pady=(10, 8), sticky="ew")
                 except Exception:
                     pass
                 break
@@ -3767,9 +3740,9 @@ def _patch_task_routing():
             elif task_type == "pdf" and self.pdf_mode_var.get() == "merge":
                 force_single_thread = True
                 _debug("patch_task_routing:force_single_thread:pdf_merge")
-            elif task_type == "file" and self.file_mode_var.get() == "dedup":
+            elif task_type == "file" and self.file_mode_var.get() in {"dedup", "encrypt", "decrypt"}:
                 force_single_thread = True
-                _debug("patch_task_routing:force_single_thread:file_dedup")
+                _debug("patch_task_routing:force_single_thread:file_sensitive_mode")
         except Exception as exc:
             _debug(f"patch_task_routing:error:{exc}")
         return args, force_single_thread, extra
@@ -4399,6 +4372,8 @@ def _init_crypto_ui(app):
 
 
 def _patch_crypto_page():
+    # File crypto is now a mode within the file manager; no standalone page.
+    return
     if getattr(FengxiToolboxApp, "__fx_crypto_page_patch__", False):
         return
 
@@ -4455,6 +4430,354 @@ def _patch_crypto_page():
 
 
 _patch_crypto_page()
+
+
+def _install_file_crypto_controls(app):
+    if getattr(app, "_fx_file_crypto_controls_ready", False):
+        return
+
+    try:
+        card = app.tab_file.winfo_children()[0]
+        body = card.winfo_children()[1]
+    except Exception as exc:
+        _debug(f"file_crypto:ui_container_missing:{exc}")
+        return
+
+    file_mode_var = getattr(app, "file_mode_var", None)
+    if file_mode_var is None:
+        return
+    if getattr(app, "file_crypto_password_var", None) is None:
+        app.file_crypto_password_var = tkinter.StringVar(value="")
+    if getattr(app, "file_crypto_delete_var", None) is None:
+        app.file_crypto_delete_var = tkinter.BooleanVar(value=False)
+
+    mode_buttons = [
+        widget
+        for widget in body.winfo_children()
+        if isinstance(widget, customtkinter.CTkRadioButton) and widget.cget("variable") is file_mode_var
+    ]
+    rename_button = next((widget for widget in mode_buttons if str(widget.cget("value")) == "rename"), None)
+    dedup_button = next((widget for widget in mode_buttons if str(widget.cget("value")) == "dedup"), None)
+    if rename_button is None or dedup_button is None:
+        _debug("file_crypto:ui_mode_buttons_missing")
+        return
+    body_children = list(body.winfo_children())
+    rename_index = body_children.index(rename_button)
+    dedup_index = body_children.index(dedup_button)
+    rename_controls = body_children[rename_index + 1] if len(body_children) > rename_index + 1 else None
+    dedup_note = body_children[dedup_index + 1] if len(body_children) > dedup_index + 1 else None
+    if rename_controls is None or dedup_note is None:
+        _debug("file_crypto:ui_config_sections_missing")
+        return
+
+    mode_row = customtkinter.CTkFrame(body, fg_color="transparent")
+    mode_row.pack(fill="x", padx=0, pady=(2, 10), before=rename_button)
+    for value, text in (
+        ("rename", "批量重命名"),
+        ("dedup", "重复文件清理"),
+        ("encrypt", "文件加密"),
+        ("decrypt", "文件解密"),
+    ):
+        customtkinter.CTkRadioButton(
+            mode_row,
+            text=text,
+            value=value,
+            variable=file_mode_var,
+            **app._get_radio_style(),
+        ).pack(side="left", padx=(0, 20))
+    rename_button.pack_forget()
+    dedup_button.pack_forget()
+
+    crypto_panel = customtkinter.CTkFrame(body, **app._get_panel_style())
+    crypto_panel.grid_columnconfigure(0, weight=1)
+    customtkinter.CTkLabel(
+        crypto_panel,
+        text="文件密码保护",
+        text_color=COLOR_TEXT,
+        font=customtkinter.CTkFont(size=14, weight="bold"),
+    ).grid(row=0, column=0, sticky="w", padx=14, pady=(12, 6))
+    customtkinter.CTkLabel(
+        crypto_panel,
+        text="PDF、现代 Word/PPT 使用原生密码格式；ZIP 和其他文件使用 AES-256 加密包。",
+        text_color=COLOR_TEXT_SOFT,
+        justify="left",
+        wraplength=760,
+        font=customtkinter.CTkFont(size=11),
+    ).grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 8))
+    customtkinter.CTkLabel(crypto_panel, text="密码：", text_color=COLOR_TEXT_SOFT).grid(
+        row=2, column=0, sticky="w", padx=14, pady=(0, 4)
+    )
+    app.file_crypto_password_entry = customtkinter.CTkEntry(
+        crypto_panel,
+        textvariable=app.file_crypto_password_var,
+        show="*",
+        placeholder_text="输入密码",
+        **app._get_entry_style(),
+    )
+    app.file_crypto_password_entry.grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 8))
+    app.file_crypto_delete_switch = customtkinter.CTkSwitch(
+        crypto_panel,
+        text="成功后删除源文件",
+        variable=app.file_crypto_delete_var,
+        **app._get_switch_style(),
+    )
+    app.file_crypto_delete_switch.grid(row=4, column=0, sticky="w", padx=14, pady=(0, 12))
+
+    def refresh_file_mode(*_args):
+        mode = str(file_mode_var.get() or "rename")
+        for widget in (rename_controls, dedup_note, crypto_panel):
+            try:
+                widget.pack_forget()
+            except Exception:
+                pass
+        if mode == "rename":
+            rename_controls.pack(fill="x", padx=0, pady=(0, 8))
+        elif mode == "dedup":
+            dedup_note.pack(fill="x", padx=0, pady=(0, 8))
+        elif mode in {"encrypt", "decrypt"}:
+            crypto_panel.pack(fill="x", padx=0, pady=(0, 8))
+
+    try:
+        file_mode_var.trace_add("write", refresh_file_mode)
+    except Exception:
+        pass
+    refresh_file_mode()
+    app._fx_file_crypto_mode_row = mode_row
+    app._fx_file_crypto_panel = crypto_panel
+    app._fx_file_crypto_controls_ready = True
+
+
+def _build_file_manager_mode_layout(app):
+    if getattr(app, "_fx_file_manager_mode_layout_ready", False):
+        return
+    try:
+        card = app.tab_file.winfo_children()[0]
+        body = card.winfo_children()[1]
+        file_mode_var = app.file_mode_var
+        rename_type_var = app.rename_type_var
+    except Exception as exc:
+        _debug(f"file_manager:layout_container_missing:{exc}")
+        return
+
+    def entry_value(name):
+        try:
+            return str(getattr(app, name).get() or "")
+        except Exception:
+            return ""
+
+    values = {
+        "prefix": entry_value("rename_prefix"),
+        "suffix": entry_value("rename_suffix"),
+        "find": entry_value("rename_find"),
+        "rep": entry_value("rename_rep"),
+        "cut_head": entry_value("rename_cut_head"),
+        "cut_tail": entry_value("rename_cut_tail"),
+    }
+    for widget in list(body.winfo_children()):
+        widget.destroy()
+
+    content_row = customtkinter.CTkFrame(body, fg_color="transparent")
+    content_row.pack(fill="both", expand=True, padx=0, pady=(4, 0))
+    base_panel = customtkinter.CTkFrame(content_row, fg_color="transparent", width=230)
+    base_panel.pack(side="left", fill="y", padx=(0, 14))
+    base_panel.pack_propagate(False)
+    detail_shell = customtkinter.CTkFrame(content_row, **app._get_panel_style())
+    detail_shell.pack(side="left", fill="both", expand=True)
+    detail_shell.grid_columnconfigure(0, weight=1)
+    detail_shell.grid_rowconfigure(0, weight=1)
+
+    customtkinter.CTkLabel(
+        base_panel,
+        text="文件功能",
+        text_color=COLOR_TEXT,
+        font=customtkinter.CTkFont(size=14, weight="bold"),
+    ).pack(anchor="w", pady=(4, 10))
+
+    mode_buttons = {}
+    detail_panels = {}
+
+    def select_file_mode(mode):
+        file_mode_var.set(mode)
+        for key, button in mode_buttons.items():
+            try:
+                if key == mode:
+                    button.configure(fg_color="#7A695B", border_color="#D0B38A", text_color="#FFFFFF")
+                else:
+                    button.configure(fg_color="transparent", border_color="#44515A", text_color="#DDE6EA")
+            except Exception:
+                pass
+        for key, panel in detail_panels.items():
+            try:
+                if key == mode:
+                    panel.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+                    panel.tkraise()
+                else:
+                    panel.grid_remove()
+            except Exception:
+                pass
+
+    def make_mode_button(mode, title):
+        button = customtkinter.CTkButton(
+            base_panel,
+            text=title,
+            command=lambda selected=mode: select_file_mode(selected),
+            height=30,
+            anchor="w",
+            corner_radius=8,
+            border_width=1,
+            fg_color="transparent",
+            hover_color="#303030",
+            border_color="#44515A",
+            text_color="#DDE6EA",
+            font=customtkinter.CTkFont(size=12),
+        )
+        button.pack(fill="x", pady=(0, 3))
+        mode_buttons[mode] = button
+
+    for mode, title in (
+        ("rename", "批量重命名"),
+        ("dedup", "重复文件清理"),
+        ("encrypt", "文件加密"),
+        ("decrypt", "文件解密"),
+    ):
+        make_mode_button(mode, title)
+
+    def make_detail_panel(mode, title, description=""):
+        panel = customtkinter.CTkFrame(detail_shell, fg_color="transparent")
+        panel.grid_columnconfigure(0, weight=1)
+        customtkinter.CTkLabel(
+            panel,
+            text=title,
+            text_color=COLOR_TEXT,
+            font=customtkinter.CTkFont(size=15, weight="bold"),
+        ).pack(anchor="w", padx=8, pady=(8, 4))
+        if description:
+            customtkinter.CTkLabel(
+                panel,
+                text=description,
+                text_color=COLOR_TEXT_SOFT,
+                justify="left",
+                wraplength=640,
+                font=customtkinter.CTkFont(size=11),
+            ).pack(anchor="w", fill="x", padx=8, pady=(0, 12))
+        detail_panels[mode] = panel
+        return panel
+
+    rename_panel = make_detail_panel("rename", "批量重命名", "选择规则后批量修改文件名，不会改变文件内容。")
+    rename_rows = customtkinter.CTkFrame(rename_panel, fg_color="transparent")
+    rename_rows.pack(fill="x", padx=8, pady=(0, 8))
+    for row in range(3):
+        rename_rows.grid_columnconfigure(row, weight=0)
+    rename_rows.grid_columnconfigure(1, weight=1)
+    rename_rows.grid_columnconfigure(2, weight=1)
+
+    customtkinter.CTkRadioButton(
+        rename_rows, text="添加前后缀", value="add", variable=rename_type_var, **app._get_radio_style()
+    ).grid(row=0, column=0, sticky="w", padx=(0, 16), pady=(0, 10))
+    app.rename_prefix = customtkinter.CTkEntry(
+        rename_rows, placeholder_text="前缀", **app._get_entry_style()
+    )
+    app.rename_prefix.insert(0, values["prefix"])
+    app.rename_prefix.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=(0, 10))
+    app.rename_suffix = customtkinter.CTkEntry(
+        rename_rows, placeholder_text="后缀", **app._get_entry_style()
+    )
+    app.rename_suffix.insert(0, values["suffix"])
+    app.rename_suffix.grid(row=0, column=2, sticky="ew", pady=(0, 10))
+
+    customtkinter.CTkRadioButton(
+        rename_rows, text="字符替换", value="replace", variable=rename_type_var, **app._get_radio_style()
+    ).grid(row=1, column=0, sticky="w", padx=(0, 16), pady=(0, 10))
+    app.rename_find = customtkinter.CTkEntry(
+        rename_rows, placeholder_text="查找内容", **app._get_entry_style()
+    )
+    app.rename_find.insert(0, values["find"])
+    app.rename_find.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=(0, 10))
+    app.rename_rep = customtkinter.CTkEntry(
+        rename_rows, placeholder_text="替换为", **app._get_entry_style()
+    )
+    app.rename_rep.insert(0, values["rep"])
+    app.rename_rep.grid(row=1, column=2, sticky="ew", pady=(0, 10))
+
+    customtkinter.CTkRadioButton(
+        rename_rows, text="索引裁剪", value="cut", variable=rename_type_var, **app._get_radio_style()
+    ).grid(row=2, column=0, sticky="w", padx=(0, 16))
+    cut_left = customtkinter.CTkFrame(rename_rows, fg_color="transparent")
+    cut_left.grid(row=2, column=1, sticky="ew", padx=(0, 10))
+    customtkinter.CTkLabel(cut_left, text="删前 N 个：", text_color=COLOR_TEXT_SOFT).pack(side="left", padx=(0, 6))
+    app.rename_cut_head = customtkinter.CTkEntry(cut_left, width=76, **app._get_entry_style())
+    app.rename_cut_head.insert(0, values["cut_head"])
+    app.rename_cut_head.pack(side="left")
+    cut_right = customtkinter.CTkFrame(rename_rows, fg_color="transparent")
+    cut_right.grid(row=2, column=2, sticky="ew")
+    customtkinter.CTkLabel(cut_right, text="删后 N 个：", text_color=COLOR_TEXT_SOFT).pack(side="left", padx=(0, 6))
+    app.rename_cut_tail = customtkinter.CTkEntry(cut_right, width=76, **app._get_entry_style())
+    app.rename_cut_tail.insert(0, values["cut_tail"])
+    app.rename_cut_tail.pack(side="left")
+
+    dedup_panel = make_detail_panel(
+        "dedup", "重复文件清理", "按 MD5 内容哈希判断重复文件，保留一份并清理其余副本。建议先在测试文件夹确认规则。"
+    )
+
+    if getattr(app, "file_crypto_password_var", None) is None:
+        app.file_crypto_password_var = tkinter.StringVar(value="")
+    if getattr(app, "file_crypto_delete_var", None) is None:
+        app.file_crypto_delete_var = tkinter.BooleanVar(value=False)
+    crypto_description = "PDF、现代 Word/PPT 使用原生密码格式；ZIP 和其他文件使用 AES-256 加密包。"
+    encrypt_panel = make_detail_panel("encrypt", "文件加密", crypto_description)
+    decrypt_panel = make_detail_panel("decrypt", "文件解密", "输入加密时使用的密码后恢复文件；密码错误不会生成有效输出。")
+    for panel in (encrypt_panel, decrypt_panel):
+        customtkinter.CTkLabel(panel, text="密码：", text_color=COLOR_TEXT_SOFT).pack(anchor="w", padx=8, pady=(0, 4))
+        entry = customtkinter.CTkEntry(
+            panel,
+            textvariable=app.file_crypto_password_var,
+            show="*",
+            placeholder_text="输入密码",
+            **app._get_entry_style(),
+        )
+        entry.pack(fill="x", padx=8, pady=(0, 10))
+        if panel is encrypt_panel:
+            app.file_crypto_password_entry = entry
+            app.file_crypto_delete_switch = customtkinter.CTkSwitch(
+                panel,
+                text="成功后删除源文件",
+                variable=app.file_crypto_delete_var,
+                **app._get_switch_style(),
+            )
+            app.file_crypto_delete_switch.pack(anchor="w", padx=8, pady=(0, 8))
+        else:
+            app.file_crypto_decrypt_password_entry = entry
+            customtkinter.CTkSwitch(
+                panel,
+                text="成功后删除源文件",
+                variable=app.file_crypto_delete_var,
+                **app._get_switch_style(),
+            ).pack(anchor="w", padx=8, pady=(0, 8))
+
+    app._fx_file_mode_buttons = mode_buttons
+    app._fx_file_detail_panels = detail_panels
+    app._fx_select_file_mode = select_file_mode
+    app._fx_file_manager_mode_layout_ready = True
+    current_mode = str(file_mode_var.get() or "rename")
+    select_file_mode(current_mode if current_mode in detail_panels else "rename")
+
+
+def _patch_file_crypto_ui():
+    original_init_file_ui = FengxiToolboxApp.init_file_ui
+    if getattr(original_init_file_ui, "__fx_file_crypto_ui_patch__", False):
+        return
+
+    def patched_init_file_ui(self, *args, **kwargs):
+        result = original_init_file_ui(self, *args, **kwargs)
+        _build_file_manager_mode_layout(self)
+        return result
+
+    patched_init_file_ui.__fx_file_crypto_ui_patch__ = True
+    patched_init_file_ui.__wrapped__ = original_init_file_ui
+    FengxiToolboxApp.init_file_ui = patched_init_file_ui
+
+
+_patch_file_crypto_ui()
 
 
 def _run_file_crypto_task(app, input_value, mode):
@@ -4525,8 +4848,8 @@ def _patch_file_crypto_task():
         return
 
     def patched_run_process(self, input_folder, task_type):
-        mode = str(_safe_var_get(self, "crypto_mode_var", "") or "").lower()
-        if task_type == "crypto" and mode in {"encrypt", "decrypt"}:
+        mode = str(_safe_var_get(self, "file_mode_var", "") or "").lower()
+        if task_type == "file" and mode in {"encrypt", "decrypt"}:
             try:
                 return _run_file_crypto_task(self, input_folder, mode)
             except Exception as exc:
@@ -6796,6 +7119,16 @@ def _run_pdf_ocr_task(app, input_folder):
         run_pdf_ocr_task_core,
     )
 
+    # The standalone rotation mode must never enter the OCR engine, even when
+    # an old queue snapshot or a stale UI state calls this helper directly.
+    try:
+        current_pdf_mode = str(app.pdf_mode_var.get() or "")
+    except Exception:
+        current_pdf_mode = ""
+    if current_pdf_mode and current_pdf_mode != "ocr":
+        app.log("⚠️ [OCR] 已阻止非 OCR 模式进入识别引擎。请使用对应的 PDF 功能运行。")
+        return
+
     normalized_input, input_root, output_folder, resolved_strategy = _resolve_output_root_for_task(
         input_folder,
         "pdf",
@@ -6849,10 +7182,6 @@ def _run_pdf_ocr_task(app, input_folder):
     if getattr(app, "pdf_ocr_compare_report", None) is not None:
         compare_report = bool(app.pdf_ocr_compare_report.get())
 
-    normalize_page_rotation = True
-    if getattr(app, "pdf_ocr_normalize_rotation", None) is not None:
-        normalize_page_rotation = bool(app.pdf_ocr_normalize_rotation.get())
-
     preprocess_display = ""
     if getattr(app, "pdf_ocr_preprocess", None) is not None:
         preprocess_display = app.pdf_ocr_preprocess.get().strip()
@@ -6876,7 +7205,7 @@ def _run_pdf_ocr_task(app, input_folder):
         cpu_threads=cpu_threads,
         preprocess_mode=preprocess_mode,
         layered=True,
-        normalize_page_rotation=normalize_page_rotation,
+        normalize_page_rotation=False,
     )
     tracker = _get_active_progress_tracker(app)
     total = len(pdf_files)
@@ -6888,7 +7217,7 @@ def _run_pdf_ocr_task(app, input_folder):
         app.log(f"🧩 [OCR] 后端：{engine_backend_key}{' (自动选择)' if backend_key == 'auto' else ''}")
         app.log(
             f"🧠 [OCR] 模型：{language_config} | 模式：{extraction_mode} | 图像增强：{preprocess_mode} | 修正文本方向（OCR）：{'开' if use_cls else '关'}"
-            f" | 仅修正文本方向（不进行OCR）：{'开' if normalize_page_rotation else '关'} | 对比报告：{'开' if compare_report else '关'}"
+            f" | 对比报告：{'开' if compare_report else '关'}"
         )
 
     def _on_file_started(src, _dst, _index, _total):
@@ -6931,10 +7260,6 @@ def _run_pdf_ocr_task(app, input_folder):
         usage_text = ", ".join(f"{key}:{value}" for key, value in sorted((ocr_result.get("backend_usage") or {}).items()))
         if usage_text:
             app.log(f"🧭 [OCR] 实际后端使用：{usage_text}")
-        rotation_result = dict(ocr_result.get("rotation_normalization") or {})
-        changed_pages = int(rotation_result.get("changed_pages") or 0)
-        if changed_pages:
-            app.log(f"🧭 [OCR] 仅修正文本方向（不进行OCR）已修正 {changed_pages} 页，兼容 Noteful 等阅读器")
         app.log(f"✅ [OCR] 已生成可搜索 PDF：{os.path.basename(src)}")
 
     def _on_file_failed(src, _dst, _rel, exc):
@@ -7878,7 +8203,9 @@ def _patch_pdf_ocr_mode():
             self.pdf_ocr_preprocess = tkinter.StringVar(value=get_default_preprocess_display())
             self.pdf_ocr_cls = tkinter.BooleanVar(value=False)
             self.pdf_ocr_compare_report = tkinter.BooleanVar(value=False)
-            self.pdf_ocr_normalize_rotation = tkinter.BooleanVar(value=True)
+            # This is a mode selector for the standalone rotation task, not an
+            # extra OCR option. Keep it off until the user explicitly selects it.
+            self.pdf_ocr_normalize_rotation = tkinter.BooleanVar(value=False)
 
             base_controls = list(body.winfo_children())
             merge_text = base_controls[0].cget("text")
@@ -7941,6 +8268,26 @@ def _patch_pdf_ocr_mode():
                             panel.grid_remove()
                     except Exception:
                         pass
+
+            def select_pdf_direction_mode(direction_mode):
+                """Keep the two direction functions mutually exclusive."""
+                if direction_mode == "ocr":
+                    self.pdf_ocr_cls.set(True)
+                    self.pdf_ocr_normalize_rotation.set(False)
+                    select_pdf_mode("ocr")
+                    return
+                if direction_mode == "rotation":
+                    self.pdf_ocr_cls.set(False)
+                    self.pdf_ocr_normalize_rotation.set(True)
+                    select_pdf_mode("rotation")
+
+            def on_ocr_direction_switch():
+                if bool(self.pdf_ocr_cls.get()):
+                    select_pdf_direction_mode("ocr")
+
+            def on_rotation_direction_switch():
+                if bool(self.pdf_ocr_normalize_rotation.get()):
+                    select_pdf_direction_mode("rotation")
 
             def make_mode_button(mode, title, hint):
                 frame = customtkinter.CTkButton(
@@ -8251,12 +8598,14 @@ def _patch_pdf_ocr_mode():
             direction_switch_row = customtkinter.CTkFrame(ocr_panel, fg_color="transparent")
             direction_switch_row.pack(fill="x", padx=8, pady=(0, 4))
 
-            customtkinter.CTkSwitch(
+            self._fx_pdf_ocr_direction_switch = customtkinter.CTkSwitch(
                 direction_switch_row,
                 text="修正文本方向（OCR）",
                 variable=self.pdf_ocr_cls,
+                command=on_ocr_direction_switch,
                 **self._get_switch_style(),
-            ).pack(side="left", anchor="w")
+            )
+            self._fx_pdf_ocr_direction_switch.pack(side="left", anchor="w")
 
             rotation_switch_style = dict(self._get_switch_style())
             rotation_switch_style.update(
@@ -8268,12 +8617,14 @@ def _patch_pdf_ocr_mode():
                     "text_color": "#F0D09A",
                 }
             )
-            customtkinter.CTkSwitch(
+            self._fx_pdf_rotation_direction_switch = customtkinter.CTkSwitch(
                 direction_switch_row,
                 text="仅修正文本方向（不进行OCR）",
                 variable=self.pdf_ocr_normalize_rotation,
+                command=on_rotation_direction_switch,
                 **rotation_switch_style,
-            ).pack(side="right", anchor="e")
+            )
+            self._fx_pdf_rotation_direction_switch.pack(side="right", anchor="e")
 
             customtkinter.CTkSwitch(
                 ocr_panel,
@@ -8335,6 +8686,7 @@ def _patch_pdf_ocr_mode():
 
             self.pdf_ocr_backend_status_var.set("后端状态：按需检测，可直接运行 OCR；如需查看详细可用性再点刷新。")
             self._fx_select_pdf_mode = select_pdf_mode
+            self._fx_select_pdf_direction_mode = select_pdf_direction_mode
             try:
                 current_mode = str(self.pdf_mode_var.get() or "")
                 select_pdf_mode(current_mode if current_mode in self._fx_pdf_detail_panels else "compress")
@@ -8349,6 +8701,16 @@ def _patch_pdf_ocr_mode():
         if task_type == "pdf":
             try:
                 pdf_mode = self.pdf_mode_var.get() if getattr(self, "pdf_mode_var", None) is not None else ""
+                # Protect direct starts and persisted settings from the old
+                # mislabeled right-hand switch, which must now run rotation only.
+                normalize_rotation_only = False
+                if getattr(self, "pdf_ocr_normalize_rotation", None) is not None:
+                    normalize_rotation_only = bool(self.pdf_ocr_normalize_rotation.get())
+                if pdf_mode == "ocr" and normalize_rotation_only:
+                    self.pdf_ocr_cls.set(False)
+                    self.pdf_mode_var.set("rotation")
+                    pdf_mode = "rotation"
+                    self.log("🧭 [PDF] 已将“仅修正文本方向（不进行OCR）”切换为独立任务，不会调用 OCR 引擎。")
                 if pdf_mode == "compress":
                     try:
                         _run_pdf_compress_task(self, input_folder)
@@ -9726,9 +10088,6 @@ def _get_preview_mode_detail(app, task_type):
         if task_type == "file" and getattr(app, "file_mode_var", None) is not None:
             mode = str(app.file_mode_var.get() or "")
             return _get_feature_preview_mode_label(task_type, mode, mode)
-        if task_type == "crypto" and getattr(app, "crypto_mode_var", None) is not None:
-            mode = str(app.crypto_mode_var.get() or "")
-            return _get_feature_preview_mode_label(task_type, mode, mode)
         if task_type == "remove_wm":
             mode = _get_remove_wm_mode(app)
             return _get_feature_preview_mode_label(task_type, mode, _get_remove_wm_mode_label(mode))
@@ -9887,13 +10246,10 @@ def _get_start_preview_risks(app, task_type, output_strategy):
             _mode, _fmt, _bitrate, delete_source = _get_audio_task_args(app)
             if delete_source:
                 risks.append("音视频转换完成后会删除源文件")
-        if task_type == "file" and str(_safe_var_get(app, "file_mode_var", "")) == "dedup":
+        file_mode = str(_safe_var_get(app, "file_mode_var", ""))
+        if task_type == "file" and file_mode == "dedup":
             risks.append("文件去重可能移动或删除重复文件")
-        if (
-            task_type == "crypto"
-            and str(_safe_var_get(app, "crypto_mode_var", "")) in {"encrypt", "decrypt"}
-            and bool(_safe_var_get(app, "file_crypto_delete_var", False))
-        ):
+        if task_type == "file" and file_mode in {"encrypt", "decrypt"} and bool(_safe_var_get(app, "file_crypto_delete_var", False)):
             risks.append("文件加密或解密成功后会删除对应源文件")
     except Exception as exc:
         _debug(f"start_preview:risk_error:{exc}")
@@ -13450,8 +13806,6 @@ def _get_parallel_detail_key(app, task_type=None):
             detail = str(app.img_mode_var.get() or "")
         elif task_type == "file" and getattr(app, "file_mode_var", None) is not None:
             detail = str(app.file_mode_var.get() or "")
-        elif task_type == "crypto" and getattr(app, "crypto_mode_var", None) is not None:
-            detail = str(app.crypto_mode_var.get() or "")
         elif task_type == "meta" and getattr(app, "meta_mode_var", None) is not None:
             detail = str(app.meta_mode_var.get() or "")
     except Exception:
@@ -14194,6 +14548,25 @@ def _queue_restore_app_state(app, task):
             _safe_widget_set(widget, value)
         except Exception:
             pass
+    # Migrate old queued tasks: the former right-hand switch was labeled as a
+    # no-OCR option but was stored as OCR mode plus this extra boolean.
+    if (
+        task_type == "pdf"
+        and str(variables.get("pdf_mode_var") or "") == "ocr"
+        and bool(variables.get("pdf_ocr_normalize_rotation"))
+    ):
+        try:
+            selector = getattr(app, "_fx_select_pdf_direction_mode", None)
+            if callable(selector):
+                selector("rotation")
+            else:
+                app.pdf_mode_var.set("rotation")
+                if getattr(app, "pdf_ocr_cls", None) is not None:
+                    app.pdf_ocr_cls.set(False)
+                if getattr(app, "pdf_ocr_normalize_rotation", None) is not None:
+                    app.pdf_ocr_normalize_rotation.set(True)
+        except Exception as exc:
+            _debug(f"queue:restore_pdf_rotation_migration_error:{exc}")
     try:
         if task.get("input"):
             app.input_path.set(task.get("input"))
@@ -14221,8 +14594,6 @@ def _queue_describe_task(app, task_type, input_path):
             detail = _get_convert_preview_detail(app)
         elif task_type == "file" and getattr(app, "file_mode_var", None) is not None:
             detail = app.file_mode_var.get()
-        elif task_type == "crypto" and getattr(app, "crypto_mode_var", None) is not None:
-            detail = app.crypto_mode_var.get()
         elif task_type == "watermark":
             detail = "add"
         elif task_type == "remove_wm":
