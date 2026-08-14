@@ -46,7 +46,7 @@ if _module_exists('av'):
     binaries += collect_dynamic_libs('av')
 hiddenimports = [
     'PyInstaller.archive.readers', 'customtkinter', 'pdf2docx', 'PIL', 'imageio',
-    'imageio_ffmpeg', 'pypdf', 'pythoncom',
+    'imageio_ffmpeg', 'pypdf', 'pyzipper', 'msoffcrypto', 'olefile', 'pythoncom',
     'fitz', 'pptx', 'pymupdf', 'pymupdf4llm', 'tabulate',
     'pywinstyles', 'rapidocr', 'reportlab.lib.pagesizes', 'reportlab.pdfbase',
     'reportlab.pdfbase.ttfonts', 'reportlab.pdfgen', 'tkinter', 'tkinter.filedialog',

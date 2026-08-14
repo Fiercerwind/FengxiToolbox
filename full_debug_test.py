@@ -939,6 +939,20 @@ def main():
     app.withdraw()
     app._fx_disable_fast_close_force_exit = True
     record("app_init", True, "current_task=" + str(getattr(app, "current_task", None)))
+    mod._ensure_lazy_tab_initialized(app, "pdf")
+    pdf_delete_switch = getattr(app, "chk_delete", None)
+    pdf_delete_shared_panel = getattr(pdf_delete_switch, "master", None)
+    record(
+        "pdf_delete_source_switch_not_obscured",
+        pdf_delete_switch is not None
+        and pdf_delete_shared_panel is not None
+        and len(pdf_delete_shared_panel.winfo_children()) == 1
+        and pdf_delete_switch.winfo_manager() == "pack",
+        {
+            "shared_children": len(pdf_delete_shared_panel.winfo_children()) if pdf_delete_shared_panel is not None else None,
+            "delete_manager": pdf_delete_switch.winfo_manager() if pdf_delete_switch is not None else None,
+        },
+    )
     app.init_convert_ui()
     convert_mode_values = []
     for widget in mod._iter_child_widgets(app.tab_cv):
@@ -1825,7 +1839,6 @@ def main():
         expected_pdf_modes = [
             "合并成一个 PDF (Merge)",
             "拆分为单页 PDF (Split)",
-            "PDF 加密 (Encrypt)",
             "PDF 压缩",
             "仅修正文本方向（不进行OCR）",
             "OCR 搜索版 PDF",
@@ -1881,50 +1894,55 @@ def main():
             pass
     record("pdf_ocr_nav_button_visible", pdf_nav_visible_ok, pdf_nav_debug)
 
-    encrypt_pwd_debug = {}
+    crypto_ui_debug = {}
     try:
         app.deiconify()
         app.geometry("1180x760+80+80")
-        app.switch_tab("pdf", getattr(app, "btn_nav_pdf", None))
-        if callable(getattr(app, "_fx_select_pdf_mode", None)):
-            app._fx_select_pdf_mode("encrypt")
-        else:
-            app.pdf_mode_var.set("encrypt")
+        app.switch_tab("file", getattr(app, "btn_nav_file", None))
         for _ in range(4):
             app.update_idletasks()
             app.update()
             time.sleep(0.05)
-        encrypt_entry = getattr(app, "_fx_pdf_encrypt_pwd_entry", None)
-        shared_entry = getattr(app, "_fx_pdf_shared_pwd_entry", None)
+        dedup_visible = mod._widget_tree_contains_text(app.tab_file, "重复文件清理 (Deduplicate)")
+
+        app.switch_tab("crypto", getattr(app, "btn_nav_crypto", None))
+        for _ in range(4):
+            app.update_idletasks()
+            app.update()
+            time.sleep(0.05)
+        encrypt_entry = getattr(app, "file_crypto_password_entry", None)
         if encrypt_entry is not None:
             encrypt_entry.delete(0, "end")
             encrypt_entry.insert(0, "visible-pass")
-        encrypt_pwd_debug = {
-            "mode": app.pdf_mode_var.get(),
-            "encrypt_exists": encrypt_entry is not None,
-            "encrypt_mapped": bool(encrypt_entry.winfo_ismapped()) if encrypt_entry is not None else False,
-            "encrypt_value": encrypt_entry.get() if encrypt_entry is not None else "",
-            "shared_value": shared_entry.get() if shared_entry is not None else "",
-            "active_value": app.pdf_pwd_entry.get() if getattr(app, "pdf_pwd_entry", None) is not None else "",
+        crypto_ui_debug = {
+            "task": getattr(app, "current_task", None),
+            "mode": app.crypto_mode_var.get(),
+            "sidebar_manager": app.btn_nav_crypto.winfo_manager(),
+            "sidebar_row": app.btn_nav_crypto.grid_info().get("row"),
+            "password_mapped": bool(encrypt_entry.winfo_ismapped()) if encrypt_entry is not None else False,
+            "confirm_removed": not hasattr(app, "file_crypto_confirm_entry"),
+            "dedup_visible": dedup_visible,
         }
-        encrypt_pwd_visible_ok = (
-            app.pdf_mode_var.get() == "encrypt"
+        crypto_ui_visible_ok = (
+            dedup_visible
+            and getattr(app, "current_task", None) == "crypto"
+            and app.crypto_mode_var.get() == "encrypt"
+            and app.btn_nav_crypto.winfo_manager() == "grid"
+            and int(app.btn_nav_crypto.grid_info().get("row", -1)) == 10
             and encrypt_entry is not None
             and bool(encrypt_entry.winfo_ismapped())
             and encrypt_entry.get() == "visible-pass"
-            and shared_entry is not None
-            and shared_entry.get() == "visible-pass"
-            and app.pdf_pwd_entry is encrypt_entry
+            and not hasattr(app, "file_crypto_confirm_entry")
         )
     except Exception as exc:
-        encrypt_pwd_visible_ok = False
-        encrypt_pwd_debug = {"error": str(exc)}
+        crypto_ui_visible_ok = False
+        crypto_ui_debug = {"error": str(exc)}
     finally:
         try:
             app.withdraw()
         except Exception:
             pass
-    record("pdf_encrypt_password_entry_visible", encrypt_pwd_visible_ok, encrypt_pwd_debug)
+    record("file_dedup_and_standalone_crypto_visible", crypto_ui_visible_ok, crypto_ui_debug)
 
     app.pdf_compress_level_var.set("强力")
     app.pdf_image_compress_level_var.set("轻度")

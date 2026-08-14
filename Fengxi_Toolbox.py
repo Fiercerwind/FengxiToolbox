@@ -128,6 +128,13 @@ from tools.fx_file_manager_core import (
     run_file_dedup_task as _file_core_run_file_dedup_task,
 )
 from tools.fx_file_manager_task import run_file_dedup_task_core as _run_file_dedup_task_core
+from tools.fx_file_crypto import (
+    decrypt_file as _file_crypto_decrypt_file,
+    decrypted_output_path as _file_crypto_decrypted_output_path,
+    encrypt_file as _file_crypto_encrypt_file,
+    encrypted_output_path as _file_crypto_encrypted_output_path,
+    unique_output_path as _file_crypto_unique_output_path,
+)
 from tools.fx_meta_core import (
     build_meta_output_path as _meta_core_build_output_path,
     modify_file_timestamp as _meta_core_modify_file_timestamp,
@@ -221,6 +228,7 @@ LAZY_TAB_SPECS = {
     "image": {"init": "init_img_ui"},
     "meta": {"init": "init_meta_ui"},
     "file": {"init": "init_file_ui"},
+    "crypto": {"init": "init_crypto_ui"},
 }
 TAB_LAYOUT_ATTRS = {
     "watermark": "tab_wm",
@@ -232,10 +240,12 @@ TAB_LAYOUT_ATTRS = {
     "image": "tab_img",
     "meta": "tab_meta",
     "file": "tab_file",
+    "crypto": "tab_crypto",
 }
 LAZY_ATTR_PREFIXES = (
     ("pdf_", "pdf"),
     ("file_", "file"),
+    ("crypto_", "crypto"),
     ("zip_", "zip"),
     ("cv_", "convert"),
     ("rm_wm_", "remove_wm"),
@@ -254,6 +264,7 @@ SIDEBAR_BUTTON_SPECS = {
     "btn_nav_img": {"label": "图片工厂", "icon": "image"},
     "btn_nav_meta": {"label": "属性隐私", "icon": "lock"},
     "btn_nav_file": {"label": "文件管家", "icon": "folder"},
+    "btn_nav_crypto": {"label": "文件加密", "icon": "lock"},
 }
 SIDEBAR_AUX_BUTTON_SPECS = {
     "btn_help_proxy": {"label": "使用教程", "icon": "book"},
@@ -363,15 +374,14 @@ INLINE_HELP_SECTIONS = (
         ),
     ),
     (
-        "PDF：压缩、合并、拆分、加密",
+        "PDF：压缩、合并、拆分",
         (
             "仅修正文本方向（不进行OCR）：这是独立于 OCR 的页面兼容功能，不需要加载 OCR 模型，也不会重新识别文字。",
             "仅修正文本方向（不进行OCR）会把页面的 90/180/270 度显示旋转写入页面内容并归零旋转值，适合修复 Noteful 等软件中的画面与文字层方向错位。",
-            "处理结果会先复制到结果文件夹再修正，默认不改原 PDF；加密 PDF 请在左侧填写密码。",
+            "处理结果会先复制到结果文件夹再修正，默认不改原 PDF；加密 PDF 可在当前功能面板填写输入密码。",
             "PDF 压缩：可分别选择 PDF 压缩程度和图片压缩程度，适合分享、归档和上传限制场景。",
             "PDF 合并：按页面当前规则收集 PDF 后合成为一个文件，建议先检查文件名排序。",
             "PDF 拆分：适合把多页资料拆成独立文件。",
-            "PDF 加密：请牢记密码，生成后如果忘记密码，工具箱不会替你找回。",
             "多文件压缩在开启批量并行时可提速；合并、OCR 和角度修正为了稳定性默认按单线程执行。",
         ),
     ),
@@ -423,6 +433,7 @@ INLINE_HELP_SECTIONS = (
             "属性隐私支持修改 PDF/Office 作者信息，以及批量修改文件时间属性。",
             "Office 元数据依赖本机 Office COM 环境；PDF 作者信息通过 PDF 元数据写入。",
             "文件管家支持批量重命名和重复文件清理，重命名规则会自动记住上一次设置。",
+            "文件加密页面支持 PDF、现代 Word/PPT、ZIP 和其他任意文件；旧版 Office 与其他文件使用 AES-256 加密包。",
             "去重基于文件内容哈希判断，删除类操作建议先用测试文件夹确认规则。",
         ),
     ),
@@ -631,7 +642,7 @@ FEATURE_REGISTRY = {
         "output_strategy": {"supported": True, "force_result_folder": True},
         "parallel": {
             "mode": "safe",
-            "hint": "PDF 拆分/加密/压缩可并行处理；合并、OCR 会自动切到稳定流程。",
+            "hint": "PDF 拆分/压缩可并行处理；合并、OCR 会自动切到稳定流程。",
             "detail": {
                 "merge": ("forced_single", "PDF 合并需要保持文件顺序与输出一致，已强制单线程。"),
                 "ocr": ("forced_single", "OCR 会占用大量 CPU/内存，当前采用单线程稳定处理。"),
@@ -641,7 +652,6 @@ FEATURE_REGISTRY = {
         "preview_modes": {
             "merge": "合并",
             "split": "拆分",
-            "encrypt": "加密",
             "compress": "PDF 压缩",
             "ocr": "OCR 搜索版 PDF",
             "rotation": "仅修正文本方向（不进行OCR）",
@@ -691,7 +701,7 @@ FEATURE_REGISTRY = {
         "output_strategy": {"supported": False, "force_result_folder": False},
         "parallel": {
             "mode": "safe",
-            "hint": "文件重命名可并行处理；文件去重会自动切到稳定流程。",
+            "hint": "文件重命名可并行处理；文件去重使用稳定单线程。",
             "detail": {
                 "dedup": ("forced_single", "文件去重需要全局哈希比对，已强制单线程。"),
             },
@@ -701,6 +711,22 @@ FEATURE_REGISTRY = {
             "dedup": "重复文件清理",
         },
         "risk_flags": ("dedup_delete",),
+    },
+    "crypto": {
+        "label": "文件加密",
+        "icon": "lock",
+        "page": "crypto",
+        "input": {"file": True, "folder": True, "drag_drop": True},
+        "output_strategy": {"supported": False, "force_result_folder": False},
+        "parallel": {
+            "mode": "forced_single",
+            "detail": {
+                "encrypt": ("forced_single", "文件加密按顺序写入，已强制单线程。"),
+                "decrypt": ("forced_single", "文件解密按顺序校验密码，已强制单线程。"),
+            },
+        },
+        "preview_modes": {"encrypt": "文件加密", "decrypt": "文件解密"},
+        "risk_flags": ("delete_source",),
     },
 }
 QUEUE_TASK_LABELS = {task_type: spec.get("label", task_type) for task_type, spec in FEATURE_REGISTRY.items()}
@@ -1713,6 +1739,7 @@ def _show_inline_help(app):
             "btn_nav_img",
             "btn_nav_meta",
             "btn_nav_file",
+            "btn_nav_crypto",
         ):
             nav = getattr(app, nav_name, None)
             if nav is not None:
@@ -1744,6 +1771,7 @@ def _show_inline_donate(app):
             "btn_nav_img",
             "btn_nav_meta",
             "btn_nav_file",
+            "btn_nav_crypto",
         ):
             nav = getattr(app, nav_name, None)
             if nav is not None:
@@ -2719,6 +2747,7 @@ def _apply_shell_layout_tightening(app):
         "btn_nav_img",
         "btn_nav_meta",
         "btn_nav_file",
+        "btn_nav_crypto",
     ):
         nav = getattr(app, nav_name, None)
         if nav is not None:
@@ -2736,6 +2765,14 @@ def _apply_shell_layout_tightening(app):
                 nav.grid_configure(padx=12, pady=3, sticky="ew")
             except Exception:
                 pass
+
+    crypto_nav = getattr(app, "btn_nav_crypto", None)
+    if crypto_nav is not None:
+        try:
+            app.sidebar_frame.grid_rowconfigure(10, minsize=0, weight=0)
+            crypto_nav.grid(row=10, column=0, padx=12, pady=3, sticky="ew")
+        except Exception:
+            pass
 
     if getattr(app, "btn_help", None) is not None:
         try:
@@ -2756,9 +2793,9 @@ def _apply_shell_layout_tightening(app):
             sidebar_button_font,
             "help",
         )
-        app.sidebar_frame.grid_rowconfigure(10, minsize=0, weight=0)
-        app.btn_help_proxy.grid(row=10, column=0, padx=12, pady=(7, 3), sticky="ew")
-        app.sidebar_frame.grid_rowconfigure(11, minsize=0, weight=0)
+        app.sidebar_frame.grid_rowconfigure(11, minsize=0, weight=1)
+        app.btn_help_proxy.grid(row=11, column=0, padx=12, pady=(7, 3), sticky="ew")
+        app.sidebar_frame.grid_rowconfigure(12, minsize=0, weight=0)
     if getattr(app, "btn_donate", None) is not None:
         try:
             app.btn_donate.configure(command=lambda target=app: _show_inline_donate(target))
@@ -2771,15 +2808,15 @@ def _apply_shell_layout_tightening(app):
             sidebar_button_font,
             "donate",
         )
-        app.btn_donate.grid_configure(row=11, padx=12, pady=(3, 7), sticky="ew")
+        app.btn_donate.grid_configure(row=12, padx=12, pady=(3, 7), sticky="ew")
 
     footer_candidates = app.sidebar_frame.winfo_children()
     if footer_candidates:
-        app.sidebar_frame.grid_rowconfigure(12, minsize=0, weight=0)
+        app.sidebar_frame.grid_rowconfigure(13, minsize=0, weight=0)
         for footer in footer_candidates:
             if isinstance(footer, customtkinter.CTkLabel):
                 try:
-                    footer.grid_configure(row=12, padx=12, pady=(10, 8), sticky="ew")
+                    footer.grid_configure(row=13, padx=12, pady=(10, 8), sticky="ew")
                 except Exception:
                     pass
                 break
@@ -2810,6 +2847,9 @@ def _tighten_single_tab_layout(app, task_name):
         pdf_card = children[0]
         _tighten_pdf_tab_layout(pdf_card)
 
+    if task_name == "file" and children:
+        _tighten_file_tab_layout(children[0])
+
     if task_name == "meta" and children:
         meta_card = children[0]
         _tighten_meta_tab_layout(meta_card)
@@ -2828,7 +2868,7 @@ def _tighten_single_tab_layout(app, task_name):
 
 def _tighten_pdf_tab_layout(pdf_card):
     try:
-        pdf_card.pack_configure(padx=18, pady=10)
+        pdf_card.pack_configure(fill="both", expand=True, padx=18, pady=10)
     except Exception:
         pass
 
@@ -2926,6 +2966,26 @@ def _tighten_pdf_tab_layout(pdf_card):
                         pass
         except Exception:
             pass
+
+
+def _tighten_file_tab_layout(file_card):
+    """Let the file-manager card consume the tab's available height."""
+    try:
+        file_card.pack_configure(fill="both", expand=True, padx=18, pady=10)
+    except Exception:
+        pass
+
+    sections = list(file_card.winfo_children())
+    if len(sections) < 2:
+        return
+    try:
+        sections[0].pack_configure(anchor="w", padx=24, pady=(16, 8))
+    except Exception:
+        pass
+    try:
+        sections[1].pack_configure(fill="both", expand=True, padx=24, pady=(0, 14))
+    except Exception:
+        pass
 
 
 def _tighten_meta_tab_layout(meta_card):
@@ -3262,6 +3322,8 @@ def _refresh_visible_tab_layout(app, task_name):
     card = children[0]
     if task_name == "pdf":
         _tighten_pdf_tab_layout(card)
+    elif task_name == "file":
+        _tighten_file_tab_layout(card)
     elif task_name == "meta":
         _tighten_meta_tab_layout(card)
     elif task_name == "zip":
@@ -4257,6 +4319,230 @@ def _patch_file_dedup_core_task():
 
 
 _patch_file_dedup_core_task()
+
+
+CRYPTO_TAB_TITLE = "文件加密"
+
+
+def _init_crypto_ui(app):
+    if getattr(app, "_fx_crypto_ui_ready", False):
+        return
+    try:
+        tab = app.main_panel.add(CRYPTO_TAB_TITLE)
+    except Exception:
+        tab = app.main_panel.tab(CRYPTO_TAB_TITLE)
+    app.tab_crypto = tab
+    if getattr(app, "file_crypto_password_var", None) is None:
+        app.file_crypto_password_var = tkinter.StringVar(value="")
+    if getattr(app, "file_crypto_delete_var", None) is None:
+        app.file_crypto_delete_var = tkinter.BooleanVar(value=False)
+
+    app.crypto_mode_var = tkinter.StringVar(value="encrypt")
+    card = customtkinter.CTkFrame(tab, **app._get_card_style())
+    card.pack(fill="both", expand=True, padx=18, pady=10)
+    customtkinter.CTkLabel(
+        card,
+        text="文件加密与解密",
+        text_color="#E6EEF2",
+        font=customtkinter.CTkFont(size=22, weight="bold"),
+    ).pack(anchor="w", padx=28, pady=(24, 10))
+    body = customtkinter.CTkFrame(card, fg_color="transparent")
+    body.pack(fill="both", expand=True, padx=28, pady=(0, 24))
+    mode_row = customtkinter.CTkFrame(body, fg_color="transparent")
+    mode_row.pack(fill="x", pady=(8, 12))
+    for value, label in (("encrypt", "文件加密"), ("decrypt", "文件解密")):
+        customtkinter.CTkRadioButton(
+            mode_row,
+            text=label,
+            variable=app.crypto_mode_var,
+            value=value,
+            **app._get_radio_style(),
+        ).pack(side="left", padx=(0, 28))
+
+    panel = customtkinter.CTkFrame(body, **app._get_panel_style())
+    panel.pack(fill="x", pady=(0, 8))
+    panel.grid_columnconfigure(0, weight=1)
+    customtkinter.CTkLabel(
+        panel,
+        text="密码保护文件",
+        text_color="#E6EEF2",
+        font=customtkinter.CTkFont(size=14, weight="bold"),
+    ).grid(row=0, column=0, sticky="w", padx=14, pady=(12, 6))
+    customtkinter.CTkLabel(
+        panel,
+        text="PDF、Word、PPT 使用原生密码格式；ZIP 和其他文件使用 AES-256 加密包。解密通用加密包会恢复原文件。",
+        text_color=COLOR_TEXT_SOFT,
+        justify="left",
+        wraplength=820,
+        font=customtkinter.CTkFont(size=11),
+    ).grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 8))
+    customtkinter.CTkLabel(panel, text="密码：", text_color=COLOR_TEXT_SOFT).grid(
+        row=2, column=0, sticky="w", padx=14, pady=(0, 4)
+    )
+    app.file_crypto_password_entry = customtkinter.CTkEntry(
+        panel,
+        textvariable=app.file_crypto_password_var,
+        show="*",
+        placeholder_text="输入密码",
+        **app._get_entry_style(),
+    )
+    app.file_crypto_password_entry.grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 8))
+    app.file_crypto_delete_switch = customtkinter.CTkSwitch(
+        panel,
+        text="成功后删除源文件",
+        variable=app.file_crypto_delete_var,
+        **app._get_switch_style(),
+    )
+    app.file_crypto_delete_switch.grid(row=4, column=0, sticky="w", padx=14, pady=(0, 12))
+    app._fx_crypto_panel = panel
+    app._fx_crypto_ui_ready = True
+
+
+def _patch_crypto_page():
+    if getattr(FengxiToolboxApp, "__fx_crypto_page_patch__", False):
+        return
+
+    def init_crypto_ui(self):
+        return _init_crypto_ui(self)
+
+    original_setup_sidebar = FengxiToolboxApp.setup_sidebar
+    original_switch_tab = FengxiToolboxApp.switch_tab
+
+    def patched_setup_sidebar(self, *args, **kwargs):
+        result = original_setup_sidebar(self, *args, **kwargs)
+        self.btn_nav_crypto = customtkinter.CTkButton(
+            self.sidebar_frame,
+            text="文件加密",
+            command=lambda target=self: target.switch_tab("crypto", target.btn_nav_crypto),
+            width=208,
+            height=40,
+            anchor="w",
+            corner_radius=14,
+            border_width=1,
+            fg_color="transparent",
+            hover_color="#303840",
+            border_color=COLOR_SIDEBAR,
+            text_color=COLOR_TEXT_SOFT,
+        )
+        self.sidebar_frame.grid_rowconfigure(10, minsize=0, weight=0)
+        self.btn_nav_crypto.grid(row=10, column=0, padx=23, pady=3, sticky="ew")
+        return result
+
+    def patched_switch_tab(self, task_name, btn_obj=None):
+        if task_name != "crypto":
+            return original_switch_tab(self, task_name, btn_obj)
+        _ensure_lazy_tab_initialized(self, "crypto")
+        self.main_panel.set(CRYPTO_TAB_TITLE)
+        self.current_task = "crypto"
+        for name in SIDEBAR_BUTTON_SPECS:
+            button = getattr(self, name, None)
+            if button is None:
+                continue
+            try:
+                if button is btn_obj:
+                    button.configure(fg_color="#394B55", border_color="#78909C", text_color="#FFFFFF")
+                else:
+                    button.configure(fg_color="transparent", border_color=COLOR_SIDEBAR, text_color=COLOR_TEXT_SOFT)
+            except Exception:
+                pass
+
+        return None
+
+    FengxiToolboxApp.init_crypto_ui = init_crypto_ui
+    FengxiToolboxApp.setup_sidebar = patched_setup_sidebar
+    FengxiToolboxApp.switch_tab = patched_switch_tab
+    FengxiToolboxApp.__fx_crypto_page_patch__ = True
+
+
+_patch_crypto_page()
+
+
+def _run_file_crypto_task(app, input_value, mode):
+    normalized, input_root, output_root = _resolve_result_output_folder(input_value)
+    password = str(_safe_var_get(app, "file_crypto_password_var", "") or "")
+    if not password:
+        raise ValueError("密码不能为空。")
+    files = list(app.collect_input_files(normalized, "file"))
+    if normalized and os.path.isfile(normalized):
+        files = [normalized]
+    files = [
+        str(path)
+        for path in files
+        if os.path.isfile(path)
+        and RESULT_FOLDER_NAME not in Path(str(path)).parts
+    ]
+    result = _get_last_task_result(app) or _start_task_result(app, normalized, "file")
+    result["output_strategy_requested"] = "result_folder"
+    result["output_strategy"] = "result_folder"
+    result["output_strategy_label"] = _get_output_strategy_label("result_folder")
+    Path(output_root).mkdir(parents=True, exist_ok=True)
+    _set_task_result_output_root(result, output_root)
+    success = 0
+    failed = []
+    outputs = []
+    tracker = _get_active_progress_tracker(app)
+    for index, src in enumerate(files, start=1):
+        if getattr(app, "stop_event", False):
+            break
+        try:
+            relative_parent = Path(os.path.relpath(os.path.dirname(src), input_root))
+            if str(relative_parent) == "." or str(relative_parent).startswith(".."):
+                relative_parent = Path()
+            item_output_root = Path(output_root) / relative_parent
+            item_output_root.mkdir(parents=True, exist_ok=True)
+            if mode == "encrypt":
+                dst = _file_crypto_unique_output_path(_file_crypto_encrypted_output_path(src, item_output_root))
+                output = _file_crypto_encrypt_file(src, dst, password)
+            else:
+                dst = _file_crypto_unique_output_path(_file_crypto_decrypted_output_path(src, item_output_root))
+                output = _file_crypto_decrypt_file(src, dst, item_output_root, password)
+            outputs.append(str(output))
+            _add_task_result_output(result, output)
+            success += 1
+            if bool(_safe_var_get(app, "file_crypto_delete_var", False)):
+                os.remove(src)
+            app.log(f"[文件管家] {'加密' if mode == 'encrypt' else '解密'}完成: {os.path.basename(src)}")
+        except Exception as exc:
+            failed.append(f"{src}: {exc}")
+            app.log(f"[文件管家] 处理失败: {os.path.basename(src)} | {exc}")
+        if tracker is not None:
+            tracker.set_current_item(src, f"文件{'加密' if mode == 'encrypt' else '解密'}")
+            tracker.complete_units(1)
+    result["failed_items"] = failed
+    _set_task_result_counts(result, processed=success + len(failed), success=success, failed=len(failed), skipped=0)
+    if getattr(app, "stop_event", False):
+        _set_task_result_finished(result, "stopped", message="文件密码任务已停止", stopped=True)
+    elif failed:
+        _set_task_result_finished(result, "failed", message=f"完成 {success} 个，失败 {len(failed)} 个", error=f"失败 {len(failed)} 个")
+    else:
+        _set_task_result_finished(result, "success", message=f"文件{'加密' if mode == 'encrypt' else '解密'}完成", detail=f"成功 {success} 个文件")
+    return result
+
+
+def _patch_file_crypto_task():
+    original_run_process = FengxiToolboxApp.run_process
+    if getattr(original_run_process, "__fx_file_crypto_task_patch__", False):
+        return
+
+    def patched_run_process(self, input_folder, task_type):
+        mode = str(_safe_var_get(self, "crypto_mode_var", "") or "").lower()
+        if task_type == "crypto" and mode in {"encrypt", "decrypt"}:
+            try:
+                return _run_file_crypto_task(self, input_folder, mode)
+            except Exception as exc:
+                self.log(f"[文件管家] {exc}")
+                _finalize_current_task_result(self, "failed", message=str(exc), error=str(exc))
+            finally:
+                self.reset_ui()
+            return None
+        return original_run_process(self, input_folder, task_type)
+
+    patched_run_process.__fx_file_crypto_task_patch__ = True
+    patched_run_process.__wrapped__ = original_run_process
+    FengxiToolboxApp.run_process = patched_run_process
+
+
+_patch_file_crypto_task()
 
 
 def _safe_float(value, default=0.0):
@@ -5702,7 +5988,7 @@ def _estimate_progress_total_units(app, input_value, task_type):
             except Exception:
                 mode = ""
         pdf_count = sum(1 for item in all_files if str(item).lower().endswith(".pdf"))
-        if mode in {"merge", "split", "encrypt", "ocr", "compress"}:
+        if mode in {"merge", "split", "ocr", "compress", "rotation"}:
             return pdf_count
 
     if task_type == "zip":
@@ -7597,9 +7883,7 @@ def _patch_pdf_ocr_mode():
             base_controls = list(body.winfo_children())
             merge_text = base_controls[0].cget("text")
             split_text = base_controls[1].cget("text")
-            encrypt_text = base_controls[2].cget("text")
             delete_text = base_controls[3].cget("text")
-            pwd_label_text = base_controls[4].cget("text")
             pwd_placeholder = base_controls[5].cget("placeholder_text")
             pwd_value = ""
             try:
@@ -7679,7 +7963,6 @@ def _patch_pdf_ocr_mode():
 
             make_mode_button("merge", merge_text, "多份合成一份")
             make_mode_button("split", split_text, "逐页拆分输出")
-            make_mode_button("encrypt", encrypt_text, "设置打开密码")
             make_mode_button("compress", "PDF 压缩", "压缩体积和图片")
             make_mode_button("rotation", "仅修正文本方向（不进行OCR）", "不进行 OCR，仅修正页面方向")
             make_mode_button("ocr", "OCR 搜索版 PDF", "生成可搜索文字层")
@@ -7693,23 +7976,9 @@ def _patch_pdf_ocr_mode():
                 variable=self.pdf_delete_var,
                 **self._get_switch_style(),
             )
-            self.chk_delete.pack(anchor="w", pady=(0, 10))
-
-            customtkinter.CTkLabel(
-                shared_panel,
-                text=pwd_label_text,
-                text_color=COLOR_TEXT_SOFT,
-                font=customtkinter.CTkFont(size=11),
-            ).pack(anchor="w", pady=(0, 4))
-
-            self.pdf_pwd_entry = customtkinter.CTkEntry(
-                shared_panel,
-                textvariable=self.pdf_pwd_var,
-                placeholder_text=pwd_placeholder,
-                **self._get_entry_style(),
-            )
-            self.pdf_pwd_entry.pack(fill="x")
-            self._fx_pdf_shared_pwd_entry = self.pdf_pwd_entry
+            self.chk_delete.pack(anchor="w", pady=0)
+            # Source-password fields live in the relevant detail panels so
+            # this narrow navigation column remains usable at compact heights.
 
             self.pdf_compress_level_var = tkinter.StringVar(value="标准")
             self.pdf_image_compress_level_var = tkinter.StringVar(value="标准")
@@ -7744,24 +8013,26 @@ def _patch_pdf_ocr_mode():
             split_panel = create_detail_panel("split", "PDF 拆分")
             add_panel_note(split_panel, "把每份 PDF 按页面拆成单页文件，并在结果目录中按原文件名建立子文件夹。")
 
-            encrypt_panel = create_detail_panel("encrypt", "PDF 加密")
-            add_panel_note(encrypt_panel, "填写打开密码后开始处理。这个密码也兼容加密 PDF 的 OCR 和压缩读取。")
-            encrypt_pwd_field = customtkinter.CTkFrame(encrypt_panel, fg_color="transparent")
-            encrypt_pwd_field.pack(fill="x", padx=8, pady=(6, 10))
-            customtkinter.CTkLabel(
-                encrypt_pwd_field,
-                text="打开密码：",
-                text_color=COLOR_TEXT_SOFT,
-                font=customtkinter.CTkFont(size=11),
-            ).pack(anchor="w", pady=(0, 4))
-            self._fx_pdf_encrypt_pwd_entry = customtkinter.CTkEntry(
-                encrypt_pwd_field,
-                textvariable=self.pdf_pwd_var,
-                placeholder_text=pwd_placeholder,
-                **self._get_entry_style(),
-            )
-            self._fx_pdf_encrypt_pwd_entry.pack(fill="x")
-            self.pdf_pwd_entry = self._fx_pdf_encrypt_pwd_entry
+            def add_source_password_field(parent):
+                password_field = customtkinter.CTkFrame(parent, fg_color="transparent")
+                password_field.pack(fill="x", padx=8, pady=(2, 8))
+                customtkinter.CTkLabel(
+                    password_field,
+                    text="输入文件密码（如已加密）：",
+                    text_color=COLOR_TEXT_SOFT,
+                    font=customtkinter.CTkFont(size=11),
+                ).pack(anchor="w", pady=(0, 4))
+                entry = customtkinter.CTkEntry(
+                    password_field,
+                    textvariable=self.pdf_pwd_var,
+                    placeholder_text=pwd_placeholder,
+                    show="*",
+                    **self._get_entry_style(),
+                )
+                entry.pack(fill="x")
+                return entry
+
+            self.pdf_pwd_entry = None
 
             compress_panel = create_detail_panel("compress", "PDF 压缩")
             add_panel_note(compress_panel, "PDF 压缩程度控制对象清理、字体和数据流压缩；图片压缩程度控制内嵌图片的重压缩和降采样。图片化压缩会把整页转成图片以换取更小体积。")
@@ -7806,6 +8077,8 @@ def _patch_pdf_ocr_mode():
                 compress_panel,
                 "提示：如果 PDF 主要由扫描图片组成，调高图片压缩更有效；如果 PDF 主要是文字，PDF 压缩程度通常更关键。若选择“图片化压缩”，页面会转成图片，适合上传分享，不适合复制、搜索或编辑文本。",
             )
+            self._fx_pdf_compress_pwd_entry = add_source_password_field(compress_panel)
+            self.pdf_pwd_entry = self._fx_pdf_compress_pwd_entry
 
             rotation_panel = create_detail_panel("rotation", "仅修正文本方向（不进行OCR）")
             add_panel_note(
@@ -7820,6 +8093,7 @@ def _patch_pdf_ocr_mode():
                 justify="left",
                 wraplength=620,
             ).pack(anchor="w", fill="x", padx=8, pady=(2, 8))
+            self._fx_pdf_rotation_pwd_entry = add_source_password_field(rotation_panel)
 
             ocr_panel = create_detail_panel("ocr", "OCR 配置")
 
@@ -8057,11 +8331,13 @@ def _patch_pdf_ocr_mode():
                 justify="left",
                 wraplength=560,
             ).pack(anchor="w", fill="x", padx=8, pady=(0, 2))
+            self._fx_pdf_ocr_pwd_entry = add_source_password_field(ocr_panel)
 
             self.pdf_ocr_backend_status_var.set("后端状态：按需检测，可直接运行 OCR；如需查看详细可用性再点刷新。")
             self._fx_select_pdf_mode = select_pdf_mode
             try:
-                select_pdf_mode(self.pdf_mode_var.get())
+                current_mode = str(self.pdf_mode_var.get() or "")
+                select_pdf_mode(current_mode if current_mode in self._fx_pdf_detail_panels else "compress")
             except Exception:
                 select_pdf_mode("merge")
 
@@ -9450,6 +9726,9 @@ def _get_preview_mode_detail(app, task_type):
         if task_type == "file" and getattr(app, "file_mode_var", None) is not None:
             mode = str(app.file_mode_var.get() or "")
             return _get_feature_preview_mode_label(task_type, mode, mode)
+        if task_type == "crypto" and getattr(app, "crypto_mode_var", None) is not None:
+            mode = str(app.crypto_mode_var.get() or "")
+            return _get_feature_preview_mode_label(task_type, mode, mode)
         if task_type == "remove_wm":
             mode = _get_remove_wm_mode(app)
             return _get_feature_preview_mode_label(task_type, mode, _get_remove_wm_mode_label(mode))
@@ -9610,6 +9889,12 @@ def _get_start_preview_risks(app, task_type, output_strategy):
                 risks.append("音视频转换完成后会删除源文件")
         if task_type == "file" and str(_safe_var_get(app, "file_mode_var", "")) == "dedup":
             risks.append("文件去重可能移动或删除重复文件")
+        if (
+            task_type == "crypto"
+            and str(_safe_var_get(app, "crypto_mode_var", "")) in {"encrypt", "decrypt"}
+            and bool(_safe_var_get(app, "file_crypto_delete_var", False))
+        ):
+            risks.append("文件加密或解密成功后会删除对应源文件")
     except Exception as exc:
         _debug(f"start_preview:risk_error:{exc}")
     return risks
@@ -13165,6 +13450,8 @@ def _get_parallel_detail_key(app, task_type=None):
             detail = str(app.img_mode_var.get() or "")
         elif task_type == "file" and getattr(app, "file_mode_var", None) is not None:
             detail = str(app.file_mode_var.get() or "")
+        elif task_type == "crypto" and getattr(app, "crypto_mode_var", None) is not None:
+            detail = str(app.crypto_mode_var.get() or "")
         elif task_type == "meta" and getattr(app, "meta_mode_var", None) is not None:
             detail = str(app.meta_mode_var.get() or "")
     except Exception:
@@ -13934,6 +14221,8 @@ def _queue_describe_task(app, task_type, input_path):
             detail = _get_convert_preview_detail(app)
         elif task_type == "file" and getattr(app, "file_mode_var", None) is not None:
             detail = app.file_mode_var.get()
+        elif task_type == "crypto" and getattr(app, "crypto_mode_var", None) is not None:
+            detail = app.crypto_mode_var.get()
         elif task_type == "watermark":
             detail = "add"
         elif task_type == "remove_wm":
