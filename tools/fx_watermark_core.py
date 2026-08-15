@@ -38,6 +38,7 @@ COPY_GUARD_METADATA_VALUE = "Fengxi Copy Guard v1"
 WORD_COPY_GUARD_VARIABLE = "FXCopyGuard"
 WORD_COPY_GUARD_VALUE = "Fengxi Copy Guard v1"
 COPY_GUARD_TEXT_PREFIX = "FXCG"
+WORD_INSERTED_PAGE_VARIABLE = "FXInsertedWatermarkPage"
 COPY_GUARD_STRENGTH_BLOCKS = {
     "light": 4,
     "standard": 8,
@@ -1476,6 +1477,127 @@ def open_word_document_safely(word_app, src_path):
     if last_exc is not None:
         raise last_exc
     raise RuntimeError(f"unable to open Word document: {src_value}")
+
+
+def _word_has_inserted_page(doc):
+    try:
+        variables = doc.Variables
+        for index in range(1, int(variables.Count) + 1):
+            variable = _call_collection_item(variables, index)
+            if str(getattr(variable, "Name", "") or "") == WORD_INSERTED_PAGE_VARIABLE:
+                return str(getattr(variable, "Value", "") or "") == "1"
+    except Exception:
+        pass
+    return False
+
+
+def _mark_word_inserted_page(doc):
+    try:
+        doc.Variables.Add(WORD_INSERTED_PAGE_VARIABLE, "1")
+        return
+    except Exception:
+        pass
+    try:
+        doc.Variables(WORD_INSERTED_PAGE_VARIABLE).Value = "1"
+    except Exception:
+        pass
+
+
+def insert_watermark_page_into_word(word_app, src, dst, page_pdf_bytes, position="end"):
+    """Insert the first page of a PDF template into a Word document."""
+
+    src_path = Path(src).resolve()
+    dst_path = Path(dst).resolve()
+    if not src_path.exists():
+        return f"ERROR:source not found: {src_path}"
+    if not page_pdf_bytes:
+        return "ERROR:watermark page template is empty"
+
+    doc = None
+    image_path = None
+    try:
+        import fitz
+
+        pdf = fitz.open("pdf", bytes(page_pdf_bytes))
+        if len(pdf) <= 0:
+            return "ERROR:watermark page template has no page"
+        page = pdf[0]
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+        image_file = tempfile.NamedTemporaryFile(prefix="fx_wm_insert_page_", suffix=".png", delete=False)
+        image_path = Path(image_file.name)
+        image_file.close()
+        pixmap.save(str(image_path))
+        pdf.close()
+
+        doc = open_word_document_safely(word_app, src_path)
+        try:
+            if int(doc.ProtectionType) != -1:
+                return "SKIP:protected Word document requires password"
+        except Exception:
+            pass
+        if _word_has_inserted_page(doc):
+            return "SKIP:watermark page already inserted"
+
+        page_setup = doc.Sections(1).PageSetup
+        page_width = float(page_setup.PageWidth)
+        page_height = float(page_setup.PageHeight)
+        margin_left = float(page_setup.LeftMargin)
+        margin_right = float(page_setup.RightMargin)
+        margin_top = float(page_setup.TopMargin)
+        margin_bottom = float(page_setup.BottomMargin)
+        available_width = max(72.0, page_width - margin_left - margin_right)
+        available_height = max(72.0, page_height - margin_top - margin_bottom)
+        image_width = max(1.0, float(pixmap.width))
+        image_height = max(1.0, float(pixmap.height))
+        scale = min(available_width / image_width, available_height / image_height)
+        target_width = image_width * scale
+        target_height = image_height * scale
+
+        normalized_position = str(position or "end").strip().lower()
+        if normalized_position in {"start", "begin", "开头"}:
+            break_range = doc.Range(0, 0)
+            break_range.InsertBreak(7)
+            image_range = doc.Range(0, 0)
+        else:
+            end_position = max(0, int(doc.Content.End) - 1)
+            doc.Range(end_position, end_position).InsertBreak(7)
+            end_position = max(0, int(doc.Content.End) - 1)
+            image_range = doc.Range(end_position, end_position)
+
+        shape = doc.InlineShapes.AddPicture(str(image_path), False, True, image_range)
+        shape.Width = target_width
+        shape.Height = target_height
+        _mark_word_inserted_page(doc)
+
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        if _same_path(src_path, dst_path):
+            doc.Save()
+        else:
+            if dst_path.exists():
+                try:
+                    dst_path.unlink()
+                except Exception:
+                    pass
+            try:
+                doc.SaveAs2(str(dst_path))
+            except Exception:
+                doc.SaveAs(str(dst_path))
+        return "SUCCESS"
+    except Exception as exc:
+        if _looks_like_unreadable_word_error(exc):
+            return "SKIP:damaged word source"
+        return f"ERROR:insert watermark page failed: {exc}"
+    finally:
+        if doc is not None:
+            try:
+                doc.Close(False)
+            except Exception:
+                pass
+        if image_path is not None:
+            try:
+                image_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def add_watermark_to_word(

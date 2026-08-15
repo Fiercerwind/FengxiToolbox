@@ -1840,7 +1840,6 @@ def main():
             "合并成一个 PDF (Merge)",
             "拆分为单页 PDF (Split)",
             "PDF 压缩",
-            "仅修正文本方向（不进行OCR）",
             "OCR 搜索版 PDF",
         ]
         pdf_mode_buttons = {}
@@ -2034,7 +2033,6 @@ def main():
     )
 
     controls_row = getattr(getattr(app, "wm_skip_name_entry", None), "master", None)
-    controls_row = getattr(controls_row, "master", None)
     candidate_controls = []
     try:
         stack = [getattr(app, "tab_wm", None)]
@@ -2070,41 +2068,28 @@ def main():
                 pass
         return texts
 
-    all_rule_texts = []
-    for candidate in candidate_controls:
-        all_rule_texts.extend(collect_widget_texts(candidate))
-    hint_marker = "\u7559\u7a7a\u9ed8\u8ba4"
-    hint_detail_marker = "\u4efb\u610f\u5f00\u5934\u6216\u7ed3\u5c3e\u5b57\u7b26"
     copy_option_marker = "\u8df3\u8fc7\u6587\u4ef6\u590d\u5236\u5230\u8f93\u51fa\u6587\u4ef6\u5939"
-    hint_text = next((text for text in all_rule_texts if hint_marker in text), "")
-    copy_option_text = next((text for text in all_rule_texts if copy_option_marker in text), "")
+    inline_skip_switch = getattr(app, "_fx_wm_filename_rule_skip_switch", None)
     record(
-        "watermark_filename_rule_hint_layout",
+        "watermark_filename_rule_single_row_layout",
         bool(candidate_controls)
-        and hint_marker in hint_text
-        and hint_detail_marker in hint_text,
-        {"hint": hint_text, "texts": all_rule_texts},
+        and controls_row is not None
+        and inline_skip_switch is not None
+        and getattr(inline_skip_switch, "master", None) is controls_row
+        and getattr(app.wm_skip_name_entry, "master", None) is controls_row,
+        {
+            "controls": str(controls_row),
+            "switch": str(inline_skip_switch),
+            "entry_width": app.wm_skip_name_entry.cget("width"),
+        },
     )
-    record(
-        "watermark_copy_skipped_option_visible",
-        bool(candidate_controls)
-        and copy_option_marker in copy_option_text,
-        {"hint": hint_text, "copy_option": copy_option_text, "texts": all_rule_texts},
-    )
-    active_skip_switch = mod._find_watermark_skip_switch(getattr(app, "tab_wm", None))
+    active_skip_switch = inline_skip_switch
     active_controls_row = getattr(getattr(app, "wm_skip_name_entry", None), "master", None)
-    active_controls_row = getattr(active_controls_row, "master", None)
-    active_pack_slaves = []
-    try:
-        if active_skip_switch is not None:
-            active_pack_slaves = list(active_skip_switch.master.pack_slaves())
-    except Exception:
-        active_pack_slaves = []
     record(
         "watermark_filename_rule_controls_on_active_panel",
         active_skip_switch is not None
         and active_controls_row is not None
-        and getattr(active_controls_row, "master", None) is getattr(active_skip_switch, "master", None),
+        and active_controls_row is getattr(active_skip_switch, "master", None),
         {
             "switch": str(active_skip_switch),
             "controls": str(active_controls_row),
@@ -2114,21 +2099,15 @@ def main():
         },
     )
     record(
-        "watermark_filename_rule_controls_below_switch",
-        active_skip_switch in active_pack_slaves
-        and active_controls_row in active_pack_slaves
-        and active_pack_slaves.index(active_controls_row) == active_pack_slaves.index(active_skip_switch) + 1,
+        "watermark_filename_rule_controls_share_one_row",
+        active_skip_switch is not None
+        and active_controls_row is not None
+        and getattr(app.wm_skip_name_entry, "master", None) is active_controls_row
+        and int(app.wm_skip_name_entry.cget("width")) <= 200,
         {
-            "switch_index": active_pack_slaves.index(active_skip_switch) if active_skip_switch in active_pack_slaves else None,
-            "controls_index": active_pack_slaves.index(active_controls_row) if active_controls_row in active_pack_slaves else None,
-            "order": [
-                {
-                    "class": child.__class__.__name__,
-                    "text": child.cget("text") if hasattr(child, "cget") and "text" in getattr(child, "_keys", set()) else "",
-                    "rule_controls": bool(getattr(child, "_fx_wm_filename_rule_controls", False)),
-                }
-                for child in active_pack_slaves
-            ],
+            "switch_parent": str(getattr(active_skip_switch, "master", "")),
+            "entry_parent": str(getattr(app.wm_skip_name_entry, "master", "")),
+            "entry_width": app.wm_skip_name_entry.cget("width"),
         },
     )
     active_type_skip_controls = None
@@ -2144,10 +2123,93 @@ def main():
         "watermark_type_skip_options_visible",
         active_type_skip_controls is not None
         and getattr(active_type_skip_controls, "master", None) is getattr(active_controls_row, "master", None)
+        and copy_option_marker in type_skip_texts
         and "PDF" in type_skip_texts
         and "Word" in type_skip_texts
         and "PPT" in type_skip_texts,
         {"texts": type_skip_texts, "controls": str(active_type_skip_controls)},
+    )
+
+    insert_page_controls = None
+    try:
+        for child in getattr(active_controls_row, "master", None).winfo_children():
+            if getattr(child, "_fx_wm_insert_page_controls", False):
+                insert_page_controls = child
+                break
+    except Exception:
+        insert_page_controls = None
+    insert_page_texts = collect_widget_texts(insert_page_controls) if insert_page_controls is not None else []
+    panel_children = list(getattr(active_controls_row, "master", None).winfo_children()) if active_controls_row is not None else []
+    record(
+        "watermark_insert_page_controls_below_filename_rule",
+        insert_page_controls is not None
+        and getattr(insert_page_controls, "master", None) is getattr(active_controls_row, "master", None)
+        and "添加水印页" in insert_page_texts
+        and "添加位置" in insert_page_texts
+        and any("选择水印页文件" in text for text in insert_page_texts)
+        and getattr(app, "wm_insert_page_position_var", None) is not None
+        and app.wm_insert_page_position_var.get() in {"开头", "结尾"}
+        and panel_children.index(active_controls_row) < panel_children.index(insert_page_controls)
+        and (active_type_skip_controls is None or panel_children.index(insert_page_controls) < panel_children.index(active_type_skip_controls)),
+        {
+            "texts": insert_page_texts,
+            "position": app.wm_insert_page_position_var.get() if getattr(app, "wm_insert_page_position_var", None) is not None else "",
+        },
+    )
+
+    insert_template = root / "watermark_insert_template.pdf"
+    insert_source = root / "watermark_insert_source.pdf"
+    insert_end_output = root / "watermark_insert_end.pdf"
+    insert_start_output = root / "watermark_insert_start.pdf"
+    make_pdf(insert_template, ["INSERT PAGE TEMPLATE"])
+    make_pdf(insert_source, ["INSERT SOURCE ONE", "INSERT SOURCE TWO"])
+    insert_base_settings = {
+        "text": "INSERT PAGE WATERMARK",
+        "font_name": "Helvetica",
+        "font_size": 36,
+        "opacity": 0.08,
+        "angle": 45,
+        "color": "#737373",
+        "page_range": "all",
+        "force_mode": True,
+        "copy_guard_enabled": False,
+        "copy_guard_strength": "standard",
+        "adaptive_page_size": True,
+        "insert_page_enabled": True,
+        "insert_page_path": str(insert_template),
+        "insert_page_position": "end",
+    }
+    insert_end_settings = mod._prepare_watermark_insert_page_settings(insert_base_settings)
+    insert_end_status = mod._watermark_process_pdf(insert_source, insert_end_output, insert_end_settings)
+    insert_end_reader = PdfReader(str(insert_end_output)) if insert_end_output.exists() else None
+    insert_end_text = insert_end_reader.pages[-1].extract_text() if insert_end_reader is not None else ""
+    insert_start_settings = mod._prepare_watermark_insert_page_settings(
+        dict(insert_base_settings, insert_page_position="start")
+    )
+    insert_start_status = mod._watermark_process_pdf(insert_source, insert_start_output, insert_start_settings)
+    insert_start_reader = PdfReader(str(insert_start_output)) if insert_start_output.exists() else None
+    insert_start_text = insert_start_reader.pages[0].extract_text() if insert_start_reader is not None else ""
+    insert_duplicate_status = mod._insert_watermark_page_into_pdf(insert_end_output, insert_end_settings)
+    record(
+        "watermark_insert_page_pdf_start_end_and_resume_marker",
+        insert_end_status == "SUCCESS"
+        and insert_start_status == "SUCCESS"
+        and insert_end_reader is not None
+        and insert_start_reader is not None
+        and len(insert_end_reader.pages) == 3
+        and len(insert_start_reader.pages) == 3
+        and "INSERT PAGE TEMPLATE" in (insert_end_text or "")
+        and "INSERT PAGE TEMPLATE" in (insert_start_text or "")
+        and str(insert_duplicate_status).startswith("SKIP:")
+        and mod._watermark_checkpoint_identity(str(root), "result_folder", insert_end_settings)
+        != mod._watermark_checkpoint_identity(str(root), "result_folder", insert_start_settings),
+        {
+            "end": insert_end_status,
+            "start": insert_start_status,
+            "duplicate": insert_duplicate_status,
+            "end_pages": len(insert_end_reader.pages) if insert_end_reader is not None else 0,
+            "start_pages": len(insert_start_reader.pages) if insert_start_reader is not None else 0,
+        },
     )
 
     wm_skip_copy_root = root / "watermark_skip_copy"
@@ -2233,7 +2295,7 @@ def main():
     direction_selector = getattr(app, "_fx_select_pdf_direction_mode", None)
     direction_selector("rotation") if callable(direction_selector) else None
     rotation_direction_selected = (
-        app.pdf_mode_var.get() == "rotation"
+        app.pdf_mode_var.get() == "ocr"
         and not bool(app.pdf_ocr_cls.get())
         and bool(app.pdf_ocr_normalize_rotation.get())
     )
@@ -2658,7 +2720,7 @@ def main():
     mod._queue_restore_app_state(app, legacy_rotation_task)
     record(
         "task_queue_legacy_rotation_state_migrates_without_ocr",
-        app.pdf_mode_var.get() == "rotation"
+        app.pdf_mode_var.get() == "ocr"
         and not bool(app.pdf_ocr_cls.get())
         and bool(app.pdf_ocr_normalize_rotation.get()),
         {
@@ -5719,7 +5781,7 @@ def main():
             "pdf_rotation_only_legacy_state_never_calls_ocr",
             wait_for(lambda: rotation_only_out.exists())
             and FakePdfOcrEngine.ocr_call_count == ocr_calls_before_rotation_only
-            and app.pdf_mode_var.get() == "rotation"
+            and app.pdf_mode_var.get() == "ocr"
             and not bool(app.pdf_ocr_cls.get()),
             {
                 "output": rotation_only_out,

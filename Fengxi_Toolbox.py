@@ -188,6 +188,7 @@ from tools.fx_watermark_core import (
     add_watermark_to_pdf as _watermark_core_add_watermark_to_pdf,
     add_watermark_to_word as _watermark_core_add_watermark_to_word,
     create_watermark_packet as _watermark_core_create_watermark_packet,
+    insert_watermark_page_into_word as _watermark_core_insert_page_into_word,
     normalize_watermark_page_range as _watermark_core_normalize_page_range,
     open_word_document_safely as _watermark_core_open_word_document_safely,
     watermark_color_to_hex as _watermark_core_color_to_hex,
@@ -3412,6 +3413,10 @@ def _tighten_watermark_tab_layout(app, tab):
         (child for child in right_children if getattr(child, "_fx_wm_filename_rule_controls", False)),
         None,
     )
+    insert_page_controls = next(
+        (child for child in right_children if getattr(child, "_fx_wm_insert_page_controls", False)),
+        None,
+    )
     for child in right_children:
         try:
             current = child.pack_info()
@@ -3492,14 +3497,19 @@ def _tighten_watermark_tab_layout(app, tab):
                 pass
     if filename_rule_controls is not None:
         try:
-            filename_rule_controls.configure(height=82)
-            filename_rule_controls.pack_propagate(False)
+            filename_rule_controls.configure(height=32)
             filename_rule_controls.pack_configure(fill="x", padx=24, pady=(0, 3))
+        except Exception:
+            pass
+    if insert_page_controls is not None:
+        try:
+            insert_page_controls.configure(height=32)
+            insert_page_controls.pack_configure(fill="x", padx=24, pady=(0, 3))
         except Exception:
             pass
     elif len(right_children) > 11:
         try:
-            controls_height = 82 if getattr(right_children[11], "_fx_wm_filename_rule_controls", False) else 30
+            controls_height = 32 if getattr(right_children[11], "_fx_wm_filename_rule_controls", False) else 30
             right_children[11].configure(height=controls_height)
             right_children[11].pack_propagate(False)
             right_children[11].pack_configure(fill="x", padx=24, pady=(0, 2))
@@ -8279,7 +8289,9 @@ def _patch_pdf_ocr_mode():
                 if direction_mode == "rotation":
                     self.pdf_ocr_cls.set(False)
                     self.pdf_ocr_normalize_rotation.set(True)
-                    select_pdf_mode("rotation")
+                    # Stay on the OCR page. The start handler routes this
+                    # selection to the no-OCR rotation core.
+                    select_pdf_mode("ocr")
 
             def on_ocr_direction_switch():
                 if bool(self.pdf_ocr_cls.get()):
@@ -8311,7 +8323,6 @@ def _patch_pdf_ocr_mode():
             make_mode_button("merge", merge_text, "多份合成一份")
             make_mode_button("split", split_text, "逐页拆分输出")
             make_mode_button("compress", "PDF 压缩", "压缩体积和图片")
-            make_mode_button("rotation", "仅修正文本方向（不进行OCR）", "不进行 OCR，仅修正页面方向")
             make_mode_button("ocr", "OCR 搜索版 PDF", "生成可搜索文字层")
 
             shared_panel = customtkinter.CTkFrame(base_panel, fg_color="transparent")
@@ -8426,21 +8437,6 @@ def _patch_pdf_ocr_mode():
             )
             self._fx_pdf_compress_pwd_entry = add_source_password_field(compress_panel)
             self.pdf_pwd_entry = self._fx_pdf_compress_pwd_entry
-
-            rotation_panel = create_detail_panel("rotation", "仅修正文本方向（不进行OCR）")
-            add_panel_note(
-                rotation_panel,
-                "把 PDF 页面依赖的 90/180/270 度旋转写入页面内容，并将页面旋转值归零。适合修复 OCR 文件在 Noteful 等笔记软件中画面与文字层方向不一致的问题；本功能不需要 OCR，不重新识别文字。",
-            )
-            customtkinter.CTkLabel(
-                rotation_panel,
-                text="处理结果：复制到结果文件夹后再修正，原 PDF 默认保持不变。若输入 PDF 已加密，请在左侧填写密码。",
-                text_color=COLOR_TEXT_SOFT,
-                font=customtkinter.CTkFont(size=11),
-                justify="left",
-                wraplength=620,
-            ).pack(anchor="w", fill="x", padx=8, pady=(2, 8))
-            self._fx_pdf_rotation_pwd_entry = add_source_password_field(rotation_panel)
 
             ocr_panel = create_detail_panel("ocr", "OCR 配置")
 
@@ -8708,9 +8704,8 @@ def _patch_pdf_ocr_mode():
                     normalize_rotation_only = bool(self.pdf_ocr_normalize_rotation.get())
                 if pdf_mode == "ocr" and normalize_rotation_only:
                     self.pdf_ocr_cls.set(False)
-                    self.pdf_mode_var.set("rotation")
                     pdf_mode = "rotation"
-                    self.log("🧭 [PDF] 已将“仅修正文本方向（不进行OCR）”切换为独立任务，不会调用 OCR 引擎。")
+                    self.log("🧭 [PDF] 已选择仅修正文本方向（不进行OCR），不会调用 OCR 引擎。")
                 if pdf_mode == "compress":
                     try:
                         _run_pdf_compress_task(self, input_folder)
@@ -9747,7 +9742,7 @@ def _get_option_menu_style(combo_style):
     return {key: value for key, value in dict(combo_style or {}).items() if key in allowed_keys}
 
 
-def _create_watermark_filename_rule_controls(app, controls_parent, option_menu_style=None):
+def _create_watermark_filename_rule_controls(app, controls_parent, option_menu_style=None, skip_switch=None):
     if controls_parent is None:
         return None
     if getattr(app, "wm_skip_name_position_var", None) is None:
@@ -9759,63 +9754,201 @@ def _create_watermark_filename_rule_controls(app, controls_parent, option_menu_s
     _ensure_watermark_type_skip_vars(app)
 
     option_menu_style = dict(option_menu_style or {})
-    controls_row = customtkinter.CTkFrame(
-        controls_parent,
-        height=82,
-        fg_color="transparent",
-    )
+    controls_row = customtkinter.CTkFrame(controls_parent, height=32, fg_color="transparent")
     controls_row._fx_wm_filename_rule_controls = True
+    insert_before = None
+    if skip_switch is not None and getattr(skip_switch, "master", None) is controls_parent:
+        try:
+            siblings = list(controls_parent.pack_slaves())
+            skip_index = siblings.index(skip_switch)
+            if skip_index + 1 < len(siblings):
+                insert_before = siblings[skip_index + 1]
+        except Exception:
+            pass
+        try:
+            skip_switch.pack_forget()
+        except Exception:
+            pass
+
+    switch_style = {}
     try:
-        controls_row.pack_propagate(False)
+        switch_style = app._get_switch_style()
     except Exception:
         pass
-
-    fields_row = customtkinter.CTkFrame(controls_row, fg_color="transparent", height=30)
-    fields_row.pack(fill="x", pady=(0, 2))
+    switch_command = None
+    try:
+        switch_command = skip_switch.cget("command") if skip_switch is not None else None
+    except Exception:
+        pass
+    app._fx_wm_filename_rule_skip_switch = customtkinter.CTkSwitch(
+        controls_row,
+        text="按文件名规则跳过",
+        variable=app.wm_skip_hyphen_var,
+        command=switch_command,
+        **switch_style,
+    )
+    app._fx_wm_filename_rule_skip_switch.pack(side="left", padx=(0, 16))
 
     customtkinter.CTkLabel(
-        fields_row,
+        controls_row,
         text="匹配位置",
         text_color=globals().get("COLOR_TEXT_SOFT"),
         font=customtkinter.CTkFont(size=11),
         height=30,
-    ).pack(side="left", padx=(0, 8))
+    ).pack(side="left", padx=(0, 6))
 
     customtkinter.CTkOptionMenu(
-        fields_row,
+        controls_row,
         variable=app.wm_skip_name_position_var,
         values=["结尾", "开头"],
-        width=82,
+        width=74,
         height=30,
         **option_menu_style,
-    ).pack(side="left", padx=(0, 8))
+    ).pack(side="left", padx=(0, 10))
 
     app.wm_skip_name_entry = customtkinter.CTkEntry(
-        fields_row,
-        width=126,
+        controls_row,
+        width=190,
         height=30,
         textvariable=app.wm_skip_name_text_var,
         placeholder_text="-",
     )
-    app.wm_skip_name_entry.pack(side="left", fill="x", expand=True, padx=(0, 0))
+    app.wm_skip_name_entry.pack(side="left")
     controls_row._fx_wm_filename_rule_entry = app.wm_skip_name_entry
-
-    customtkinter.CTkLabel(
-        controls_row,
-        text='留空默认 “-”，可填写任意开头或结尾字符',
-        text_color=globals().get("COLOR_TEXT_SOFT"),
-        font=customtkinter.CTkFont(size=11),
-        height=18,
-        anchor="w",
-    ).pack(anchor="w", fill="x")
-    customtkinter.CTkCheckBox(
-        controls_row,
-        text="跳过文件复制到输出文件夹",
-        variable=app.wm_copy_skipped_var,
-        height=22,
-        font=customtkinter.CTkFont(size=11),
-    ).pack(anchor="w", fill="x", pady=(1, 0))
+    try:
+        if insert_before is not None:
+            controls_row.pack(before=insert_before, fill="x", padx=24, pady=(0, 3))
+        else:
+            controls_row.pack(fill="x", padx=24, pady=(0, 3))
+    except Exception:
+        pass
     return controls_row
+
+
+def _watermark_insert_page_filetypes():
+    return [
+        ("水印页文件", "*.pdf *.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp"),
+        ("PDF 文件", "*.pdf"),
+        ("图片文件", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp"),
+        ("所有文件", "*.*"),
+    ]
+
+
+def _watermark_insert_page_button_text(path_value):
+    path_text = str(path_value or "").strip()
+    if not path_text:
+        return "选择水印页文件"
+    try:
+        name = Path(path_text).name
+    except Exception:
+        name = path_text
+    return f"已选：{name}" if name else "选择水印页文件"
+
+
+def _select_watermark_insert_page_file(app):
+    try:
+        selected_path = tkinter.filedialog.askopenfilename(
+            parent=app,
+            title="选择要插入的单页水印文件",
+            filetypes=_watermark_insert_page_filetypes(),
+        )
+    except Exception as exc:
+        _debug(f"watermark_insert_page:file_dialog_error:{exc}")
+        return
+    if not selected_path:
+        return
+    try:
+        app.wm_insert_page_path_var.set(str(Path(selected_path).resolve()))
+    except Exception:
+        try:
+            app.wm_insert_page_path_var.set(str(selected_path))
+        except Exception:
+            pass
+    try:
+        app._fx_wm_insert_page_button.configure(
+            text=_watermark_insert_page_button_text(selected_path)
+        )
+    except Exception:
+        pass
+
+
+def _install_watermark_insert_page_ui(app, controls_parent, after_widget=None):
+    if controls_parent is None:
+        return None
+    if getattr(app, "wm_insert_page_enabled_var", None) is None:
+        app.wm_insert_page_enabled_var = tkinter.BooleanVar(value=False)
+    if getattr(app, "wm_insert_page_position_var", None) is None:
+        app.wm_insert_page_position_var = tkinter.StringVar(value="结尾")
+    if getattr(app, "wm_insert_page_path_var", None) is None:
+        app.wm_insert_page_path_var = tkinter.StringVar(value="")
+
+    active = None
+    try:
+        for child in controls_parent.winfo_children():
+            if getattr(child, "_fx_wm_insert_page_controls", False):
+                active = child
+                break
+    except Exception:
+        active = None
+    if active is None:
+        active = customtkinter.CTkFrame(controls_parent, height=32, fg_color="transparent")
+        active._fx_wm_insert_page_controls = True
+        switch_style = {}
+        try:
+            switch_style = app._get_switch_style()
+        except Exception:
+            pass
+        customtkinter.CTkSwitch(
+            active,
+            text="添加水印页",
+            variable=app.wm_insert_page_enabled_var,
+            **switch_style,
+        ).pack(side="left", padx=(0, 16))
+        customtkinter.CTkLabel(
+            active,
+            text="添加位置",
+            text_color=globals().get("COLOR_TEXT_SOFT"),
+            font=customtkinter.CTkFont(size=11),
+            height=30,
+        ).pack(side="left", padx=(0, 6))
+        combo_style = {}
+        try:
+            combo_style = _get_option_menu_style(app._get_combo_style())
+        except Exception:
+            pass
+        customtkinter.CTkOptionMenu(
+            active,
+            variable=app.wm_insert_page_position_var,
+            values=["结尾", "开头"],
+            width=74,
+            height=30,
+            **combo_style,
+        ).pack(side="left", padx=(0, 10))
+        button = customtkinter.CTkButton(
+            active,
+            text=_watermark_insert_page_button_text(app.wm_insert_page_path_var.get()),
+            width=150,
+            height=30,
+            command=lambda target=app: _select_watermark_insert_page_file(target),
+        )
+        button.pack(side="left")
+        app._fx_wm_insert_page_button = button
+    else:
+        try:
+            app._fx_wm_insert_page_button.configure(
+                text=_watermark_insert_page_button_text(app.wm_insert_page_path_var.get())
+            )
+        except Exception:
+            pass
+    try:
+        active.pack_forget()
+        if after_widget is not None:
+            active.pack(after=after_widget, fill="x", padx=24, pady=(0, 3))
+        else:
+            active.pack(fill="x", padx=24, pady=(0, 3))
+    except Exception:
+        pass
+    return active
 
 
 def _ensure_active_watermark_filename_rule_controls(app, right_panel=None):
@@ -9866,25 +9999,13 @@ def _ensure_active_watermark_filename_rule_controls(app, right_panel=None):
             app,
             controls_parent,
             _get_option_menu_style(combo_style),
+            skip_switch=skip_switch,
         )
-        if active_controls is not None:
-            try:
-                active_controls.pack(fill="x", padx=24, pady=(0, 2))
-            except Exception:
-                pass
-    if active_controls is not None and skip_switch is not None:
-        try:
-            pack_info = active_controls.pack_info()
-        except Exception:
-            pack_info = {}
-        try:
-            if str(pack_info.get("after", "")) != str(skip_switch):
-                active_controls.pack_forget()
-                active_controls.pack(after=skip_switch, fill="x", padx=24, pady=(0, 3))
-            else:
-                active_controls.pack_configure(fill="x", padx=24, pady=(0, 3))
-        except Exception:
-            pass
+    insert_page_controls = _install_watermark_insert_page_ui(
+        app,
+        controls_parent,
+        after_widget=active_controls,
+    )
     try:
         active_entry = getattr(active_controls, "_fx_wm_filename_rule_entry", None)
         if active_entry is not None:
@@ -9896,7 +10017,11 @@ def _ensure_active_watermark_filename_rule_controls(app, right_panel=None):
     except Exception:
         pass
     try:
-        _ensure_watermark_type_skip_controls(app, controls_parent, after_widget=active_controls)
+        _ensure_watermark_type_skip_controls(
+            app,
+            controls_parent,
+            after_widget=insert_page_controls or active_controls,
+        )
     except Exception as exc:
         _debug(f"wm_type_skip_controls_error:{exc}")
     return active_controls
@@ -10028,14 +10153,23 @@ def _ensure_watermark_type_skip_controls(app, controls_parent, after_widget=None
             active.pack_propagate(False)
         except Exception:
             pass
+        header_row = customtkinter.CTkFrame(active, fg_color="transparent", height=22)
+        header_row.pack(fill="x")
         customtkinter.CTkLabel(
-            active,
+            header_row,
             text="\u4e0d\u6dfb\u52a0\u6c34\u5370\u7684\u6587\u4ef6\u7c7b\u578b",
             text_color=globals().get("COLOR_TEXT_SOFT"),
             font=customtkinter.CTkFont(size=11),
             height=18,
             anchor="w",
-        ).pack(anchor="w", fill="x")
+        ).pack(side="left")
+        customtkinter.CTkCheckBox(
+            header_row,
+            text="\u8df3\u8fc7\u6587\u4ef6\u590d\u5236\u5230\u8f93\u51fa\u6587\u4ef6\u5939",
+            variable=app.wm_copy_skipped_var,
+            height=22,
+            font=customtkinter.CTkFont(size=11),
+        ).pack(side="right")
         row = customtkinter.CTkFrame(active, fg_color="transparent", height=28)
         row.pack(fill="x", pady=(1, 0))
         for label, var_name in (
@@ -10866,83 +11000,34 @@ def _patch_watermark_filename_rule_ui():
             self.wm_skip_name_position_var = tkinter.StringVar(value="结尾")
             self.wm_skip_name_text_var = tkinter.StringVar(value="-")
             self.wm_copy_skipped_var = tkinter.BooleanVar(value=False)
+            self.wm_insert_page_enabled_var = tkinter.BooleanVar(value=False)
+            self.wm_insert_page_position_var = tkinter.StringVar(value="结尾")
+            self.wm_insert_page_path_var = tkinter.StringVar(value="")
             _ensure_watermark_type_skip_vars(self)
 
             skip_switch = _find_watermark_skip_switch(getattr(self, "tab_wm", None))
             controls_parent = getattr(skip_switch, "master", None) if skip_switch is not None else None
-            controls_row = customtkinter.CTkFrame(
-                controls_parent if controls_parent is not None else self.tab_wm,
-                height=82,
-                fg_color="transparent",
-            )
-            controls_row._fx_wm_filename_rule_controls = True
-            try:
-                controls_row.pack_propagate(False)
-            except Exception:
-                pass
-
-            if skip_switch is not None:
-                try:
-                    skip_switch.configure(text="按文件名规则跳过")
-                except Exception:
-                    pass
-                controls_row.pack(after=skip_switch, fill="x", padx=0, pady=(0, 4))
-            else:
-                controls_row.grid(row=99, column=0, columnspan=2, sticky="ew", padx=18, pady=(4, 8))
-
             combo_style = {}
             try:
                 combo_style = self._get_combo_style()
             except Exception:
                 combo_style = {}
-            option_menu_style = _get_option_menu_style(combo_style)
-
-            fields_row = customtkinter.CTkFrame(controls_row, fg_color="transparent", height=30)
-            fields_row.pack(fill="x", pady=(0, 2))
-
-            customtkinter.CTkLabel(
-                fields_row,
-                text="匹配位置",
-                text_color=globals().get("COLOR_TEXT_SOFT"),
-                font=customtkinter.CTkFont(size=11),
-                height=30,
-            ).pack(side="left", padx=(0, 8))
-
-            customtkinter.CTkOptionMenu(
-                fields_row,
-                variable=self.wm_skip_name_position_var,
-                values=["结尾", "开头"],
-                width=82,
-                height=30,
-                **option_menu_style,
-            ).pack(side="left", padx=(0, 8))
-
-            self.wm_skip_name_entry = customtkinter.CTkEntry(
-                fields_row,
-                width=126,
-                height=30,
-                textvariable=self.wm_skip_name_text_var,
-                placeholder_text="-",
+            controls_row = _create_watermark_filename_rule_controls(
+                self,
+                controls_parent if controls_parent is not None else self.tab_wm,
+                _get_option_menu_style(combo_style),
+                skip_switch=skip_switch,
             )
-            self.wm_skip_name_entry.pack(side="left", fill="x", expand=True, padx=(0, 0))
-            controls_row._fx_wm_filename_rule_entry = self.wm_skip_name_entry
-
-            customtkinter.CTkLabel(
-                controls_row,
-                text="留空默认 “-”，可填写任意开头或结尾字符",
-                text_color=globals().get("COLOR_TEXT_SOFT"),
-                font=customtkinter.CTkFont(size=11),
-                height=18,
-                anchor="w",
-            ).pack(anchor="w", fill="x")
-            customtkinter.CTkCheckBox(
-                controls_row,
-                text="跳过文件复制到输出文件夹",
-                variable=self.wm_copy_skipped_var,
-                height=22,
-                font=customtkinter.CTkFont(size=11),
-            ).pack(anchor="w", fill="x", pady=(1, 0))
-            _ensure_watermark_type_skip_controls(self, controls_parent if controls_parent is not None else self.tab_wm, after_widget=controls_row)
+            insert_page_controls = _install_watermark_insert_page_ui(
+                self,
+                controls_parent if controls_parent is not None else self.tab_wm,
+                after_widget=controls_row,
+            )
+            _ensure_watermark_type_skip_controls(
+                self,
+                controls_parent if controls_parent is not None else self.tab_wm,
+                after_widget=insert_page_controls or controls_row,
+            )
             _install_watermark_filename_rule_memory(self)
         except Exception as exc:
             _debug(f"patch_watermark_filename_rule:init_ui_error:{exc}")
@@ -12450,6 +12535,18 @@ def _get_watermark_settings(app):
     page_range = _watermark_core_normalize_page_range(_safe_var_get(app, "wm_range_var", "all"))
     overwrite_mode = str(_safe_var_get(app, "wm_overwrite_var", "smart") or "smart").strip().lower()
     color = _get_watermark_color(app)
+    insert_page_path = str(_safe_var_get(app, "wm_insert_page_path_var", "") or "").strip()
+    insert_page_signature = {}
+    if insert_page_path:
+        try:
+            insert_page_path = str(Path(insert_page_path).resolve())
+            stat = Path(insert_page_path).stat()
+            insert_page_signature = {
+                "size": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+            }
+        except Exception:
+            insert_page_signature = {}
     return {
         "text": text,
         "font_name": font_name,
@@ -12464,6 +12561,10 @@ def _get_watermark_settings(app):
         "copy_guard_enabled": bool(_safe_var_get(app, "wm_copy_guard_enabled_var", False)),
         "copy_guard_strength": _get_watermark_copy_guard_strength(app),
         "adaptive_page_size": bool(_safe_var_get(app, "wm_adaptive_page_size_var", True)),
+        "insert_page_enabled": bool(_safe_var_get(app, "wm_insert_page_enabled_var", False)),
+        "insert_page_position": str(_safe_var_get(app, "wm_insert_page_position_var", "结尾") or "结尾"),
+        "insert_page_path": insert_page_path,
+        "insert_page_signature": insert_page_signature,
     }
 
 
@@ -12586,6 +12687,103 @@ def _watermark_make_pdf_packet(settings):
     )
 
 
+WATERMARK_INSERT_PAGE_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+
+
+def _normalize_watermark_insert_page_position(value):
+    text = str(value or "").strip().lower()
+    if text in {"start", "begin", "beginning", "front", "prefix"} or "开头" in str(value or ""):
+        return "start"
+    return "end"
+
+
+def _prepare_watermark_insert_page_settings(settings):
+    prepared = dict(settings or {})
+    if not prepared.get("insert_page_enabled"):
+        return prepared
+    source_value = str(prepared.get("insert_page_path") or "").strip()
+    if not source_value:
+        raise ValueError("已开启添加水印页，但尚未选择水印页文件")
+    source_path = Path(source_value)
+    if not source_path.exists() or not source_path.is_file():
+        raise FileNotFoundError(f"水印页文件不存在: {source_path}")
+    suffix = source_path.suffix.lower()
+    if suffix not in WATERMARK_PDF_EXTS and suffix not in WATERMARK_INSERT_PAGE_IMAGE_EXTS:
+        raise ValueError("水印页文件仅支持 PDF 或常见图片格式")
+
+    if suffix in WATERMARK_PDF_EXTS:
+        source_reader = pypdf.PdfReader(str(source_path))
+        if not source_reader.pages:
+            raise ValueError("水印页 PDF 没有可用页面")
+        page_writer = pypdf.PdfWriter()
+        page_writer.add_page(source_reader.pages[0])
+        page_buffer = io.BytesIO()
+        page_writer.write(page_buffer)
+        prepared["_insert_page_pdf_bytes"] = page_buffer.getvalue()
+    else:
+        with PILImage.open(str(source_path)) as image:
+            image_rgb = image.convert("RGB")
+            page_buffer = io.BytesIO()
+            image_rgb.save(page_buffer, format="PDF", resolution=72.0)
+            prepared["_insert_page_pdf_bytes"] = page_buffer.getvalue()
+            image_rgb.close()
+    prepared["insert_page_position"] = _normalize_watermark_insert_page_position(
+        prepared.get("insert_page_position")
+    )
+    return prepared
+
+
+def _watermark_insert_page_enabled(settings):
+    return bool(settings.get("insert_page_enabled") and settings.get("_insert_page_pdf_bytes"))
+
+
+def _insert_watermark_page_into_pdf(output_path, settings):
+    if not _watermark_insert_page_enabled(settings):
+        return "SKIP:watermark page insertion disabled"
+    target_path = Path(output_path)
+    if not target_path.exists() or not target_path.is_file():
+        return "ERROR:watermark output PDF not found"
+    try:
+        reader = pypdf.PdfReader(str(target_path))
+        metadata = dict(reader.metadata or {})
+        if str(metadata.get("/FXInsertedWatermarkPage", "") or "") == "Fengxi Toolbox":
+            return "SKIP:watermark page already inserted"
+        template_reader = pypdf.PdfReader(io.BytesIO(settings["_insert_page_pdf_bytes"]))
+        if not template_reader.pages:
+            return "ERROR:watermark page template has no page"
+        writer = pypdf.PdfWriter()
+        position = _normalize_watermark_insert_page_position(settings.get("insert_page_position"))
+        if position == "start":
+            writer.add_page(template_reader.pages[0])
+        for page in reader.pages:
+            writer.add_page(page)
+        if position == "end":
+            writer.add_page(template_reader.pages[0])
+        metadata["/FXInsertedWatermarkPage"] = "Fengxi Toolbox"
+        metadata["/FXInsertedWatermarkPagePosition"] = position
+        writer.add_metadata({str(key): str(value) for key, value in metadata.items() if str(key).startswith("/")})
+        temporary = tempfile.NamedTemporaryFile(
+            prefix=f"{target_path.stem}_insert_page_",
+            suffix=target_path.suffix or ".pdf",
+            dir=str(target_path.parent),
+            delete=False,
+        )
+        temporary_path = Path(temporary.name)
+        temporary.close()
+        try:
+            with temporary_path.open("wb") as stream:
+                writer.write(stream)
+            os.replace(str(temporary_path), str(target_path))
+        finally:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        return "SUCCESS"
+    except Exception as exc:
+        return f"ERROR:insert watermark page failed: {exc}"
+
+
 def _watermark_process_pdf(src, dst, settings):
     packet = _watermark_make_pdf_packet(settings)
     watermark_spec = {
@@ -12596,7 +12794,7 @@ def _watermark_process_pdf(src, dst, settings):
         "angle": settings["angle"],
         "color": settings.get("color", WATERMARK_DEFAULT_COLOR),
     }
-    return add_watermark_to_pdf(
+    status = add_watermark_to_pdf(
         str(src),
         str(dst),
         packet,
@@ -12608,10 +12806,17 @@ def _watermark_process_pdf(src, dst, settings):
         adaptive_page_size=settings.get("adaptive_page_size", True),
         watermark_spec=watermark_spec,
     )
+    if _watermark_insert_page_enabled(settings) and _watermark_status_kind(status) != "failed":
+        insert_status = _insert_watermark_page_into_pdf(dst, settings)
+        if _watermark_status_kind(insert_status) == "failed":
+            return insert_status
+        if _watermark_status_kind(insert_status) == "success":
+            return "SUCCESS"
+    return status
 
 
 def _watermark_process_word(src, dst, settings, word_app):
-    return add_watermark_to_word(
+    status = add_watermark_to_word(
         word_app,
         str(src),
         str(dst),
@@ -12626,6 +12831,19 @@ def _watermark_process_word(src, dst, settings, word_app):
         copy_guard=settings.get("copy_guard_enabled", False),
         copy_guard_strength=settings.get("copy_guard_strength", "standard"),
     )
+    if _watermark_insert_page_enabled(settings) and _watermark_status_kind(status) != "failed":
+        insert_status = _watermark_core_insert_page_into_word(
+            word_app,
+            str(src),
+            str(dst),
+            settings.get("_insert_page_pdf_bytes"),
+            settings.get("insert_page_position", "结尾"),
+        )
+        if _watermark_status_kind(insert_status) == "failed":
+            return insert_status
+        if _watermark_status_kind(insert_status) == "success":
+            return "SUCCESS"
+    return status
 
 
 def _watermark_convert_doc_to_pdf(src, raw_pdf, word_app):
@@ -13082,6 +13300,17 @@ def _run_watermark_task(app, input_value):
     except Exception:
         pass
 
+    if settings.get("insert_page_enabled"):
+        try:
+            settings = _prepare_watermark_insert_page_settings(settings)
+        except Exception as exc:
+            message = f"水印页设置无效：{exc}"
+            _watermark_log(app, logs, f"[批量水印] {message}")
+            result["failed_items"] = [settings.get("insert_page_path") or "水印页文件"]
+            _set_task_result_counts(result, processed=0, success=0, failed=1, skipped=0)
+            _set_task_result_finished(result, "failed", message=message, detail=message, error=str(exc))
+            return result
+
     filename_rule = _get_watermark_filename_rule(app)
     previous_runtime_rule = getattr(app, "_fx_wm_filename_rule_runtime", None)
     previous_skipped_files = getattr(app, "_fx_wm_filename_rule_skipped_files", None)
@@ -13112,8 +13341,27 @@ def _run_watermark_task(app, input_value):
             except Exception:
                 pass
         app._fx_wm_filename_rule_loading = previous_rule_loading
+    insert_page_key = _normalize_watermark_file_key(settings.get("insert_page_path")) if settings.get("insert_page_enabled") else ""
+    if insert_page_key:
+        filtered_files = []
+        for item in all_files:
+            if _normalize_watermark_file_key(item) == insert_page_key:
+                continue
+            filtered_files.append(item)
+        if len(filtered_files) != len(all_files):
+            _watermark_log(app, logs, "[批量水印] 已将所选水印页文件排除出处理目标。")
+        all_files = filtered_files
+        rule_skipped_files = [
+            item for item in rule_skipped_files
+            if _normalize_watermark_file_key(item) != insert_page_key
+        ]
     all_files, type_skipped_files = _filter_watermark_files_by_type_skip(app, all_files)
     all_files, unsupported_skipped_files = _split_watermark_supported_files(all_files)
+    if insert_page_key:
+        unsupported_skipped_files = [
+            item for item in unsupported_skipped_files
+            if _normalize_watermark_file_key(item) != insert_page_key
+        ]
     known_file_keys = set()
     for item in list(all_files) + list(rule_skipped_files) + list(type_skipped_files) + list(unsupported_skipped_files):
         item_key = _normalize_watermark_file_key(item)
@@ -13126,7 +13374,12 @@ def _run_watermark_task(app, input_value):
         for item in _collect_watermark_input_files(normalized_input):
             item_key = _normalize_watermark_file_key(item)
             suffix = Path(_normalize_input_path_value(item)).suffix.lower()
-            if item_key and item_key not in known_file_keys and suffix not in WATERMARK_SUPPORTED_EXTS:
+            if (
+                item_key
+                and item_key != insert_page_key
+                and item_key not in known_file_keys
+                and suffix not in WATERMARK_SUPPORTED_EXTS
+            ):
                 unsupported_skipped_files.append(str(Path(_normalize_input_path_value(item))))
     checkpoint = _watermark_checkpoint_context(
         normalized_input,
@@ -14001,6 +14254,9 @@ def _capture_preset_settings(app, category=None):
                     "标准",
                 ),
                 "wm_adaptive_page_size_var": bool(_safe_var_get(app, "wm_adaptive_page_size_var", True)),
+                "wm_insert_page_enabled_var": bool(_safe_var_get(app, "wm_insert_page_enabled_var", False)),
+                "wm_insert_page_position_var": _safe_var_get(app, "wm_insert_page_position_var", "结尾"),
+                "wm_insert_page_path_var": _safe_var_get(app, "wm_insert_page_path_var", ""),
                 "slider_size": _safe_named_widget_get(app, "slider_size", 60),
                 "slider_opacity": _safe_named_widget_get(app, "slider_opacity", 0.08),
                 "slider_angle": _safe_named_widget_get(app, "slider_angle", 45),
@@ -14147,6 +14403,8 @@ def _apply_preset_settings(app, preset, switch_task=True):
             "wm_skip_name_position_var",
             "wm_skip_name_text_var",
             "wm_copy_guard_strength_var",
+            "wm_insert_page_position_var",
+            "wm_insert_page_path_var",
         ):
             if name in settings:
                 _safe_var_set(app, name, settings.get(name))
@@ -14163,6 +14421,7 @@ def _apply_preset_settings(app, preset, switch_task=True):
             "wm_skip_ppt_type_var",
             "wm_copy_guard_enabled_var",
             "wm_adaptive_page_size_var",
+            "wm_insert_page_enabled_var",
         ):
             if name in settings:
                 _safe_var_set(app, name, bool(settings.get(name)))
@@ -14392,6 +14651,9 @@ def _install_watermark_last_settings_memory(app):
         "wm_copy_guard_enabled_var",
         "wm_copy_guard_strength_var",
         "wm_adaptive_page_size_var",
+        "wm_insert_page_enabled_var",
+        "wm_insert_page_position_var",
+        "wm_insert_page_path_var",
         "output_strategy_var",
     )
     trace_ids = []
@@ -14560,7 +14822,7 @@ def _queue_restore_app_state(app, task):
             if callable(selector):
                 selector("rotation")
             else:
-                app.pdf_mode_var.set("rotation")
+                app.pdf_mode_var.set("ocr")
                 if getattr(app, "pdf_ocr_cls", None) is not None:
                     app.pdf_ocr_cls.set(False)
                 if getattr(app, "pdf_ocr_normalize_rotation", None) is not None:
