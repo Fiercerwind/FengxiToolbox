@@ -944,6 +944,9 @@ def main():
     simhei_path = mod.get_font_path_by_name("黑体")
     watermark_font_menu = getattr(app, "font_combo", None)
     watermark_font_menu_values = list(watermark_font_menu.cget("values") or []) if watermark_font_menu is not None else []
+    expected_english_fonts = {"Arial", "Calibri", "Times New Roman"}
+    watermark_english_font_menu = getattr(app, "english_font_combo", None)
+    watermark_english_font_menu_values = list(watermark_english_font_menu.cget("values") or []) if watermark_english_font_menu is not None else []
     watermark_font_selector_labels = []
     if watermark_font_menu is not None:
         for widget in watermark_font_menu.master.winfo_children():
@@ -958,12 +961,15 @@ def main():
         and simhei_path is not None
         and Path(simhei_path).is_file()
         and expected_watermark_fonts.issubset(set(watermark_font_menu_values))
+        and expected_english_fonts.issubset(set(watermark_english_font_menu_values))
+        and getattr(app, "selected_english_font", None) is not None
         and bool(watermark_font_selector_labels)
         and mod.get_word_compatible_font_name("微软雅黑") == "Microsoft YaHei",
         {
             "fonts": sorted(installed_watermark_fonts),
             "simhei_path": simhei_path,
             "menu_values": watermark_font_menu_values,
+            "english_menu_values": watermark_english_font_menu_values,
             "label_count": len(watermark_font_selector_labels),
         },
     )
@@ -2238,6 +2244,60 @@ def main():
             "end_pages": len(insert_end_reader.pages) if insert_end_reader is not None else 0,
             "start_pages": len(insert_start_reader.pages) if insert_start_reader is not None else 0,
         },
+    )
+
+    smart_skip_source = root / "watermark_insert_page_smart_skip_source.pdf"
+    smart_skip_seed = root / "watermark_insert_page_smart_skip_seed.pdf"
+    smart_skip_output = root / "watermark_insert_page_smart_skip_output.pdf"
+    make_pdf(smart_skip_source, ["SMART SKIP SOURCE"])
+    smart_skip_seed_settings = dict(insert_base_settings, insert_page_enabled=False, force_mode=True)
+    smart_skip_seed_status = mod._watermark_process_pdf(
+        smart_skip_source,
+        smart_skip_seed,
+        smart_skip_seed_settings,
+    )
+    smart_skip_settings = mod._prepare_watermark_insert_page_settings(
+        dict(insert_base_settings, force_mode=False)
+    )
+    smart_skip_status = mod._watermark_process_pdf(
+        smart_skip_seed,
+        smart_skip_output,
+        smart_skip_settings,
+    )
+    record(
+        "watermark_insert_page_smart_skip_does_not_require_missing_output",
+        smart_skip_seed_status == "SUCCESS"
+        and str(smart_skip_status).startswith("SKIP:")
+        and not smart_skip_output.exists(),
+        {"seed": smart_skip_seed_status, "skip": smart_skip_status},
+    )
+
+    wm_smart_skip_copy_root = root / "watermark_smart_skip_copy"
+    wm_smart_skip_copy_root.mkdir()
+    wm_smart_skip_copy_source = wm_smart_skip_copy_root / "already_watermarked.pdf"
+    make_pdf(wm_smart_skip_copy_source, ["smart skip copy source"])
+    mod._safe_var_set(app, "output_strategy_var", mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["result_folder"])
+    mod._safe_var_set(app, "wm_copy_skipped_var", True)
+    mod._safe_var_set(app, "wm_delete_var", False)
+    mod._safe_var_set(app, "wm_convert_pdf", False)
+    mod._safe_var_set(app, "wm_skip_hyphen_var", False)
+    mod._safe_var_set(app, "wm_overwrite_var", "smart")
+    original_process_pdf = mod._watermark_process_pdf
+    mod._watermark_process_pdf = lambda src, dst, settings: "SKIP:already watermarked"
+    try:
+        app.run_process(str(wm_smart_skip_copy_root), "watermark")
+    finally:
+        mod._watermark_process_pdf = original_process_pdf
+    wm_smart_skip_copy_result = mod._get_last_task_result(app)
+    wm_smart_skip_copy_output = wm_smart_skip_copy_root / mod.RESULT_FOLDER_NAME / wm_smart_skip_copy_source.name
+    record(
+        "watermark_smart_skip_copies_original_when_enabled",
+        wm_smart_skip_copy_result.get("status") == "success"
+        and wm_smart_skip_copy_result.get("failed_count") == 0
+        and wm_smart_skip_copy_result.get("skipped_count") == 1
+        and wm_smart_skip_copy_output.exists()
+        and wm_smart_skip_copy_output.read_bytes() == wm_smart_skip_copy_source.read_bytes(),
+        {"result": wm_smart_skip_copy_result, "copy": str(wm_smart_skip_copy_output)},
     )
 
     wm_skip_copy_root = root / "watermark_skip_copy"

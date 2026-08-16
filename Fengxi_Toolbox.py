@@ -3639,30 +3639,89 @@ _SYSTEM_WATERMARK_FONT_SPECS = (
     ("等线", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "Deng.ttf", ("DengXian", "Deng", "等线")),
     ("微软正黑体", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "msjh.ttc", ("Microsoft JhengHei", "微软正黑体")),
 )
+_ENGLISH_WATERMARK_FONT_SPECS = (
+    ("Arial", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "arial.ttf"),
+    ("Calibri", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "calibri.ttf"),
+    ("Cambria", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "cambria.ttc"),
+    ("Times New Roman", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "times.ttf"),
+    ("Georgia", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "georgia.ttf"),
+    ("Verdana", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "verdana.ttf"),
+    ("Tahoma", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "tahoma.ttf"),
+    ("Courier New", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "cour.ttf"),
+)
+_WATERMARK_CUSTOM_FONT_NAMES = []
+_WATERMARK_ENGLISH_FONT_NAMES = []
+_WATERMARK_CUSTOM_ENGLISH_FONT_NAMES = []
+
+
+def _font_label_contains_cjk(value):
+    return any("\u3400" <= char <= "\u9fff" for char in str(value or ""))
 
 
 def _scan_watermark_fonts_with_system_support():
     """Find bundled fonts and the common Windows CJK fonts used by watermarks."""
 
+    global _WATERMARK_CUSTOM_FONT_NAMES, _WATERMARK_ENGLISH_FONT_NAMES, _WATERMARK_CUSTOM_ENGLISH_FONT_NAMES
     font_paths = {}
-    for folder in (Path(FONTS_DIR), Path(BASE_DIR)):
+    custom_font_names = []
+    custom_folder = Path(FONTS_DIR)
+    if custom_folder.is_dir():
+        for pattern in ("*.ttf", "*.otf", "*.ttc"):
+            for font_path in custom_folder.glob(pattern):
+                font_paths.setdefault(font_path.stem, str(font_path))
+                custom_font_names.append(font_path.stem)
+
+    for folder in (Path(BASE_DIR),):
         if not folder.is_dir():
             continue
         for pattern in ("*.ttf", "*.otf", "*.ttc"):
             for font_path in folder.glob(pattern):
                 font_paths.setdefault(font_path.stem, str(font_path))
 
+    system_font_names = []
     for display_name, font_path, _aliases in _SYSTEM_WATERMARK_FONT_SPECS:
         if font_path.is_file():
-            font_paths[display_name] = str(font_path)
+            if display_name not in font_paths:
+                font_paths[display_name] = str(font_path)
+                system_font_names.append(display_name)
             for alias in _aliases:
                 if alias != display_name and font_paths.get(alias) == str(font_path):
                     font_paths.pop(alias, None)
 
+    english_system_font_names = []
+    for display_name, font_path in _ENGLISH_WATERMARK_FONT_SPECS:
+        if font_path.is_file() and display_name not in font_paths:
+            font_paths[display_name] = str(font_path)
+            english_system_font_names.append(display_name)
+
+    custom_font_names = sorted(set(custom_font_names), key=str.lower)
+    _WATERMARK_CUSTOM_FONT_NAMES = [
+        name for name in custom_font_names if name in font_paths and _font_label_contains_cjk(name)
+    ]
+    _WATERMARK_CUSTOM_ENGLISH_FONT_NAMES = [
+        name for name in custom_font_names if name in font_paths and not _font_label_contains_cjk(name)
+    ]
+    system_font_names = [name for name in system_font_names if name in font_paths]
+    english_system_font_names = [name for name in english_system_font_names if name in font_paths]
+    remaining_names = sorted(
+        set(font_paths).difference(
+            _WATERMARK_CUSTOM_FONT_NAMES,
+            _WATERMARK_CUSTOM_ENGLISH_FONT_NAMES,
+            system_font_names,
+            english_system_font_names,
+        ),
+        key=str.lower,
+    )
+    chinese_remaining_names = [name for name in remaining_names if _font_label_contains_cjk(name)]
+    english_remaining_names = [name for name in remaining_names if not _font_label_contains_cjk(name)]
+    _WATERMARK_ENGLISH_FONT_NAMES = (
+        _WATERMARK_CUSTOM_ENGLISH_FONT_NAMES + english_system_font_names + english_remaining_names
+    )
+
     # Runtime methods keep their own globals dictionary, so update both maps.
     _ns["AVAILABLE_FONTS"] = font_paths
     globals()["AVAILABLE_FONTS"] = font_paths
-    return sorted(font_paths, key=lambda name: (name != "得意黑", name.lower()))
+    return _WATERMARK_CUSTOM_FONT_NAMES + system_font_names + chinese_remaining_names
 
 
 def _get_watermark_font_path(font_name):
@@ -3710,7 +3769,7 @@ def _install_system_watermark_font_support():
 _install_system_watermark_font_support()
 
 
-def create_watermark_packet(content, font_name, font_size, opacity, angle, color=None):
+def create_watermark_packet(content, font_name, font_size, opacity, angle, color=None, english_font_name=None):
     return _watermark_core_create_watermark_packet(
         content,
         font_name,
@@ -3719,6 +3778,7 @@ def create_watermark_packet(content, font_name, font_size, opacity, angle, color
         angle,
         font_path_resolver=get_font_path_by_name,
         color=color,
+        english_font_name=english_font_name,
     )
 
 
@@ -3763,6 +3823,7 @@ def add_watermark_to_word(
     color=None,
     copy_guard=False,
     copy_guard_strength="standard",
+    english_font_name=None,
 ):
     return _watermark_core_add_watermark_to_word(
         word_app,
@@ -3780,6 +3841,7 @@ def add_watermark_to_word(
         color=color,
         copy_guard=copy_guard,
         copy_guard_strength=copy_guard_strength,
+        english_font_name=english_font_name,
     )
 
 
@@ -12610,6 +12672,9 @@ def _get_watermark_settings(app):
             font_name = str((getattr(app, "font_list", []) or [""])[0] or "")
         except Exception:
             font_name = ""
+    english_font_name = str(_safe_var_get(app, "selected_english_font", "") or "").strip()
+    if not english_font_name:
+        english_font_name = str((_WATERMARK_ENGLISH_FONT_NAMES or ["Arial"])[0])
     font_size = _safe_float(_safe_named_widget_get(app, "slider_size", _safe_var_get(app, "wm_size", 60)), 60.0)
     opacity = _safe_float(_safe_named_widget_get(app, "slider_opacity", _safe_var_get(app, "wm_opacity", 0.08)), 0.08)
     angle = _safe_float(_safe_named_widget_get(app, "slider_angle", _safe_var_get(app, "wm_angle", 45)), 45.0)
@@ -12631,6 +12696,7 @@ def _get_watermark_settings(app):
     return {
         "text": text,
         "font_name": font_name,
+        "english_font_name": english_font_name,
         "font_size": font_size,
         "opacity": opacity,
         "angle": angle,
@@ -12765,6 +12831,7 @@ def _watermark_make_pdf_packet(settings):
         settings["opacity"],
         settings["angle"],
         color=settings.get("color", WATERMARK_DEFAULT_COLOR),
+        english_font_name=settings.get("english_font_name", ""),
     )
 
 
@@ -12870,6 +12937,7 @@ def _watermark_process_pdf(src, dst, settings):
     watermark_spec = {
         "content": settings["text"],
         "font_name": settings["font_name"],
+        "english_font_name": settings.get("english_font_name", ""),
         "font_size": settings["font_size"],
         "opacity": settings["opacity"],
         "angle": settings["angle"],
@@ -12887,7 +12955,7 @@ def _watermark_process_pdf(src, dst, settings):
         adaptive_page_size=settings.get("adaptive_page_size", True),
         watermark_spec=watermark_spec,
     )
-    if _watermark_insert_page_enabled(settings) and _watermark_status_kind(status) != "failed":
+    if _watermark_insert_page_enabled(settings) and _watermark_status_kind(status) == "success":
         insert_status = _insert_watermark_page_into_pdf(dst, settings)
         if _watermark_status_kind(insert_status) == "failed":
             return insert_status
@@ -12911,8 +12979,9 @@ def _watermark_process_word(src, dst, settings, word_app):
         color=settings.get("color", WATERMARK_DEFAULT_COLOR),
         copy_guard=settings.get("copy_guard_enabled", False),
         copy_guard_strength=settings.get("copy_guard_strength", "standard"),
+        english_font_name=settings.get("english_font_name", ""),
     )
-    if _watermark_insert_page_enabled(settings) and _watermark_status_kind(status) != "failed":
+    if _watermark_insert_page_enabled(settings) and _watermark_status_kind(status) == "success":
         insert_status = _watermark_core_insert_page_into_word(
             word_app,
             str(src),
@@ -14316,6 +14385,7 @@ def _capture_preset_settings(app, category=None):
             {
                 "wm_text": _read_watermark_text_widget(app),
                 "selected_font": _safe_var_get(app, "selected_font", ""),
+                "selected_english_font": _safe_var_get(app, "selected_english_font", ""),
                 "wm_range_var": _safe_var_get(app, "wm_range_var", "all"),
                 "wm_overwrite_var": _safe_var_get(app, "wm_overwrite_var", "smart"),
                 "allow_simsun": bool(_safe_var_get(app, "allow_simsun", False)),
@@ -14479,6 +14549,7 @@ def _apply_preset_settings(app, preset, switch_task=True):
         _safe_named_widget_set(app, "wm_text", settings.get("wm_text", ""))
         for name in (
             "selected_font",
+            "selected_english_font",
             "wm_range_var",
             "wm_overwrite_var",
             "wm_skip_name_position_var",
@@ -14715,7 +14786,8 @@ def _install_watermark_last_settings_memory(app):
         _schedule_watermark_last_settings_persistence(target)
 
     variable_names = (
-        "selected_font",
+            "selected_font",
+            "selected_english_font",
         "wm_range_var",
         "wm_overwrite_var",
         "allow_simsun",
@@ -17426,39 +17498,76 @@ def _normalize_watermark_font_display_name(value):
     return requested
 
 
+def _install_watermark_font_dropdown_separator(font_menu, custom_names=None):
+    custom_names = list(_WATERMARK_CUSTOM_FONT_NAMES if custom_names is None else custom_names)
+    if not custom_names:
+        return
+    values = list(font_menu.cget("values") or [])
+    divider_index = len([name for name in custom_names if name in values])
+    if divider_index <= 0 or divider_index >= len(values):
+        return
+    dropdown = getattr(font_menu, "_dropdown_menu", None)
+    if dropdown is None:
+        return
+    dropdown.delete(0, "end")
+    for index, value in enumerate(values):
+        if index == divider_index:
+            dropdown.add_separator()
+        dropdown.add_command(
+            label=str(value).ljust(getattr(dropdown, "_min_character_width", 18)),
+            command=lambda selected=value, menu=dropdown: menu._button_callback(selected),
+            compound="left",
+        )
+
+
 def _install_watermark_font_selector_ui(app):
     if getattr(app, "_fx_wm_font_selector_ui_ready", False):
         return
     tab = getattr(app, "tab_wm", None)
     if tab is None:
         return
-    font_menu = None
-    for widget in _iter_child_widgets(tab):
-        if not isinstance(widget, customtkinter.CTkComboBox):
-            continue
-        values = list(widget.cget("values") or [])
-        if "得意黑" in values or "SmileySans-Oblique" in values:
-            font_menu = widget
-            break
+    font_menu = getattr(app, "font_combo", None)
+    if not isinstance(font_menu, customtkinter.CTkComboBox):
+        font_menu = next(
+            (widget for widget in _iter_child_widgets(tab) if isinstance(widget, customtkinter.CTkComboBox)),
+            None,
+        )
     if font_menu is None:
         return
 
-    values = list(getattr(app, "font_list", []) or [])
-    if values:
-        font_menu.configure(values=values)
+    chinese_values = list(getattr(app, "font_list", []) or [])
+    english_values = list(_WATERMARK_ENGLISH_FONT_NAMES or ["Arial"])
+    if chinese_values:
+        font_menu.configure(values=chinese_values)
     selected_font = getattr(app, "selected_font", None)
     if selected_font is not None:
         normalized = _normalize_watermark_font_display_name(_safe_var_get(app, "selected_font", ""))
-        if normalized in values and normalized != _safe_var_get(app, "selected_font", ""):
+        if normalized in chinese_values and normalized != _safe_var_get(app, "selected_font", ""):
             selected_font.set(normalized)
 
-        def normalize_saved_font(*_args, target=app, options=set(values)):
+        def normalize_saved_font(*_args, target=app, options=set(chinese_values)):
             current = _safe_var_get(target, "selected_font", "")
             normalized_value = _normalize_watermark_font_display_name(current)
             if normalized_value in options and normalized_value != current:
                 getattr(target, "selected_font").set(normalized_value)
 
         selected_font.trace_add("write", normalize_saved_font)
+
+    english_font = getattr(app, "selected_english_font", None)
+    if english_font is None:
+        english_font = customtkinter.StringVar(value=english_values[0])
+        app.selected_english_font = english_font
+    elif _safe_var_get(app, "selected_english_font", "") not in english_values:
+        english_font.set(english_values[0])
+    if not getattr(app, "_fx_wm_english_font_trace_ready", False):
+        try:
+            english_font.trace_add(
+                "write",
+                lambda *_args, target=app: _schedule_watermark_last_settings_persistence(target),
+            )
+            app._fx_wm_english_font_trace_ready = True
+        except Exception:
+            pass
 
     parent = font_menu.master
     siblings = list(parent.winfo_children())
@@ -17468,7 +17577,7 @@ def _install_watermark_font_selector_ui(app):
         next_widget = None
     pack_info = font_menu.pack_info()
     font_menu_options = {
-        "values": values,
+        "values": chinese_values,
         "variable": selected_font,
         "width": font_menu.cget("width"),
         "height": font_menu.cget("height"),
@@ -17502,11 +17611,20 @@ def _install_watermark_font_selector_ui(app):
     selector_label = customtkinter.CTkLabel(row, text="字体选择", width=72, anchor="w")
     selector_label._fx_wm_font_selector_label = True
     selector_label.pack(side="left")
+    customtkinter.CTkLabel(row, text="中文", width=34, anchor="w").pack(side="left", padx=(8, 4))
     replacement = customtkinter.CTkComboBox(row, **font_menu_options)
-    replacement.pack(side="left", fill="x", expand=True, padx=(8, 0))
+    replacement.pack(side="left", fill="x", expand=True)
+    _install_watermark_font_dropdown_separator(replacement, _WATERMARK_CUSTOM_FONT_NAMES)
+    english_options = dict(font_menu_options)
+    english_options.update({"values": english_values, "variable": english_font})
+    customtkinter.CTkLabel(row, text="英文", width=34, anchor="w").pack(side="left", padx=(12, 4))
+    english_replacement = customtkinter.CTkComboBox(row, **english_options)
+    english_replacement.pack(side="left", fill="x", expand=True)
+    _install_watermark_font_dropdown_separator(english_replacement, _WATERMARK_CUSTOM_ENGLISH_FONT_NAMES)
     for attr_name, attr_value in vars(app).items():
         if attr_value is font_menu:
             setattr(app, attr_name, replacement)
+    app.english_font_combo = english_replacement
     app._fx_wm_font_selector_ui_ready = True
 
 

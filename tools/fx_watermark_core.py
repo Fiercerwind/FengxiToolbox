@@ -122,6 +122,29 @@ def _text_requires_cjk_font(value):
     return False
 
 
+def _is_cjk_character(char):
+    codepoint = ord(char)
+    return (
+        0x2E80 <= codepoint <= 0x2EFF
+        or 0x3000 <= codepoint <= 0x303F
+        or 0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0xFF00 <= codepoint <= 0xFFEF
+    )
+
+
+def _split_text_by_script(value):
+    runs = []
+    for char in str(value or ""):
+        is_cjk = _is_cjk_character(char)
+        if runs and runs[-1][0] == is_cjk:
+            runs[-1][1] += char
+        else:
+            runs.append([is_cjk, char])
+    return runs
+
+
 def _resolve_reportlab_cjk_fallback():
     """Return ReportLab's built-in Simplified Chinese font when no TTF resolves."""
 
@@ -227,6 +250,7 @@ def create_watermark_packet(
     angle,
     *,
     font_path_resolver=None,
+    english_font_name=None,
     color=None,
     page_size=None,
     scale_font_to_page=False,
@@ -245,6 +269,10 @@ def create_watermark_packet(
     resolved_font = _resolve_reportlab_font(font_name, font_path_resolver=font_path_resolver)
     if resolved_font == "Helvetica" and _text_requires_cjk_font(text):
         resolved_font = _resolve_reportlab_cjk_fallback()
+    resolved_english_font = _resolve_reportlab_font(
+        english_font_name or "Helvetica",
+        font_path_resolver=font_path_resolver,
+    )
     size = max(1.0, _safe_float(font_size, 36.0))
     normalized_rotation = int(_safe_float(page_rotation, 0.0)) % 360
     if scale_font_to_page:
@@ -265,7 +293,6 @@ def create_watermark_packet(
         pdf.setFillAlpha(alpha)
     except Exception:
         pass
-    pdf.setFont(resolved_font, size)
     red, green, blue = normalize_watermark_color(color, default=PDF_WATERMARK_DEFAULT_RGB)
     pdf.setFillColorRGB(red / 255.0, green / 255.0, blue / 255.0)
     pdf.translate(page_width / 2.0, page_height / 2.0)
@@ -273,7 +300,17 @@ def create_watermark_packet(
     line_height = size * 1.22
     start_y = ((len(lines) - 1) * line_height) / 2.0
     for index, line in enumerate(lines):
-        pdf.drawCentredString(0, start_y - index * line_height, line)
+        runs = _split_text_by_script(line)
+        total_width = sum(
+            pdfmetrics.stringWidth(run, resolved_font if is_cjk else resolved_english_font, size)
+            for is_cjk, run in runs
+        )
+        x_position = -total_width / 2.0
+        for is_cjk, run in runs:
+            run_font = resolved_font if is_cjk else resolved_english_font
+            pdf.setFont(run_font, size)
+            pdf.drawString(x_position, start_y - index * line_height, run)
+            x_position += pdfmetrics.stringWidth(run, run_font, size)
     pdf.restoreState()
     pdf.save()
     packet.seek(0)
@@ -395,6 +432,7 @@ def _create_adaptive_watermark_packet(watermark_spec, page_size, page_rotation=0
         spec.get("opacity", 0.2),
         spec.get("angle", 45.0),
         font_path_resolver=font_path_resolver,
+        english_font_name=spec.get("english_font_name", ""),
         color=spec.get("color"),
         page_size=page_size,
         scale_font_to_page=True,
@@ -1328,7 +1366,18 @@ def _position_word_shape(shape, section):
         pass
 
 
-def _add_word_header_watermark(header, section, text, font_name, font_size, opacity, angle, color=None):
+def _apply_word_script_fonts(shape, chinese_font_name, english_font_name):
+    try:
+        font = shape.TextFrame.TextRange.Font
+        font.Name = str(english_font_name or chinese_font_name or "Microsoft YaHei")
+        font.NameAscii = str(english_font_name or chinese_font_name or "Microsoft YaHei")
+        font.NameOther = str(english_font_name or chinese_font_name or "Microsoft YaHei")
+        font.NameFarEast = str(chinese_font_name or english_font_name or "Microsoft YaHei")
+    except Exception:
+        pass
+
+
+def _add_word_header_watermark(header, section, text, font_name, font_size, opacity, angle, color=None, english_font_name=None):
     shape = header.Shapes.AddTextEffect(
         0,
         str(text or ""),
@@ -1343,6 +1392,7 @@ def _add_word_header_watermark(header, section, text, font_name, font_size, opac
         shape.Name = WATERMARK_MARKER
     except Exception:
         pass
+    _apply_word_script_fonts(shape, font_name, english_font_name)
     try:
         shape.Rotation = _safe_float(angle, 45.0)
     except Exception:
@@ -1375,7 +1425,7 @@ def _add_word_header_watermark(header, section, text, font_name, font_size, opac
     return shape
 
 
-def _add_word_range_watermark(doc, page_number, text, font_name, font_size, opacity, angle, color=None):
+def _add_word_range_watermark(doc, page_number, text, font_name, font_size, opacity, angle, color=None, english_font_name=None):
     try:
         anchor_range = doc.GoTo(1, 1, int(page_number))
     except Exception:
@@ -1410,6 +1460,7 @@ def _add_word_range_watermark(doc, page_number, text, font_name, font_size, opac
         shape.Name = WATERMARK_MARKER
     except Exception:
         pass
+    _apply_word_script_fonts(shape, font_name, english_font_name)
     try:
         shape.Rotation = _safe_float(angle, 45.0)
     except Exception:
@@ -1640,6 +1691,7 @@ def add_watermark_to_word(
     force_mode=False,
     *,
     word_font_resolver=None,
+    english_font_name=None,
     com_context_factory=None,
     color=None,
     copy_guard=False,
@@ -1684,11 +1736,25 @@ def add_watermark_to_word(
             added_visible = 0
             if apply_visible_watermark:
                 compatible_font = _resolve_word_font(raw_font_name, word_font_resolver=word_font_resolver)
+                compatible_english_font = _resolve_word_font(
+                    english_font_name or "Arial",
+                    word_font_resolver=word_font_resolver,
+                )
                 normalized_range = normalize_watermark_page_range(page_range)
                 header_iter = _iter_word_first_page_headers(doc) if normalized_range in {WATERMARK_RANGE_FIRST, WATERMARK_RANGE_FIRST_RANDOM} else _iter_word_headers(doc)
                 for header, section in header_iter:
                     try:
-                        _add_word_header_watermark(header, section, text, compatible_font, font_size, opacity, angle, color=color)
+                        _add_word_header_watermark(
+                            header,
+                            section,
+                            text,
+                            compatible_font,
+                            font_size,
+                            opacity,
+                            angle,
+                            color=color,
+                            english_font_name=compatible_english_font,
+                        )
                         added_visible += 1
                     except Exception:
                         continue
@@ -1697,7 +1763,17 @@ def add_watermark_to_word(
                     target_pages = _select_watermark_page_indexes(page_count, normalized_range)
                     for page_index in sorted(index for index in target_pages if index > 0):
                         try:
-                            if _add_word_range_watermark(doc, page_index + 1, text, compatible_font, font_size, opacity, angle, color=color) is not None:
+                            if _add_word_range_watermark(
+                                doc,
+                                page_index + 1,
+                                text,
+                                compatible_font,
+                                font_size,
+                                opacity,
+                                angle,
+                                color=color,
+                                english_font_name=compatible_english_font,
+                            ) is not None:
                                 added_visible += 1
                         except Exception:
                             continue
