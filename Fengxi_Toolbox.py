@@ -3629,6 +3629,87 @@ for _key, _value in _ns.items():
 _debug("bootstrap:globals_loaded")
 
 
+_SYSTEM_WATERMARK_FONT_SPECS = (
+    ("得意黑", Path(BASE_DIR) / "SmileySans-Oblique.ttf", ("Smiley Sans", "SmileySans", "SmileySansOblique", "SmileySans-Oblique", "得意黑")),
+    ("微软雅黑", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "msyh.ttc", ("Microsoft YaHei", "Microsoft YaHei UI", "微软雅黑")),
+    ("黑体", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "simhei.ttf", ("SimHei", "黑体")),
+    ("宋体", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "simsun.ttc", ("SimSun", "宋体")),
+    ("楷体", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "simkai.ttf", ("KaiTi", "楷体")),
+    ("仿宋", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "simfang.ttf", ("FangSong", "仿宋")),
+    ("等线", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "Deng.ttf", ("DengXian", "Deng", "等线")),
+    ("微软正黑体", Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts" / "msjh.ttc", ("Microsoft JhengHei", "微软正黑体")),
+)
+
+
+def _scan_watermark_fonts_with_system_support():
+    """Find bundled fonts and the common Windows CJK fonts used by watermarks."""
+
+    font_paths = {}
+    for folder in (Path(FONTS_DIR), Path(BASE_DIR)):
+        if not folder.is_dir():
+            continue
+        for pattern in ("*.ttf", "*.otf", "*.ttc"):
+            for font_path in folder.glob(pattern):
+                font_paths.setdefault(font_path.stem, str(font_path))
+
+    for display_name, font_path, _aliases in _SYSTEM_WATERMARK_FONT_SPECS:
+        if font_path.is_file():
+            font_paths[display_name] = str(font_path)
+            for alias in _aliases:
+                if alias != display_name and font_paths.get(alias) == str(font_path):
+                    font_paths.pop(alias, None)
+
+    # Runtime methods keep their own globals dictionary, so update both maps.
+    _ns["AVAILABLE_FONTS"] = font_paths
+    globals()["AVAILABLE_FONTS"] = font_paths
+    return sorted(font_paths, key=lambda name: (name != "得意黑", name.lower()))
+
+
+def _get_watermark_font_path(font_name):
+    requested = str(font_name or "").strip()
+    font_paths = globals().get("AVAILABLE_FONTS", {}) or {}
+    if requested in font_paths:
+        return font_paths[requested]
+    lowered = requested.lower()
+    for name, font_path in font_paths.items():
+        if name.lower() == lowered:
+            return font_path
+    for display_name, font_path, aliases in _SYSTEM_WATERMARK_FONT_SPECS:
+        if any(lowered == str(alias).lower() for alias in aliases) and font_path.is_file():
+            return str(font_path)
+    return None
+
+
+def _get_watermark_word_font_names(font_name):
+    requested = str(font_name or "").strip()
+    for display_name, _font_path, aliases in _SYSTEM_WATERMARK_FONT_SPECS:
+        if requested.lower() == display_name.lower() or any(requested.lower() == str(alias).lower() for alias in aliases):
+            return list(aliases)
+    translations = globals().get("FONT_TRANSLATION", {}) or {}
+    return list(translations.get(requested, [requested]))
+
+
+def _get_watermark_word_font_name(font_name):
+    return _get_watermark_word_font_names(font_name)[0]
+
+
+def _install_system_watermark_font_support():
+    translations = dict(_ns.get("FONT_TRANSLATION", {}) or {})
+    for display_name, _font_path, aliases in _SYSTEM_WATERMARK_FONT_SPECS:
+        translations[display_name] = list(aliases)
+    for namespace in (_ns, globals()):
+        namespace["FONT_TRANSLATION"] = translations
+        namespace["scan_fonts"] = _scan_watermark_fonts_with_system_support
+        namespace["get_font_path_by_name"] = _get_watermark_font_path
+        namespace["get_real_font_name"] = _get_watermark_word_font_names
+        namespace["get_word_compatible_font_name"] = _get_watermark_word_font_name
+    _scan_watermark_fonts_with_system_support()
+    _debug("watermark_fonts:system_support_installed")
+
+
+_install_system_watermark_font_support()
+
+
 def create_watermark_packet(content, font_name, font_size, opacity, angle, color=None):
     return _watermark_core_create_watermark_packet(
         content,
@@ -17334,6 +17415,118 @@ def _patch_startup_performance():
             record_performance=_record_performance,
         )
     )
+
+
+def _normalize_watermark_font_display_name(value):
+    requested = str(value or "").strip()
+    lowered = requested.lower()
+    for display_name, _font_path, aliases in _SYSTEM_WATERMARK_FONT_SPECS:
+        if lowered == display_name.lower() or any(lowered == str(alias).lower() for alias in aliases):
+            return display_name
+    return requested
+
+
+def _install_watermark_font_selector_ui(app):
+    if getattr(app, "_fx_wm_font_selector_ui_ready", False):
+        return
+    tab = getattr(app, "tab_wm", None)
+    if tab is None:
+        return
+    font_menu = None
+    for widget in _iter_child_widgets(tab):
+        if not isinstance(widget, customtkinter.CTkComboBox):
+            continue
+        values = list(widget.cget("values") or [])
+        if "得意黑" in values or "SmileySans-Oblique" in values:
+            font_menu = widget
+            break
+    if font_menu is None:
+        return
+
+    values = list(getattr(app, "font_list", []) or [])
+    if values:
+        font_menu.configure(values=values)
+    selected_font = getattr(app, "selected_font", None)
+    if selected_font is not None:
+        normalized = _normalize_watermark_font_display_name(_safe_var_get(app, "selected_font", ""))
+        if normalized in values and normalized != _safe_var_get(app, "selected_font", ""):
+            selected_font.set(normalized)
+
+        def normalize_saved_font(*_args, target=app, options=set(values)):
+            current = _safe_var_get(target, "selected_font", "")
+            normalized_value = _normalize_watermark_font_display_name(current)
+            if normalized_value in options and normalized_value != current:
+                getattr(target, "selected_font").set(normalized_value)
+
+        selected_font.trace_add("write", normalize_saved_font)
+
+    parent = font_menu.master
+    siblings = list(parent.winfo_children())
+    try:
+        next_widget = siblings[siblings.index(font_menu) + 1]
+    except (ValueError, IndexError):
+        next_widget = None
+    pack_info = font_menu.pack_info()
+    font_menu_options = {
+        "values": values,
+        "variable": selected_font,
+        "width": font_menu.cget("width"),
+        "height": font_menu.cget("height"),
+        "corner_radius": font_menu.cget("corner_radius"),
+        "border_width": font_menu.cget("border_width"),
+        "fg_color": font_menu.cget("fg_color"),
+        "border_color": font_menu.cget("border_color"),
+        "button_color": font_menu.cget("button_color"),
+        "button_hover_color": font_menu.cget("button_hover_color"),
+        "text_color": font_menu.cget("text_color"),
+        "font": font_menu.cget("font"),
+        "dropdown_font": font_menu.cget("dropdown_font"),
+        "dropdown_fg_color": font_menu.cget("dropdown_fg_color"),
+        "dropdown_hover_color": font_menu.cget("dropdown_hover_color"),
+        "dropdown_text_color": font_menu.cget("dropdown_text_color"),
+        "justify": font_menu.cget("justify"),
+        "state": font_menu.cget("state"),
+        "hover": font_menu.cget("hover"),
+        "command": font_menu.cget("command"),
+    }
+    font_menu.destroy()
+    row = customtkinter.CTkFrame(parent, fg_color="transparent", height=34)
+    row._fx_wm_font_selector_controls = True
+    row.pack_propagate(False)
+    row.pack(
+        fill="x",
+        padx=pack_info.get("padx", 24),
+        pady=pack_info.get("pady", (0, 2)),
+        before=next_widget,
+    )
+    selector_label = customtkinter.CTkLabel(row, text="字体选择", width=72, anchor="w")
+    selector_label._fx_wm_font_selector_label = True
+    selector_label.pack(side="left")
+    replacement = customtkinter.CTkComboBox(row, **font_menu_options)
+    replacement.pack(side="left", fill="x", expand=True, padx=(8, 0))
+    for attr_name, attr_value in vars(app).items():
+        if attr_value is font_menu:
+            setattr(app, attr_name, replacement)
+    app._fx_wm_font_selector_ui_ready = True
+
+
+def _patch_watermark_font_selector_ui():
+    original_init_watermark_ui = FengxiToolboxApp.init_watermark_ui
+    if getattr(original_init_watermark_ui, "__fx_wm_font_selector_ui_patch__", False):
+        return
+
+    def patched_init_watermark_ui(self):
+        original_init_watermark_ui(self)
+        try:
+            _install_watermark_font_selector_ui(self)
+        except Exception as exc:
+            _debug(f"watermark_font_selector:init_error:{exc}")
+
+    patched_init_watermark_ui.__fx_wm_font_selector_ui_patch__ = True
+    FengxiToolboxApp.init_watermark_ui = patched_init_watermark_ui
+
+
+_patch_watermark_font_selector_ui()
 
 
 _patch_startup_performance()

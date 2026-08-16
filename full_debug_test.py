@@ -939,6 +939,34 @@ def main():
     app.withdraw()
     app._fx_disable_fast_close_force_exit = True
     record("app_init", True, "current_task=" + str(getattr(app, "current_task", None)))
+    expected_watermark_fonts = {"得意黑", "微软雅黑", "黑体", "宋体", "楷体"}
+    installed_watermark_fonts = set(getattr(app, "font_list", []) or [])
+    simhei_path = mod.get_font_path_by_name("黑体")
+    watermark_font_menu = getattr(app, "font_combo", None)
+    watermark_font_menu_values = list(watermark_font_menu.cget("values") or []) if watermark_font_menu is not None else []
+    watermark_font_selector_labels = []
+    if watermark_font_menu is not None:
+        for widget in watermark_font_menu.master.winfo_children():
+            try:
+                if getattr(widget, "_fx_wm_font_selector_label", False):
+                    watermark_font_selector_labels.append(widget)
+            except Exception:
+                pass
+    record(
+        "watermark_system_cjk_font_choices",
+        expected_watermark_fonts.issubset(installed_watermark_fonts)
+        and simhei_path is not None
+        and Path(simhei_path).is_file()
+        and expected_watermark_fonts.issubset(set(watermark_font_menu_values))
+        and bool(watermark_font_selector_labels)
+        and mod.get_word_compatible_font_name("微软雅黑") == "Microsoft YaHei",
+        {
+            "fonts": sorted(installed_watermark_fonts),
+            "simhei_path": simhei_path,
+            "menu_values": watermark_font_menu_values,
+            "label_count": len(watermark_font_selector_labels),
+        },
+    )
     mod._ensure_lazy_tab_initialized(app, "pdf")
     pdf_delete_switch = getattr(app, "chk_delete", None)
     pdf_delete_shared_panel = getattr(pdf_delete_switch, "master", None)
@@ -3189,6 +3217,64 @@ def main():
     status = mod.add_watermark_to_pdf(str(pdf_src), str(pdf_out), pkt, page_range="all", check_text="CONFIDENTIAL")
     watermark_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(pdf_out)).pages)
     record("pdf_watermark", status == "SUCCESS" and "CONFIDENTIAL" in watermark_text, status)
+
+    def pdf_page_font_names(page):
+        names = []
+        try:
+            fonts = page["/Resources"].get("/Font") or {}
+            for value in fonts.values():
+                names.append(str(value.get_object().get("/BaseFont") or ""))
+        except Exception:
+            pass
+        return names
+
+    chinese_watermark_text = "\u4e2d\u6587\u6c34\u5370\u6d4b\u8bd5"
+    chinese_packet = mod.create_watermark_packet(
+        chinese_watermark_text,
+        "__missing_cjk_font__",
+        36,
+        0.2,
+        45,
+    )
+    chinese_packet_fonts = pdf_page_font_names(PdfReader(chinese_packet).pages[0])
+    chinese_adaptive_src = root / "chinese_watermark_adaptive_source.pdf"
+    chinese_adaptive_out = root / "chinese_watermark_adaptive_output.pdf"
+    chinese_adaptive_canvas = canvas.Canvas(str(chinese_adaptive_src), pagesize=(390, 610))
+    chinese_adaptive_canvas.drawString(72, 500, "adaptive source")
+    chinese_adaptive_canvas.save()
+    chinese_adaptive_status = mod._watermark_process_pdf(
+        chinese_adaptive_src,
+        chinese_adaptive_out,
+        {
+            "text": chinese_watermark_text,
+            "font_name": "__missing_cjk_font__",
+            "font_size": 36,
+            "opacity": 0.2,
+            "angle": 45,
+            "color": "#737373",
+            "page_range": "all",
+            "force_mode": True,
+            "copy_guard_enabled": False,
+            "copy_guard_strength": "standard",
+            "adaptive_page_size": True,
+        },
+    )
+    chinese_adaptive_fonts = (
+        pdf_page_font_names(PdfReader(str(chinese_adaptive_out)).pages[0])
+        if chinese_adaptive_out.exists()
+        else []
+    )
+    record(
+        "pdf_watermark_chinese_font_fallback_and_adaptive_page",
+        any("STSong-Light" in name for name in chinese_packet_fonts)
+        and chinese_adaptive_status == "SUCCESS"
+        and any("STSong-Light" in name for name in chinese_adaptive_fonts),
+        {
+            "packet_fonts": chinese_packet_fonts,
+            "adaptive_status": chinese_adaptive_status,
+            "adaptive_fonts": chinese_adaptive_fonts,
+        },
+    )
     red_pdf_out = root / "sample_wm_red.pdf"
     red_pkt = mod.create_watermark_packet("RED WATERMARK", "SmileySans-Oblique", 46, 0.55, 35, color="#FF2020")
     red_status = mod.add_watermark_to_pdf(str(pdf_src), str(red_pdf_out), red_pkt, page_range="all", check_text="RED WATERMARK", force_mode=True)

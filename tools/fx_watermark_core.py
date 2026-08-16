@@ -107,6 +107,31 @@ def normalize_watermark_color(value, default=PDF_WATERMARK_DEFAULT_RGB):
     return PDF_WATERMARK_DEFAULT_RGB
 
 
+def _text_requires_cjk_font(value):
+    for char in str(value or ""):
+        codepoint = ord(char)
+        if (
+            0x2E80 <= codepoint <= 0x2EFF
+            or 0x3000 <= codepoint <= 0x303F
+            or 0x3400 <= codepoint <= 0x4DBF
+            or 0x4E00 <= codepoint <= 0x9FFF
+            or 0xF900 <= codepoint <= 0xFAFF
+            or 0xFF00 <= codepoint <= 0xFFEF
+        ):
+            return True
+    return False
+
+
+def _resolve_reportlab_cjk_fallback():
+    """Return ReportLab's built-in Simplified Chinese font when no TTF resolves."""
+
+    try:
+        pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+        return "STSong-Light"
+    except Exception:
+        return "Helvetica"
+
+
 def watermark_color_to_hex(value, default=PDF_WATERMARK_DEFAULT_RGB):
     red, green, blue = normalize_watermark_color(value, default=default)
     return f"#{red:02X}{green:02X}{blue:02X}"
@@ -216,7 +241,10 @@ def create_watermark_packet(
     except Exception:
         page_width, page_height = A4
     pdf = canvas.Canvas(packet, pagesize=(page_width, page_height))
+    text = str(content or "")
     resolved_font = _resolve_reportlab_font(font_name, font_path_resolver=font_path_resolver)
+    if resolved_font == "Helvetica" and _text_requires_cjk_font(text):
+        resolved_font = _resolve_reportlab_cjk_fallback()
     size = max(1.0, _safe_float(font_size, 36.0))
     normalized_rotation = int(_safe_float(page_rotation, 0.0)) % 360
     if scale_font_to_page:
@@ -230,7 +258,6 @@ def create_watermark_packet(
         size *= max(0.01, min(visible_width / base_width, visible_height / base_height))
     alpha = max(0.0, min(1.0, _safe_float(opacity, 0.2)))
     rotation = _safe_float(angle, 45.0) - normalized_rotation
-    text = str(content or "")
     lines = text.splitlines() or [""]
 
     pdf.saveState()
