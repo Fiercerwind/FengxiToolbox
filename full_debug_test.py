@@ -2009,6 +2009,8 @@ def main():
     mod._safe_named_widget_set(app, "rename_rep", "new")
     mod._safe_named_widget_set(app, "rename_cut_head", "1")
     mod._safe_named_widget_set(app, "rename_cut_tail", "2")
+    mod._safe_named_widget_set(app, "rename_range_start", "2")
+    mod._safe_named_widget_set(app, "rename_range_end", "4")
     rename_last = mod._save_last_settings_category(app, "rename")
     app.rename_type_var.set("add")
     mod._safe_named_widget_set(app, "rename_prefix", "")
@@ -2024,7 +2026,9 @@ def main():
         and app.rename_find.get() == "old"
         and app.rename_rep.get() == "new"
         and app.rename_cut_head.get() == "1"
-        and app.rename_cut_tail.get() == "2",
+        and app.rename_cut_tail.get() == "2"
+        and app.rename_range_start.get() == "2"
+        and app.rename_range_end.get() == "4",
         {
             "type": app.rename_type_var.get(),
             "prefix": app.rename_prefix.get(),
@@ -4326,6 +4330,8 @@ def main():
         ("file_rename_add", ("rename", "add", "pre_", "_suf"), "pre_demo_suf.txt"),
         ("file_rename_replace", ("rename", "replace", "demo", "sample"), "sample.txt"),
         ("file_rename_cut", ("rename", "cut", "2", "1"), "m.txt"),
+        ("file_rename_cut_range", ("rename", "cut_range", "2", "3"), "do.txt"),
+        ("file_rename_cut_range_legacy", ("rename", "cut", "range:2", "3"), "do.txt"),
     ]:
         inp = root / f"{name}_in"
         out = root / f"{name}_out"
@@ -4363,6 +4369,7 @@ def main():
     file_core_out = root / "file_core_out"
     file_core_out.mkdir()
     rename_spec = normalize_file_rename_spec_module(("rename", "add", "pre_", "_suf"))
+    range_spec = normalize_file_rename_spec_module(("rename", "cut_range", "2", "3"))
     rename_plan = plan_renamed_output_path_module(root / "demo.txt", file_core_out, rename_spec)
     file_core_target = file_core_out / "demo.txt"
     file_core_target.write_text("x", encoding="utf-8")
@@ -4382,6 +4389,8 @@ def main():
         and callable(deduplicate_files_module)
         and callable(run_file_dedup_task_module)
         and rename_spec.rename_type == "add"
+        and range_spec.rename_type == "cut_range"
+        and rename_file_name_module("demo.txt", range_spec) == "do.txt"
         and Path(rename_plan).name == "pre_demo_suf.txt"
         and Path(file_core_result.get("output", "")).name == "sample.txt"
         and (file_core_out / "sample.txt").exists()
@@ -4765,6 +4774,18 @@ def main():
             "word_logs": missing_word_logs,
             "ppt_logs": missing_ppt_logs,
         },
+    )
+    resume_rename_range_complete, _resume_rename_range_path = mod._generic_resume_outputs_complete(
+        str(file_core_target),
+        str(file_core_out),
+        str(file_core_out),
+        "file",
+        ("rename", "cut_range", "2", "3"),
+    )
+    record(
+        "file_rename_range_does_not_use_ambiguous_resume_skip",
+        not resume_rename_range_complete,
+        _resume_rename_range_path,
     )
 
     pdf_ppt_rich_root = root / "pdf_ppt_editable"
@@ -5638,6 +5659,30 @@ def main():
     single_zip_out = root / "single_zip_input.txt_Backup.zip"
     record("single_file_input_zip_total", wait_for(lambda: single_zip_out.exists()), single_zip_out)
 
+    range_rename_root = root / "file_rename_range_run_process"
+    range_rename_root.mkdir()
+    (range_rename_root / "demo.txt").write_text("range rename", encoding="utf-8")
+    mod._safe_var_set(app, "output_strategy_var", mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["result_folder"])
+    app.file_mode_var.set("rename")
+    app.rename_type_var.set("cut_range")
+    mod._safe_named_widget_set(app, "rename_range_start", "2")
+    mod._safe_named_widget_set(app, "rename_range_end", "3")
+    app.current_task = "file"
+    app.run_process(str(range_rename_root), "file")
+    range_rename_outputs = list(range_rename_root.rglob("do.txt"))
+    record(
+        "file_rename_cut_range_run_process",
+        bool(range_rename_outputs)
+        and app.rename_type_var.get() == "cut_range"
+        and app.rename_range_start.get() == "2"
+        and app.rename_range_end.get() == "3",
+        {
+            "outputs": [str(path) for path in range_rename_outputs],
+            "rename_type": app.rename_type_var.get(),
+            "range": [app.rename_range_start.get(), app.rename_range_end.get()],
+        },
+    )
+
     fd = root / "file_dedup"
     fd.mkdir()
     (fd / "a.txt").write_text("same", encoding="utf-8")
@@ -6274,6 +6319,64 @@ def main():
                     "word_watermark_visible_when_exported",
                     wm_visible_pdf.exists() and wm_visible_pixels > 8000,
                     {"pixels": wm_visible_pixels, "pdf": str(wm_visible_pdf)},
+                )
+
+                word_insert_src = root / "office_word_insert_source.docx"
+                doc = word.Documents.Add()
+                doc.Content.Text = "word insert page source"
+                doc.SaveAs2(str(word_insert_src.resolve()), FileFormat=16)
+                doc.Close(False)
+                word_insert_output = root / "office_word_insert_output.docx"
+                word_insert_settings = mod._prepare_watermark_insert_page_settings(
+                    {
+                        "text": "WORD INSERT WATERMARK",
+                        "font_name": "SmileySans-Oblique",
+                        "english_font_name": "Arial",
+                        "font_size": 60,
+                        "opacity": 0.2,
+                        "angle": 45,
+                        "color": "#737373",
+                        "page_range": "all",
+                        "force_mode": True,
+                        "copy_guard_enabled": False,
+                        "copy_guard_strength": "standard",
+                        "insert_page_enabled": True,
+                        "insert_page_path": str(insert_template),
+                        "insert_page_position": "end",
+                    }
+                )
+                word_insert_status = mod._watermark_process_word(
+                    word_insert_src,
+                    word_insert_output,
+                    word_insert_settings,
+                    word,
+                )
+                word_insert_marker = False
+                word_insert_page_marker = ""
+                if word_insert_output.exists():
+                    word_insert_doc = word.Documents.Open(str(word_insert_output.resolve()))
+                    try:
+                        header_shapes = word_insert_doc.Sections(1).Headers(1).Shapes
+                        word_insert_marker = any(
+                            str(header_shapes(index).Name or "") == "XMU_DONE"
+                            for index in range(1, int(header_shapes.Count) + 1)
+                        )
+                        word_insert_page_marker = str(
+                            word_insert_doc.Variables("FXInsertedWatermarkPage").Value or ""
+                        )
+                    finally:
+                        word_insert_doc.Close(False)
+                record(
+                    "word_insert_page_preserves_visible_watermark",
+                    word_insert_status == "SUCCESS"
+                    and word_insert_output.exists()
+                    and word_insert_marker
+                    and word_insert_page_marker == "1",
+                    {
+                        "status": word_insert_status,
+                        "watermark_marker": word_insert_marker,
+                        "insert_page_marker": word_insert_page_marker,
+                    },
                 )
 
                 wm_first_src = root / "office_word_first_page_src.docx"

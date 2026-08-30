@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 
-FILE_RENAME_TYPES = {"add", "replace", "cut"}
+FILE_RENAME_TYPES = {"add", "replace", "cut", "cut_range"}
 
 
 class FileRenameSpec:
@@ -22,6 +22,8 @@ class FileRenameSpec:
         replace_text: str = "",
         cut_head: int = 0,
         cut_tail: int = 0,
+        range_start: int = 1,
+        range_end: int = 0,
     ):
         self.rename_type = rename_type
         self.prefix = prefix
@@ -30,6 +32,8 @@ class FileRenameSpec:
         self.replace_text = replace_text
         self.cut_head = cut_head
         self.cut_tail = cut_tail
+        self.range_start = range_start
+        self.range_end = range_end
 
 
 def _safe_int(value, default=0):
@@ -42,6 +46,13 @@ def _safe_int(value, default=0):
 def normalize_file_rename_spec(args) -> FileRenameSpec:
     values = list(args or [])
     rename_type = str(values[1] if len(values) > 1 else "add" or "add").strip().lower() or "add"
+    range_start_value = values[2] if len(values) > 2 else 1
+    range_end_value = values[3] if len(values) > 3 else 0
+    # The legacy task runner only emits "cut". The UI wrapper encodes the
+    # new range operation into its first value so old task paths stay usable.
+    if rename_type == "cut" and str(range_start_value).strip().lower().startswith("range:"):
+        rename_type = "cut_range"
+        range_start_value = str(range_start_value).strip().split(":", 1)[1]
     if rename_type not in FILE_RENAME_TYPES:
         rename_type = "add"
     return FileRenameSpec(
@@ -52,6 +63,8 @@ def normalize_file_rename_spec(args) -> FileRenameSpec:
         replace_text=str(values[3] if len(values) > 3 else "" or ""),
         cut_head=_safe_int(values[2] if len(values) > 2 else 0),
         cut_tail=_safe_int(values[3] if len(values) > 3 else 0),
+        range_start=max(1, _safe_int(range_start_value, 1)),
+        range_end=_safe_int(range_end_value, 0),
     )
 
 
@@ -68,6 +81,13 @@ def rename_file_name(filename, spec: FileRenameSpec) -> str:
             stem = stem[head:]
         if tail:
             stem = stem[:-tail] if tail < len(stem) else ""
+    elif rename_type == "cut_range":
+        start = max(1, int(spec.range_start or 1))
+        end = int(spec.range_end or 0)
+        if end <= 0:
+            end = len(stem)
+        if start <= len(stem) and end >= start:
+            stem = stem[: start - 1] + stem[min(end, len(stem)) :]
     else:
         stem = f"{spec.prefix or ''}{stem}{spec.suffix or ''}"
     stem = stem.strip()
@@ -77,6 +97,21 @@ def rename_file_name(filename, spec: FileRenameSpec) -> str:
 def plan_renamed_output_path(src, output_folder, spec: FileRenameSpec) -> str:
     source = Path(src)
     return str(Path(output_folder) / rename_file_name(source.name, spec))
+
+
+def _unique_renamed_output_path(path: Path) -> Path:
+    """Avoid overwriting another source when a rename rule produces a collision."""
+
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    index = 2
+    while True:
+        candidate = path.with_name(f"{stem} ({index}){suffix}")
+        if not candidate.exists():
+            return candidate
+        index += 1
 
 
 def apply_rename_to_file(
@@ -90,7 +125,7 @@ def apply_rename_to_file(
 ):
     spec = normalize_file_rename_spec(args)
     source_path = Path(src)
-    dst = Path(plan_renamed_output_path(src, output_folder, spec))
+    dst = _unique_renamed_output_path(Path(plan_renamed_output_path(src, output_folder, spec)))
     dst.parent.mkdir(parents=True, exist_ok=True)
     copy_file_safe(str(source_path), str(dst))
     if callable(log):

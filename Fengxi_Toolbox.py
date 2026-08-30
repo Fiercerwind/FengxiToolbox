@@ -4322,6 +4322,11 @@ def _generic_resume_outputs_complete(src, input_folder, output_folder, task_type
     values = list(args or [])
     task = str(task_type or "").strip().lower()
     try:
+        # Rename rules can deliberately map multiple source names to similar
+        # destinations. A bare output-file existence check is not a reliable
+        # completion signal and can skip unrelated source files.
+        if task == "file" and str(values[0] if values else "").strip().lower() == "rename":
+            return False, ""
         if task == "pdf":
             mode = str(values[0] if values else "").strip().lower()
             if mode == "split":
@@ -4725,6 +4730,8 @@ def _build_file_manager_mode_layout(app):
         "rep": entry_value("rename_rep"),
         "cut_head": entry_value("rename_cut_head"),
         "cut_tail": entry_value("rename_cut_tail"),
+        "range_start": entry_value("rename_range_start"),
+        "range_end": entry_value("rename_range_end"),
     }
     for widget in list(body.winfo_children()):
         widget.destroy()
@@ -4819,7 +4826,7 @@ def _build_file_manager_mode_layout(app):
     rename_panel = make_detail_panel("rename", "批量重命名", "选择规则后批量修改文件名，不会改变文件内容。")
     rename_rows = customtkinter.CTkFrame(rename_panel, fg_color="transparent")
     rename_rows.pack(fill="x", padx=8, pady=(0, 8))
-    for row in range(3):
+    for row in range(4):
         rename_rows.grid_columnconfigure(row, weight=0)
     rename_rows.grid_columnconfigure(1, weight=1)
     rename_rows.grid_columnconfigure(2, weight=1)
@@ -4867,6 +4874,22 @@ def _build_file_manager_mode_layout(app):
     app.rename_cut_tail = customtkinter.CTkEntry(cut_right, width=76, **app._get_entry_style())
     app.rename_cut_tail.insert(0, values["cut_tail"])
     app.rename_cut_tail.pack(side="left")
+
+    customtkinter.CTkRadioButton(
+        rename_rows, text="删除范围", value="cut_range", variable=rename_type_var, **app._get_radio_style()
+    ).grid(row=3, column=0, sticky="w", padx=(0, 16), pady=(10, 0))
+    range_left = customtkinter.CTkFrame(rename_rows, fg_color="transparent")
+    range_left.grid(row=3, column=1, sticky="ew", padx=(0, 10), pady=(10, 0))
+    customtkinter.CTkLabel(range_left, text="删除第 M 个：", text_color=COLOR_TEXT_SOFT).pack(side="left", padx=(0, 6))
+    app.rename_range_start = customtkinter.CTkEntry(range_left, width=76, **app._get_entry_style())
+    app.rename_range_start.insert(0, values["range_start"] or "1")
+    app.rename_range_start.pack(side="left")
+    range_right = customtkinter.CTkFrame(rename_rows, fg_color="transparent")
+    range_right.grid(row=3, column=2, sticky="ew", pady=(10, 0))
+    customtkinter.CTkLabel(range_right, text="到第 N 个：", text_color=COLOR_TEXT_SOFT).pack(side="left", padx=(0, 6))
+    app.rename_range_end = customtkinter.CTkEntry(range_right, width=76, **app._get_entry_style())
+    app.rename_range_end.insert(0, values["range_end"])
+    app.rename_range_end.pack(side="left")
 
     dedup_panel = make_detail_panel(
         "dedup", "重复文件清理", "按 MD5 内容哈希判断重复文件，保留一份并清理其余副本。建议先在测试文件夹确认规则。"
@@ -4931,6 +4954,57 @@ def _patch_file_crypto_ui():
 
 
 _patch_file_crypto_ui()
+
+
+def _patch_file_rename_range_task():
+    """Run the range operation through the legacy serial rename path."""
+
+    original_run_process = FengxiToolboxApp.run_process
+    if getattr(original_run_process, "__fx_file_rename_range_patch__", False):
+        return
+
+    def patched_run_process(self, input_folder, task_type):
+        is_range_cut = task_type == "file" and str(_safe_var_get(self, "file_mode_var", "") or "").lower() == "rename"
+        is_range_cut = is_range_cut and str(_safe_var_get(self, "rename_type_var", "") or "").lower() == "cut_range"
+        if not is_range_cut:
+            return original_run_process(self, input_folder, task_type)
+
+        rename_type_var = getattr(self, "rename_type_var", None)
+        if rename_type_var is None:
+            return original_run_process(self, input_folder, task_type)
+        start = _safe_named_widget_get(self, "rename_range_start", "1") or "1"
+        end = _safe_named_widget_get(self, "rename_range_end", "")
+        original_head = _safe_named_widget_get(self, "rename_cut_head", "")
+        original_tail = _safe_named_widget_get(self, "rename_cut_tail", "")
+        multithread_var = getattr(self, "enable_multithread", None)
+        original_multithread = None
+        try:
+            rename_type_var.set("cut")
+            _safe_named_widget_set(self, "rename_cut_head", f"range:{start}")
+            _safe_named_widget_set(self, "rename_cut_tail", end)
+            if multithread_var is not None:
+                original_multithread = bool(multithread_var.get())
+                multithread_var.set(False)
+            return original_run_process(self, input_folder, task_type)
+        finally:
+            if original_multithread is not None and multithread_var is not None:
+                try:
+                    multithread_var.set(original_multithread)
+                except Exception:
+                    pass
+            _safe_named_widget_set(self, "rename_cut_head", original_head)
+            _safe_named_widget_set(self, "rename_cut_tail", original_tail)
+            try:
+                rename_type_var.set("cut_range")
+            except Exception:
+                pass
+
+    patched_run_process.__fx_file_rename_range_patch__ = True
+    patched_run_process.__wrapped__ = original_run_process
+    FengxiToolboxApp.run_process = patched_run_process
+
+
+_patch_file_rename_range_task()
 
 
 def _run_file_crypto_task(app, input_value, mode):
@@ -5906,6 +5980,21 @@ def _schedule_task_completion_notice(app, result):
         return
     if result.get("_fx_completion_notice_scheduled"):
         return
+    # Result dictionaries can be reconstructed by separate runtime wrappers.
+    # Keep the completion notice scoped to the app's current task run so a
+    # reconstructed result cannot create a second dialog for the same task.
+    run_id = result.get("_fx_task_run_id")
+    try:
+        current_run_id = getattr(app, "_fx_task_run_id", None)
+    except Exception:
+        current_run_id = None
+    if run_id is not None and current_run_id == run_id:
+        try:
+            if getattr(app, "_fx_completion_notice_shown_run_id", None) == run_id:
+                return
+            app._fx_completion_notice_shown_run_id = run_id
+        except Exception:
+            pass
     result["_fx_completion_notice_scheduled"] = True
 
     task_label = _get_feature_label(result.get("task_type"), fallback="任务")
@@ -5976,6 +6065,12 @@ def _attach_task_result(app, result):
 def _start_task_result(app, input_value, task_type):
     result = _new_task_result(input_value=input_value, task_type=task_type)
     _set_task_result_output_strategy(result, task_type, _get_task_output_strategy(app, task_type))
+    try:
+        next_run_id = int(getattr(app, "_fx_task_run_id", 0) or 0) + 1
+        app._fx_task_run_id = next_run_id
+        result["_fx_task_run_id"] = next_run_id
+    except Exception:
+        pass
     return _attach_task_result(app, result)
 
 
@@ -12984,7 +13079,7 @@ def _watermark_process_word(src, dst, settings, word_app):
     if _watermark_insert_page_enabled(settings) and _watermark_status_kind(status) == "success":
         insert_status = _watermark_core_insert_page_into_word(
             word_app,
-            str(src),
+            str(dst),
             str(dst),
             settings.get("_insert_page_pdf_bytes"),
             settings.get("insert_page_position", "结尾"),
@@ -14471,6 +14566,8 @@ def _capture_preset_settings(app, category=None):
                 "rename_rep": _safe_named_widget_get(app, "rename_rep", ""),
                 "rename_cut_head": _safe_named_widget_get(app, "rename_cut_head", ""),
                 "rename_cut_tail": _safe_named_widget_get(app, "rename_cut_tail", ""),
+                "rename_range_start": _safe_named_widget_get(app, "rename_range_start", ""),
+                "rename_range_end": _safe_named_widget_get(app, "rename_range_end", ""),
             }
         )
     elif category == "zip":
@@ -14655,7 +14752,10 @@ def _apply_preset_settings(app, preset, switch_task=True):
     elif category == "rename":
         _safe_var_set(app, "file_mode_var", "rename")
         _safe_var_set(app, "rename_type_var", settings.get("rename_type_var", "add"))
-        for name in ("rename_prefix", "rename_suffix", "rename_find", "rename_rep", "rename_cut_head", "rename_cut_tail"):
+        for name in (
+            "rename_prefix", "rename_suffix", "rename_find", "rename_rep", "rename_cut_head", "rename_cut_tail",
+            "rename_range_start", "rename_range_end",
+        ):
             _safe_named_widget_set(app, name, settings.get(name, ""))
     elif category == "zip":
         _safe_var_set(app, "zip_mode_var", settings.get("zip_mode_var", "total"))

@@ -129,6 +129,14 @@ def main():
     src.write_text("x", encoding="utf-8")
     mod.FengxiToolboxApp.process_single_file(dummy, str(src), str(inp), str(out), "file", ("rename", "add", "pre_", "_suf"), [])
     record("file_rename_add", (out / "pre_demo_suf.txt").exists(), "ok")
+    mod.FengxiToolboxApp.process_single_file(dummy, str(src), str(inp), str(out), "file", ("rename", "cut_range", "2", "3"), [])
+    record("file_rename_cut_range", (out / "do.txt").exists(), "ok")
+    collision_src = inp / "dexo.txt"
+    collision_src.write_text("y", encoding="utf-8")
+    mod.FengxiToolboxApp.process_single_file(
+        dummy, str(collision_src), str(inp), str(out), "file", ("rename", "cut_range", "2", "3"), []
+    )
+    record("file_rename_cut_range_collision", (out / "do (2).txt").exists(), "ok")
 
     inp = root / "meta_in"
     out = root / "meta_out"
