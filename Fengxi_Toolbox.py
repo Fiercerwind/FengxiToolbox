@@ -91,6 +91,11 @@ from tools.fx_pdf_compress_core import (
     pdf_compress_meta_matches as _pdf_compress_core_meta_matches,
     write_pdf_compress_meta as _pdf_compress_core_write_meta,
 )
+from tools.fx_pdf_page_delete import (
+    build_page_delete_output_path as _pdf_page_delete_build_output_path,
+    delete_pdf_page_range as _delete_pdf_page_range,
+    normalize_page_delete_range as _normalize_pdf_page_delete_range,
+)
 from tools.fx_queue_history import (
     QueueHistoryContext,
     build_queue_history_search_blob,
@@ -649,6 +654,7 @@ FEATURE_REGISTRY = {
         "preview_modes": {
             "merge": "合并",
             "split": "拆分",
+            "delete_pages": "删除指定页面",
             "compress": "PDF 压缩",
             "ocr": "OCR 搜索版 PDF",
             "rotation": "仅修正文本方向（不进行OCR）",
@@ -3522,6 +3528,10 @@ def _tighten_watermark_tab_layout(app, tab):
                     pass
         except Exception:
             pass
+    try:
+        _apply_watermark_unified_slider_style(app)
+    except Exception:
+        pass
 
 
 def _tighten_layout(app, task_name=None):
@@ -3824,6 +3834,8 @@ def add_watermark_to_word(
     copy_guard=False,
     copy_guard_strength="standard",
     english_font_name=None,
+    insert_page_pdf_bytes=None,
+    insert_page_position="end",
 ):
     return _watermark_core_add_watermark_to_word(
         word_app,
@@ -3842,6 +3854,8 @@ def add_watermark_to_word(
         copy_guard=copy_guard,
         copy_guard_strength=copy_guard_strength,
         english_font_name=english_font_name,
+        insert_page_pdf_bytes=insert_page_pdf_bytes,
+        insert_page_position=insert_page_position,
     )
 
 
@@ -6559,7 +6573,7 @@ def _estimate_progress_total_units(app, input_value, task_type):
             except Exception:
                 mode = ""
         pdf_count = sum(1 for item in all_files if str(item).lower().endswith(".pdf"))
-        if mode in {"merge", "split", "ocr", "compress", "rotation"}:
+        if mode in {"merge", "split", "delete_pages", "ocr", "compress", "rotation"}:
             return pdf_count
 
     if task_type == "zip":
@@ -8921,6 +8935,7 @@ def _patch_pdf_ocr_mode():
             self.pdf_ocr_backend_status_var.set("后端状态：按需检测，可直接运行 OCR；如需查看详细可用性再点刷新。")
             self._fx_select_pdf_mode = select_pdf_mode
             self._fx_select_pdf_direction_mode = select_pdf_direction_mode
+            self._fx_pdf_mode_buttons = mode_buttons
             try:
                 current_mode = str(self.pdf_mode_var.get() or "")
                 select_pdf_mode(current_mode if current_mode in self._fx_pdf_detail_panels else "compress")
@@ -8980,6 +8995,310 @@ def _patch_pdf_ocr_mode():
 
 
 _patch_pdf_ocr_mode()
+
+
+def _get_pdf_page_delete_range(app):
+    start_text = _safe_named_widget_get(app, "pdf_page_delete_start_entry", "")
+    end_text = _safe_named_widget_get(app, "pdf_page_delete_end_entry", "")
+    return _normalize_pdf_page_delete_range(start_text, end_text)
+
+
+def _get_pdf_source_password(app):
+    password_var = getattr(app, "pdf_pwd_var", None)
+    try:
+        if password_var is not None:
+            return str(password_var.get() or "").strip()
+    except Exception:
+        pass
+    password_entry = getattr(app, "pdf_pwd_entry", None)
+    try:
+        return str(password_entry.get() or "").strip() if password_entry is not None else ""
+    except Exception:
+        return ""
+
+
+def _run_pdf_page_delete_task(app, input_folder):
+    result = _get_last_task_result(app)
+    normalized_input = _normalize_input_path_value(input_folder)
+    if result is None:
+        result = _start_task_result(app, normalized_input, "pdf")
+
+    try:
+        start_page, end_page = _get_pdf_page_delete_range(app)
+    except ValueError as exc:
+        message = str(exc)
+        app.log(f"[删除指定页面] 参数错误：{message}")
+        _set_task_result_finished(result, "failed", message=message, detail=message, error=message)
+        try:
+            tkinter.messagebox.showwarning("删除指定页面", message, parent=app)
+        except Exception:
+            pass
+        return
+
+    normalized_input, input_root, output_folder, resolved_strategy = _resolve_output_root_for_task(
+        input_folder,
+        "pdf",
+        _get_task_output_strategy(app, "pdf"),
+    )
+    _set_task_result_output_strategy(result, "pdf", resolved_strategy)
+    _set_task_result_output_root(result, output_folder)
+    all_files = list(app.collect_input_files(normalized_input, "pdf"))
+    output_root_path = Path(output_folder)
+    try:
+        output_root_resolved = output_root_path.resolve()
+    except Exception:
+        output_root_resolved = output_root_path
+
+    pdf_files = []
+    skipped_count = 0
+    for item in all_files:
+        source = Path(item)
+        if source.suffix.lower() != ".pdf":
+            continue
+        try:
+            source.resolve().relative_to(output_root_resolved)
+            skipped_count += 1
+            continue
+        except ValueError:
+            pass
+        except Exception:
+            pass
+        pdf_files.append(str(source))
+
+    if not pdf_files:
+        message = "未找到可处理的 PDF 文件。"
+        app.log(f"[删除指定页面] {message}")
+        _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=max(1, skipped_count))
+        _set_task_result_finished(result, "skipped", message=message, detail=message, skipped=True)
+        return
+
+    os.makedirs(output_folder, exist_ok=True)
+    password = _get_pdf_source_password(app)
+    delete_source = bool(_safe_var_get(app, "pdf_delete_var", False))
+    tracker = _get_active_progress_tracker(app)
+    failed_list = []
+    success_count = 0
+    total = len(pdf_files)
+    range_text = f"第 {start_page} 页" if start_page == end_page else f"第 {start_page} 至 {end_page} 页"
+    app.log(f"[删除指定页面] 将从 {total} 个 PDF 删除{range_text}。")
+
+    for index, source in enumerate(pdf_files, start=1):
+        if getattr(app, "stop_event", False):
+            break
+        destination = _pdf_page_delete_build_output_path(
+            source,
+            output_folder,
+            start_page,
+            end_page,
+            input_root=input_root,
+        )
+        try:
+            if tracker is not None:
+                tracker.set_current_item(source, "删除指定页面")
+                tracker.set_current_item_fraction(0.05, stage="删除指定页面", current_file=source)
+            else:
+                app.progress_bar.set((index - 1) / total)
+            payload = _delete_pdf_page_range(source, destination, start_page, end_page, password=password)
+            _add_task_result_output(result, destination)
+            success_count += 1
+            app.log(
+                f"[删除指定页面] 成功: {os.path.basename(source)} -> {destination} "
+                f"| 保留 {payload['remaining_pages']} 页"
+            )
+            if delete_source:
+                try:
+                    os.remove(source)
+                    app.log(f"[删除指定页面] 已删除原文件: {os.path.basename(source)}")
+                except Exception as delete_exc:
+                    app.log(f"[删除指定页面] 原文件删除失败，已保留: {delete_exc}")
+        except Exception as exc:
+            failed_list.append(f"{source}: {exc}")
+            app.log(f"[删除指定页面] 失败: {os.path.basename(source)} | {exc}")
+        finally:
+            if tracker is not None:
+                tracker.complete_units(1)
+            else:
+                app.progress_bar.set(index / total)
+
+    processed_count = success_count + len(failed_list)
+    if getattr(app, "stop_event", False):
+        _set_task_result_counts(
+            result,
+            processed=processed_count,
+            success=success_count,
+            failed=len(failed_list),
+            skipped=skipped_count,
+        )
+        _set_task_result_finished(result, "stopped", message="用户停止删除指定页面任务", stopped=True)
+        return
+    if failed_list:
+        result["failed_items"] = list(failed_list)
+        report_path = _write_failed_report(output_folder, failed_list)
+        if report_path:
+            _add_task_result_output(result, report_path)
+        _set_task_result_counts(
+            result,
+            processed=processed_count,
+            success=success_count,
+            failed=len(failed_list),
+            skipped=skipped_count,
+        )
+        _set_task_result_finished(
+            result,
+            "failed",
+            message=f"删除指定页面结束，但有 {len(failed_list)} 个文件失败。",
+            detail=f"成功 {success_count} 个，失败 {len(failed_list)} 个。",
+            error=f"失败 {len(failed_list)} 个文件。",
+        )
+        return
+
+    _set_task_result_counts(result, processed=processed_count, success=success_count, failed=0, skipped=skipped_count)
+    _set_task_result_finished(
+        result,
+        "success",
+        message="删除指定页面已完成",
+        detail=f"成功处理 {success_count} 个 PDF，已删除{range_text}。",
+    )
+    app.log(f"[完成] 删除指定页面已完成，成功处理 {success_count} 个 PDF。")
+
+
+def _patch_pdf_page_delete_feature():
+    try:
+        original_init_pdf_ui = FengxiToolboxApp.init_pdf_ui
+        original_run_process = FengxiToolboxApp.run_process
+    except Exception as exc:
+        _debug(f"pdf_page_delete:patch_missing:{exc}")
+        return
+    if getattr(original_init_pdf_ui, "__fx_pdf_page_delete_patch__", False):
+        return
+
+    def patched_init_pdf_ui(self):
+        original_init_pdf_ui(self)
+        if getattr(self, "_fx_pdf_page_delete_ui_ready", False):
+            return
+        try:
+            panels = getattr(self, "_fx_pdf_detail_panels", {})
+            split_panel = panels.get("split") if isinstance(panels, dict) else None
+            shared_panel = getattr(self, "chk_delete", None).master
+            if split_panel is None or shared_panel is None:
+                return
+            detail_shell = split_panel.master
+            base_panel = shared_panel.master
+            mode_buttons = getattr(self, "_fx_pdf_mode_buttons", {})
+
+            page_button = customtkinter.CTkButton(
+                base_panel,
+                text="删除指定页面",
+                command=lambda: getattr(self, "_fx_select_pdf_mode")("delete_pages"),
+                height=28,
+                anchor="w",
+                corner_radius=8,
+                border_width=1,
+                fg_color="transparent",
+                hover_color="#303030",
+                border_color="#44515A",
+                text_color="#DDE6EA",
+                font=customtkinter.CTkFont(size=11),
+            )
+            compress_button = mode_buttons.get("compress") if isinstance(mode_buttons, dict) else None
+            if compress_button is not None:
+                page_button.pack(before=compress_button, fill="x", pady=(0, 2))
+            else:
+                page_button.pack(before=shared_panel, fill="x", pady=(0, 2))
+            if isinstance(mode_buttons, dict):
+                mode_buttons["delete_pages"] = page_button
+
+            panel = customtkinter.CTkFrame(detail_shell, fg_color="transparent")
+            panel.grid_columnconfigure(0, weight=1)
+            customtkinter.CTkLabel(
+                panel,
+                text="删除指定页面",
+                text_color="#E6EEF2",
+                font=customtkinter.CTkFont(size=15, weight="bold"),
+                height=22,
+            ).pack(anchor="w", padx=8, pady=(0, 8))
+            customtkinter.CTkLabel(
+                panel,
+                text="按 1 起算，删除起始页到结束页（包含两端）。两个页码相同则只删除该页；不能删除全部页面。",
+                text_color=COLOR_TEXT_SOFT,
+                font=customtkinter.CTkFont(size=12),
+                justify="left",
+                wraplength=620,
+            ).pack(anchor="w", fill="x", padx=8, pady=(0, 12))
+
+            range_row = customtkinter.CTkFrame(panel, fg_color="transparent")
+            range_row.pack(fill="x", padx=8, pady=(0, 10))
+            for column in (0, 1):
+                range_row.grid_columnconfigure(column, weight=1)
+            start_field = customtkinter.CTkFrame(range_row, fg_color="transparent")
+            start_field.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+            customtkinter.CTkLabel(
+                start_field, text="删除起始页", text_color=COLOR_TEXT_SOFT, font=customtkinter.CTkFont(size=11)
+            ).pack(anchor="w", pady=(0, 4))
+            self.pdf_page_delete_start_entry = customtkinter.CTkEntry(
+                start_field, placeholder_text="例如：3", **self._get_entry_style()
+            )
+            self.pdf_page_delete_start_entry.insert(0, "1")
+            self.pdf_page_delete_start_entry.pack(fill="x")
+            end_field = customtkinter.CTkFrame(range_row, fg_color="transparent")
+            end_field.grid(row=0, column=1, sticky="ew")
+            customtkinter.CTkLabel(
+                end_field, text="删除结束页", text_color=COLOR_TEXT_SOFT, font=customtkinter.CTkFont(size=11)
+            ).pack(anchor="w", pady=(0, 4))
+            self.pdf_page_delete_end_entry = customtkinter.CTkEntry(
+                end_field, placeholder_text="例如：5", **self._get_entry_style()
+            )
+            self.pdf_page_delete_end_entry.insert(0, "1")
+            self.pdf_page_delete_end_entry.pack(fill="x")
+
+            customtkinter.CTkLabel(
+                panel, text="原文件密码（仅加密 PDF 需要）", text_color=COLOR_TEXT_SOFT, font=customtkinter.CTkFont(size=11)
+            ).pack(anchor="w", padx=8, pady=(0, 4))
+            self.pdf_page_delete_pwd_entry = customtkinter.CTkEntry(
+                panel,
+                textvariable=self.pdf_pwd_var,
+                placeholder_text="未加密可留空",
+                show="*",
+                **self._get_entry_style(),
+            )
+            self.pdf_page_delete_pwd_entry.pack(fill="x", padx=8, pady=(0, 8))
+
+            panels["delete_pages"] = panel
+            try:
+                current_mode = str(self.pdf_mode_var.get() or "")
+                if current_mode == "delete_pages":
+                    self._fx_select_pdf_mode("delete_pages")
+                else:
+                    panel.grid_remove()
+            except Exception:
+                panel.grid_remove()
+            self._fx_pdf_page_delete_ui_ready = True
+        except Exception as exc:
+            _debug(f"pdf_page_delete:init_ui_error:{exc}")
+
+    def patched_run_process(self, input_folder, task_type):
+        if task_type == "pdf" and str(_safe_var_get(self, "pdf_mode_var", "") or "") == "delete_pages":
+            try:
+                _run_pdf_page_delete_task(self, input_folder)
+            except Exception as exc:
+                _debug(f"pdf_page_delete:run_error:{exc}")
+                self.log(f"[删除指定页面] 严重错误：{exc}")
+            finally:
+                try:
+                    self.reset_ui()
+                except Exception:
+                    pass
+            return
+        return original_run_process(self, input_folder, task_type)
+
+    patched_init_pdf_ui.__fx_pdf_page_delete_patch__ = True
+    patched_run_process.__fx_pdf_page_delete_patch__ = True
+    FengxiToolboxApp.init_pdf_ui = patched_init_pdf_ui
+    FengxiToolboxApp.run_process = patched_run_process
+    _debug("pdf_page_delete:installed")
+
+
+_patch_pdf_page_delete_feature()
 
 
 def _patch_pdf_merge_resume():
@@ -9945,10 +10264,34 @@ def _iter_widget_tree(widget):
         yield from _iter_widget_tree(child)
 
 
-def _find_watermark_skip_switch(root_widget):
+def _switch_uses_variable(widget, variable):
+    """Return whether a CustomTkinter switch is bound to the given Tk variable."""
+
+    if widget is None or variable is None:
+        return False
+    try:
+        bound_variable = getattr(widget, "_variable", None)
+        if bound_variable is variable:
+            return True
+        if bound_variable is not None and str(bound_variable) == str(variable):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _find_watermark_skip_switch(root_widget, app=None):
+    """Find the original suffix-only skip switch, never the replacement control."""
+
     candidate = None
+    skip_var = getattr(app, "wm_skip_hyphen_var", None) if app is not None else None
     for widget in _iter_widget_tree(root_widget):
         if not isinstance(widget, customtkinter.CTkSwitch):
+            continue
+        if getattr(widget, "_fx_wm_filename_rule_skip_switch", False):
+            continue
+        if skip_var is not None and _switch_uses_variable(widget, skip_var):
+            candidate = widget
             continue
         try:
             label = str(widget.cget("text") or "")
@@ -9957,6 +10300,59 @@ def _find_watermark_skip_switch(root_widget):
         if ("文件名" in label and "跳过" in label) or ("-" in label and "结尾" in label):
             candidate = widget
     return candidate
+
+
+def _hide_legacy_watermark_suffix_skip_switches(app):
+    """Hide the obsolete bottom suffix-only skip switch while retaining its variable."""
+
+    active_switch = getattr(app, "_fx_wm_filename_rule_skip_switch", None)
+    skip_var = getattr(app, "wm_skip_hyphen_var", None)
+    hidden = []
+    for widget in _iter_widget_tree(getattr(app, "tab_wm", None)):
+        if not isinstance(widget, customtkinter.CTkSwitch) or widget is active_switch:
+            continue
+
+        matches_variable = _switch_uses_variable(widget, skip_var)
+        try:
+            label = str(widget.cget("text") or "")
+        except Exception:
+            label = ""
+        matches_legacy_label = (
+            "文件名" in label
+            and "跳过" in label
+            and ("结尾" in label or "-" in label)
+        )
+        if not matches_variable and not matches_legacy_label:
+            continue
+
+        for forget_method in ("pack_forget", "grid_forget", "place_forget"):
+            try:
+                getattr(widget, forget_method)()
+            except Exception:
+                pass
+        if not getattr(widget, "_fx_wm_legacy_suffix_layout_locked", False):
+            # Other watermark UI extensions can repack every original control
+            # during a lazy-tab refresh. This switch is obsolete, so prevent
+            # those late layout calls from making it visible again.
+            def keep_legacy_switch_hidden(*_args, **_kwargs):
+                return None
+
+            for layout_method in (
+                "pack",
+                "pack_configure",
+                "grid",
+                "grid_configure",
+                "place",
+                "place_configure",
+            ):
+                try:
+                    setattr(widget, layout_method, keep_legacy_switch_hidden)
+                except Exception:
+                    pass
+            widget._fx_wm_legacy_suffix_layout_locked = True
+        widget._fx_wm_legacy_suffix_skip_hidden = True
+        hidden.append(widget)
+    return hidden
 
 
 def _get_option_menu_style(combo_style):
@@ -10026,6 +10422,7 @@ def _create_watermark_filename_rule_controls(app, controls_parent, option_menu_s
         **switch_style,
     )
     app._fx_wm_filename_rule_skip_switch.pack(side="left", padx=(0, 16))
+    app._fx_wm_filename_rule_skip_switch._fx_wm_filename_rule_skip_switch = True
 
     customtkinter.CTkLabel(
         controls_row,
@@ -10119,6 +10516,8 @@ def _install_watermark_insert_page_ui(app, controls_parent, after_widget=None):
         app.wm_insert_page_position_var = tkinter.StringVar(value="结尾")
     if getattr(app, "wm_insert_page_path_var", None) is None:
         app.wm_insert_page_path_var = tkinter.StringVar(value="")
+    if getattr(app, "wm_word_fallback_pdf_var", None) is None:
+        app.wm_word_fallback_pdf_var = tkinter.BooleanVar(value=False)
 
     active = None
     try:
@@ -10189,9 +10588,49 @@ def _install_watermark_insert_page_ui(app, controls_parent, after_widget=None):
     return active
 
 
+def _install_watermark_word_fallback_pdf_ui(app):
+    """Place the Word fallback switch beside the existing Word-to-PDF switch."""
+
+    if getattr(app, "_fx_wm_word_fallback_pdf_ui_ready", False):
+        return getattr(app, "_fx_wm_word_fallback_pdf_checkbox", None)
+    convert_var = getattr(app, "wm_convert_pdf", None)
+    if convert_var is None:
+        return None
+    convert_switch = None
+    for widget in _iter_widget_tree(getattr(app, "tab_wm", None)):
+        if not isinstance(widget, customtkinter.CTkSwitch):
+            continue
+        if _switch_uses_variable(widget, convert_var):
+            convert_switch = widget
+            break
+        try:
+            if "转PDF再加水印" in str(widget.cget("text") or ""):
+                convert_switch = widget
+                break
+        except Exception:
+            pass
+    if convert_switch is None:
+        return None
+
+    checkbox = customtkinter.CTkCheckBox(
+        convert_switch.master,
+        text="Word 处理失败时转 PDF 继续处理",
+        variable=app.wm_word_fallback_pdf_var,
+        height=30,
+        font=customtkinter.CTkFont(size=11),
+    )
+    try:
+        checkbox.pack(after=convert_switch, side="left", padx=(12, 0))
+    except Exception:
+        checkbox.pack(side="left", padx=(12, 0))
+    app._fx_wm_word_fallback_pdf_checkbox = checkbox
+    app._fx_wm_word_fallback_pdf_ui_ready = True
+    return checkbox
+
+
 def _ensure_active_watermark_filename_rule_controls(app, right_panel=None):
     try:
-        skip_switch = _find_watermark_skip_switch(getattr(app, "tab_wm", None))
+        skip_switch = _find_watermark_skip_switch(getattr(app, "tab_wm", None), app=app)
     except Exception:
         skip_switch = None
     controls_parent = right_panel or (getattr(skip_switch, "master", None) if skip_switch is not None else None)
@@ -10221,12 +10660,6 @@ def _ensure_active_watermark_filename_rule_controls(app, right_panel=None):
         except Exception:
             pass
 
-    if skip_switch is not None:
-        try:
-            skip_switch.configure(text="按文件名规则跳过")
-        except Exception:
-            pass
-
     if active_controls is None:
         combo_style = {}
         try:
@@ -10239,6 +10672,7 @@ def _ensure_active_watermark_filename_rule_controls(app, right_panel=None):
             _get_option_menu_style(combo_style),
             skip_switch=skip_switch,
         )
+    _hide_legacy_watermark_suffix_skip_switches(app)
     insert_page_controls = _install_watermark_insert_page_ui(
         app,
         controls_parent,
@@ -11233,6 +11667,9 @@ def _patch_watermark_filename_rule_ui():
     def patched_init_watermark_ui(self):
         original_init_watermark_ui(self)
         if getattr(self, "_fx_wm_filename_rule_ui_ready", False):
+            # Lazy-tab startup can recreate the original controls after this
+            # extension has already installed its replacement row.
+            _hide_legacy_watermark_suffix_skip_switches(self)
             return
         try:
             self.wm_skip_name_position_var = tkinter.StringVar(value="结尾")
@@ -11241,9 +11678,10 @@ def _patch_watermark_filename_rule_ui():
             self.wm_insert_page_enabled_var = tkinter.BooleanVar(value=False)
             self.wm_insert_page_position_var = tkinter.StringVar(value="结尾")
             self.wm_insert_page_path_var = tkinter.StringVar(value="")
+            self.wm_word_fallback_pdf_var = tkinter.BooleanVar(value=False)
             _ensure_watermark_type_skip_vars(self)
 
-            skip_switch = _find_watermark_skip_switch(getattr(self, "tab_wm", None))
+            skip_switch = _find_watermark_skip_switch(getattr(self, "tab_wm", None), app=self)
             controls_parent = getattr(skip_switch, "master", None) if skip_switch is not None else None
             combo_style = {}
             try:
@@ -11261,6 +11699,7 @@ def _patch_watermark_filename_rule_ui():
                 controls_parent if controls_parent is not None else self.tab_wm,
                 after_widget=controls_row,
             )
+            _install_watermark_word_fallback_pdf_ui(self)
             _ensure_watermark_type_skip_controls(
                 self,
                 controls_parent if controls_parent is not None else self.tab_wm,
@@ -11269,6 +11708,8 @@ def _patch_watermark_filename_rule_ui():
             _install_watermark_filename_rule_memory(self)
         except Exception as exc:
             _debug(f"patch_watermark_filename_rule:init_ui_error:{exc}")
+        # This must run independently of optional layout enhancements above.
+        _hide_legacy_watermark_suffix_skip_switches(self)
         self._fx_wm_filename_rule_ui_ready = True
 
     def patched_collect_input_files(self, input_folder, task_type):
@@ -12807,6 +13248,7 @@ def _get_watermark_settings(app):
         "insert_page_position": str(_safe_var_get(app, "wm_insert_page_position_var", "结尾") or "结尾"),
         "insert_page_path": insert_page_path,
         "insert_page_signature": insert_page_signature,
+        "word_fallback_pdf": bool(_safe_var_get(app, "wm_word_fallback_pdf_var", False)),
     }
 
 
@@ -13075,19 +13517,9 @@ def _watermark_process_word(src, dst, settings, word_app):
         copy_guard=settings.get("copy_guard_enabled", False),
         copy_guard_strength=settings.get("copy_guard_strength", "standard"),
         english_font_name=settings.get("english_font_name", ""),
+        insert_page_pdf_bytes=settings.get("_insert_page_pdf_bytes"),
+        insert_page_position=settings.get("insert_page_position", "结尾"),
     )
-    if _watermark_insert_page_enabled(settings) and _watermark_status_kind(status) == "success":
-        insert_status = _watermark_core_insert_page_into_word(
-            word_app,
-            str(dst),
-            str(dst),
-            settings.get("_insert_page_pdf_bytes"),
-            settings.get("insert_page_position", "结尾"),
-        )
-        if _watermark_status_kind(insert_status) == "failed":
-            return insert_status
-        if _watermark_status_kind(insert_status) == "success":
-            return "SUCCESS"
     return status
 
 
@@ -13736,6 +14168,51 @@ def _run_watermark_task(app, input_value):
             word_app = _create_hidden_word_app()
         return word_app
 
+    def reset_word_app():
+        nonlocal word_app
+        if word_app is not None:
+            try:
+                word_app.Quit()
+            except Exception:
+                pass
+        word_app = None
+
+    def process_word_with_recovery(src_path, output_path):
+        status = _watermark_process_word(src_path, output_path, settings, get_word_app())
+        if _watermark_status_kind(status) == "failed":
+            reset_word_app()
+            status = _watermark_process_word(src_path, output_path, settings, get_word_app())
+        return status
+
+    def process_word_fallback_to_pdf(src_path, output_path):
+        """Use a PDF result only after both direct Word attempts fail."""
+
+        fallback_output = output_path.with_suffix(".pdf")
+        raw_fd, raw_pdf_name = tempfile.mkstemp(
+            prefix="fx_wm_word_fallback_",
+            suffix=".pdf",
+            dir=str(output_path.parent),
+        )
+        os.close(raw_fd)
+        raw_pdf = Path(raw_pdf_name)
+        try:
+            convert_status = _watermark_convert_doc_to_pdf(src_path, raw_pdf, get_word_app())
+            if str(convert_status).strip() != "SUCCESS" or not raw_pdf.exists():
+                reset_word_app()
+                convert_status = _watermark_convert_doc_to_pdf(src_path, raw_pdf, get_word_app())
+            if str(convert_status).strip() != "SUCCESS" or not raw_pdf.exists():
+                return f"ERROR:Word 转 PDF 失败: {convert_status}", fallback_output
+            pdf_settings = dict(settings)
+            status = _watermark_process_pdf(raw_pdf, fallback_output, pdf_settings)
+            return status, fallback_output
+        except Exception as exc:
+            return f"ERROR:Word 转 PDF 兜底失败: {exc}", fallback_output
+        finally:
+            try:
+                raw_pdf.unlink(missing_ok=True)
+            except Exception:
+                pass
+
     def get_ppt_app():
         nonlocal ppt_app, pythoncom_initialized
         if ppt_app is None:
@@ -13934,6 +14411,7 @@ def _run_watermark_task(app, input_value):
             output_path = target_path
             stage_dir = None
             stage_path = target_path
+            used_word_fallback = False
 
             if actual_strategy == "overwrite" and target_path.resolve() == src.resolve():
                 stage_dir = Path(tempfile.mkdtemp(prefix="fx_wm_stage_", dir=str(src.parent)))
@@ -14023,7 +14501,14 @@ def _run_watermark_task(app, input_value):
                             except Exception:
                                 pass
                     else:
-                        status = _watermark_process_word(src, stage_path, settings, get_word_app())
+                        status = process_word_with_recovery(src, stage_path)
+                        if _watermark_status_kind(status) == "failed" and settings.get("word_fallback_pdf"):
+                            fallback_status, fallback_output = process_word_fallback_to_pdf(src, output_path)
+                            if _watermark_status_kind(fallback_status) == "success":
+                                output_path = fallback_output
+                                stage_path = fallback_output
+                                used_word_fallback = True
+                            status = fallback_status
                 elif suffix in WATERMARK_PPT_EXTS:
                     raw_fd, raw_pdf_name = tempfile.mkstemp(
                         prefix="fx_wm_raw_",
@@ -14049,7 +14534,7 @@ def _run_watermark_task(app, input_value):
 
                 kind = _watermark_status_kind(status)
                 if kind == "success":
-                    if stage_dir is not None:
+                    if stage_dir is not None and not used_word_fallback:
                         _watermark_replace_original(stage_path, src)
                         output_path = src
                     if settings["delete_source"] and output_path.resolve() != src.resolve():
@@ -14503,6 +14988,7 @@ def _capture_preset_settings(app, category=None):
                 "wm_insert_page_enabled_var": bool(_safe_var_get(app, "wm_insert_page_enabled_var", False)),
                 "wm_insert_page_position_var": _safe_var_get(app, "wm_insert_page_position_var", "结尾"),
                 "wm_insert_page_path_var": _safe_var_get(app, "wm_insert_page_path_var", ""),
+                "wm_word_fallback_pdf_var": bool(_safe_var_get(app, "wm_word_fallback_pdf_var", False)),
                 "slider_size": _safe_named_widget_get(app, "slider_size", 60),
                 "slider_opacity": _safe_named_widget_get(app, "slider_opacity", 0.08),
                 "slider_angle": _safe_named_widget_get(app, "slider_angle", 45),
@@ -14671,6 +15157,7 @@ def _apply_preset_settings(app, preset, switch_task=True):
             "wm_copy_guard_enabled_var",
             "wm_adaptive_page_size_var",
             "wm_insert_page_enabled_var",
+            "wm_word_fallback_pdf_var",
         ):
             if name in settings:
                 _safe_var_set(app, name, bool(settings.get(name)))
@@ -14905,6 +15392,7 @@ def _install_watermark_last_settings_memory(app):
         "wm_copy_guard_strength_var",
         "wm_adaptive_page_size_var",
         "wm_insert_page_enabled_var",
+        "wm_word_fallback_pdf_var",
         "wm_insert_page_position_var",
         "wm_insert_page_path_var",
         "output_strategy_var",
@@ -17160,6 +17648,63 @@ def _patch_runtime_progress_reporting():
 _patch_runtime_progress_reporting()
 
 
+_FX_LEGACY_COMPLETION_NOTICE_LOCK = threading.RLock()
+
+
+def _patch_legacy_completion_notice():
+    """Suppress the embedded runtime's generic success dialog.
+
+    The runtime still emits ``完成 / 处理任务已结束！`` itself.  The outer
+    progress wrapper emits the richer task-result dialog after the runtime
+    returns, so keeping both produces two completion popups.
+    """
+
+    try:
+        original_run_process = FengxiToolboxApp.run_process
+    except Exception as exc:
+        _debug(f"legacy_completion_notice:missing:{exc}")
+        return
+    if getattr(original_run_process, "__fx_legacy_completion_notice_patch__", False):
+        return
+
+    runtime_run_process = _unwrap_runtime_run_process(original_run_process)
+    runtime_globals = getattr(runtime_run_process, "__globals__", {}) if runtime_run_process else {}
+    runtime_messagebox = runtime_globals.get("messagebox") if isinstance(runtime_globals, dict) else None
+    if runtime_messagebox is None or not callable(getattr(runtime_messagebox, "showinfo", None)):
+        _debug("legacy_completion_notice:runtime_messagebox_missing")
+        return
+
+    class _RuntimeMessageboxProxy:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def showinfo(self, title, message, *args, **kwargs):
+            if str(title) == "完成" and str(message) == "处理任务已结束！":
+                _debug("legacy_completion_notice:suppressed")
+                return "ok"
+            return self._wrapped.showinfo(title, message, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._wrapped, name)
+
+    def patched_run_process(self, input_folder, task_type):
+        with _FX_LEGACY_COMPLETION_NOTICE_LOCK:
+            previous_messagebox = runtime_globals.get("messagebox")
+            runtime_globals["messagebox"] = _RuntimeMessageboxProxy(previous_messagebox)
+            try:
+                return original_run_process(self, input_folder, task_type)
+            finally:
+                runtime_globals["messagebox"] = previous_messagebox
+
+    patched_run_process.__fx_legacy_completion_notice_patch__ = True
+    patched_run_process.__wrapped__ = original_run_process
+    FengxiToolboxApp.run_process = patched_run_process
+    _debug("legacy_completion_notice:installed")
+
+
+_patch_legacy_completion_notice()
+
+
 def _get_internal_attr(obj, name, default=None):
     try:
         return object.__getattribute__(obj, name)
@@ -17745,6 +18290,57 @@ def _patch_watermark_font_selector_ui():
 
 
 _patch_watermark_font_selector_ui()
+
+
+WATERMARK_UNIFIED_SLIDER_STYLE = {
+    "height": 14,
+    "corner_radius": 7,
+    "button_corner_radius": 7,
+    "border_width": 4,
+    "button_length": 0,
+    "fg_color": "#171717",
+    "progress_color": "#6F8C9A",
+    "button_color": "#E6EEF2",
+    "button_hover_color": "#8FA9B8",
+}
+
+
+def _apply_watermark_unified_slider_style(app):
+    """Keep watermark size, opacity, and angle sliders visually identical."""
+
+    configured = []
+    for name in ("slider_size", "slider_opacity", "slider_angle"):
+        slider = getattr(app, name, None)
+        if not isinstance(slider, customtkinter.CTkSlider):
+            continue
+        try:
+            slider.configure(**WATERMARK_UNIFIED_SLIDER_STYLE)
+            slider._fx_wm_unified_slider_style = True
+            configured.append(name)
+        except Exception as exc:
+            _debug(f"watermark_slider_style:{name}:{exc}")
+    return configured
+
+
+def _patch_watermark_unified_slider_style():
+    try:
+        original_init_watermark_ui = FengxiToolboxApp.init_watermark_ui
+    except Exception as exc:
+        _debug(f"watermark_slider_style:patch_missing:{exc}")
+        return
+    if getattr(original_init_watermark_ui, "__fx_wm_unified_slider_style_patch__", False):
+        return
+
+    def patched_init_watermark_ui(self):
+        original_init_watermark_ui(self)
+        _apply_watermark_unified_slider_style(self)
+
+    patched_init_watermark_ui.__fx_wm_unified_slider_style_patch__ = True
+    FengxiToolboxApp.init_watermark_ui = patched_init_watermark_ui
+    _debug("watermark_slider_style:installed")
+
+
+_patch_watermark_unified_slider_style()
 
 
 _patch_startup_performance()

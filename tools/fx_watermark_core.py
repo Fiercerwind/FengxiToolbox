@@ -1581,6 +1581,45 @@ def _mark_word_inserted_page(doc):
         pass
 
 
+def _insert_watermark_page_into_open_word_doc(doc, image_path, image_width, image_height, position="end"):
+    """Insert a rendered watermark page into an already-open Word document."""
+
+    if _word_has_inserted_page(doc):
+        return "SKIP:watermark page already inserted"
+
+    page_setup = doc.Sections(1).PageSetup
+    page_width = float(page_setup.PageWidth)
+    page_height = float(page_setup.PageHeight)
+    margin_left = float(page_setup.LeftMargin)
+    margin_right = float(page_setup.RightMargin)
+    margin_top = float(page_setup.TopMargin)
+    margin_bottom = float(page_setup.BottomMargin)
+    available_width = max(72.0, page_width - margin_left - margin_right)
+    available_height = max(72.0, page_height - margin_top - margin_bottom)
+    image_width = max(1.0, float(image_width))
+    image_height = max(1.0, float(image_height))
+    scale = min(available_width / image_width, available_height / image_height)
+    target_width = image_width * scale
+    target_height = image_height * scale
+
+    normalized_position = str(position or "end").strip().lower()
+    if normalized_position in {"start", "begin", "开头"}:
+        break_range = doc.Range(0, 0)
+        break_range.InsertBreak(7)
+        image_range = doc.Range(0, 0)
+    else:
+        end_position = max(0, int(doc.Content.End) - 1)
+        doc.Range(end_position, end_position).InsertBreak(7)
+        end_position = max(0, int(doc.Content.End) - 1)
+        image_range = doc.Range(end_position, end_position)
+
+    shape = doc.InlineShapes.AddPicture(str(image_path), False, True, image_range)
+    shape.Width = target_width
+    shape.Height = target_height
+    _mark_word_inserted_page(doc)
+    return "SUCCESS"
+
+
 def insert_watermark_page_into_word(word_app, src, dst, page_pdf_bytes, position="end"):
     """Insert the first page of a PDF template into a Word document."""
 
@@ -1601,6 +1640,8 @@ def insert_watermark_page_into_word(word_app, src, dst, page_pdf_bytes, position
             return "ERROR:watermark page template has no page"
         page = pdf[0]
         pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+        image_width = pixmap.width
+        image_height = pixmap.height
         image_file = tempfile.NamedTemporaryFile(prefix="fx_wm_insert_page_", suffix=".png", delete=False)
         image_path = Path(image_file.name)
         image_file.close()
@@ -1616,36 +1657,15 @@ def insert_watermark_page_into_word(word_app, src, dst, page_pdf_bytes, position
         if _word_has_inserted_page(doc):
             return "SKIP:watermark page already inserted"
 
-        page_setup = doc.Sections(1).PageSetup
-        page_width = float(page_setup.PageWidth)
-        page_height = float(page_setup.PageHeight)
-        margin_left = float(page_setup.LeftMargin)
-        margin_right = float(page_setup.RightMargin)
-        margin_top = float(page_setup.TopMargin)
-        margin_bottom = float(page_setup.BottomMargin)
-        available_width = max(72.0, page_width - margin_left - margin_right)
-        available_height = max(72.0, page_height - margin_top - margin_bottom)
-        image_width = max(1.0, float(pixmap.width))
-        image_height = max(1.0, float(pixmap.height))
-        scale = min(available_width / image_width, available_height / image_height)
-        target_width = image_width * scale
-        target_height = image_height * scale
-
-        normalized_position = str(position or "end").strip().lower()
-        if normalized_position in {"start", "begin", "开头"}:
-            break_range = doc.Range(0, 0)
-            break_range.InsertBreak(7)
-            image_range = doc.Range(0, 0)
-        else:
-            end_position = max(0, int(doc.Content.End) - 1)
-            doc.Range(end_position, end_position).InsertBreak(7)
-            end_position = max(0, int(doc.Content.End) - 1)
-            image_range = doc.Range(end_position, end_position)
-
-        shape = doc.InlineShapes.AddPicture(str(image_path), False, True, image_range)
-        shape.Width = target_width
-        shape.Height = target_height
-        _mark_word_inserted_page(doc)
+        insert_status = _insert_watermark_page_into_open_word_doc(
+            doc,
+            image_path,
+            image_width,
+            image_height,
+            position,
+        )
+        if insert_status != "SUCCESS":
+            return insert_status
 
         dst_path.parent.mkdir(parents=True, exist_ok=True)
         if _same_path(src_path, dst_path):
@@ -1696,6 +1716,8 @@ def add_watermark_to_word(
     color=None,
     copy_guard=False,
     copy_guard_strength="standard",
+    insert_page_pdf_bytes=None,
+    insert_page_position="end",
 ):
     """Apply a header watermark and optional hidden copy guard to a Word document."""
 
@@ -1779,6 +1801,38 @@ def add_watermark_to_word(
                             continue
                 if added_visible <= 0:
                     return "ERROR:no writable Word header found"
+
+            if insert_page_pdf_bytes:
+                import fitz
+
+                pdf = fitz.open("pdf", bytes(insert_page_pdf_bytes))
+                if len(pdf) <= 0:
+                    return "ERROR:watermark page template has no page"
+                page = pdf[0]
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                image_file = tempfile.NamedTemporaryFile(
+                    prefix="fx_wm_insert_page_",
+                    suffix=".png",
+                    delete=False,
+                )
+                image_path = Path(image_file.name)
+                image_file.close()
+                try:
+                    pixmap.save(str(image_path))
+                finally:
+                    pdf.close()
+                try:
+                    insert_status = _insert_watermark_page_into_open_word_doc(
+                        doc,
+                        image_path,
+                        pixmap.width,
+                        pixmap.height,
+                        insert_page_position,
+                    )
+                finally:
+                    image_path.unlink(missing_ok=True)
+                if insert_status.startswith("ERROR"):
+                    return insert_status
 
             if apply_copy_guard:
                 guard_added = _add_word_copy_guard(

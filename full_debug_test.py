@@ -939,6 +939,27 @@ def main():
     app.withdraw()
     app._fx_disable_fast_close_force_exit = True
     record("app_init", True, "current_task=" + str(getattr(app, "current_task", None)))
+    watermark_slider_style_keys = (
+        "height",
+        "corner_radius",
+        "button_corner_radius",
+        "border_width",
+        "button_length",
+        "fg_color",
+        "progress_color",
+        "button_color",
+        "button_hover_color",
+    )
+    watermark_slider_styles = {
+        name: {key: getattr(app, name).cget(key) for key in watermark_slider_style_keys}
+        for name in ("slider_size", "slider_opacity", "slider_angle")
+    }
+    record(
+        "watermark_slider_style_unified",
+        len({tuple(style.items()) for style in watermark_slider_styles.values()}) == 1
+        and all(getattr(app, name, "")._fx_wm_unified_slider_style for name in watermark_slider_styles),
+        watermark_slider_styles,
+    )
     expected_watermark_fonts = {"得意黑", "微软雅黑", "黑体", "宋体", "楷体"}
     installed_watermark_fonts = set(getattr(app, "font_list", []) or [])
     simhei_path = mod.get_font_path_by_name("黑体")
@@ -2146,6 +2167,15 @@ def main():
             "switch_parent": str(getattr(active_skip_switch, "master", "")),
             "entry_parent": str(getattr(app.wm_skip_name_entry, "master", "")),
             "entry_width": app.wm_skip_name_entry.cget("width"),
+        },
+    )
+    legacy_skip_switch = mod._find_watermark_skip_switch(getattr(app, "tab_wm", None), app=app)
+    record(
+        "watermark_filename_rule_hides_legacy_suffix_switch",
+        legacy_skip_switch is None or not legacy_skip_switch.winfo_manager(),
+        {
+            "legacy_switch": str(legacy_skip_switch),
+            "layout_manager": legacy_skip_switch.winfo_manager() if legacy_skip_switch is not None else "",
         },
     )
     active_type_skip_controls = None

@@ -78,6 +78,25 @@ def main():
     split_folder = out / "multi"
     record("pdf_split", split_folder.exists() and len(list(split_folder.glob("*.pdf"))) == 2, "ok")
 
+    page_delete_out = out / "multi_删除第2页.pdf"
+    page_delete_result = mod._delete_pdf_page_range(str(src), str(page_delete_out), 2, 2)
+    page_delete_reader = mod.PdfReader(str(page_delete_out))
+    page_delete_text = "\n".join(page.extract_text() or "" for page in page_delete_reader.pages)
+    try:
+        mod._delete_pdf_page_range(str(src), str(out / "invalid_delete.pdf"), 3, 3)
+        page_delete_invalid_rejected = False
+    except ValueError:
+        page_delete_invalid_rejected = True
+    record(
+        "pdf_delete_single_page",
+        page_delete_result["remaining_pages"] == 1
+        and len(page_delete_reader.pages) == 1
+        and "p1" in page_delete_text
+        and "p2" not in page_delete_text
+        and page_delete_invalid_rejected,
+        "ok",
+    )
+
     inp = root / "pdf_enc_in"
     out = root / "pdf_enc_out"
     inp.mkdir()
