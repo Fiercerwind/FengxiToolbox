@@ -950,15 +950,15 @@ def main():
         "button_color",
         "button_hover_color",
     )
-    watermark_slider_styles = {
-        name: {key: getattr(app, name).cget(key) for key in watermark_slider_style_keys}
-        for name in ("slider_size", "slider_opacity", "slider_angle")
-    }
     record(
-        "watermark_slider_style_unified",
-        len({tuple(style.items()) for style in watermark_slider_styles.values()}) == 1
-        and all(getattr(app, name, "")._fx_wm_unified_slider_style for name in watermark_slider_styles),
-        watermark_slider_styles,
+        "watermark_slider_size_style_matches_other_sliders",
+        all(
+            getattr(app, "slider_size").cget(key) == getattr(app, "slider_opacity").cget(key)
+            for key in watermark_slider_style_keys
+        )
+        and getattr(app, "slider_size").cget("height") == getattr(app, "slider_angle").cget("height")
+        and getattr(app, "slider_size", None)._fx_wm_unified_slider_style,
+        "size slider uses the opacity/angle style without changing their layout",
     )
     expected_watermark_fonts = {"得意黑", "微软雅黑", "黑体", "宋体", "楷体"}
     installed_watermark_fonts = set(getattr(app, "font_list", []) or [])

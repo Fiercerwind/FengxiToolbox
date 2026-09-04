@@ -3528,10 +3528,6 @@ def _tighten_watermark_tab_layout(app, tab):
                     pass
         except Exception:
             pass
-    try:
-        _apply_watermark_unified_slider_style(app)
-    except Exception:
-        pass
 
 
 def _tighten_layout(app, task_name=None):
@@ -10620,7 +10616,13 @@ def _install_watermark_word_fallback_pdf_ui(app):
         font=customtkinter.CTkFont(size=11),
     )
     try:
-        checkbox.pack(after=convert_switch, side="left", padx=(12, 0))
+        checkbox.place(
+            in_=convert_switch,
+            relx=1.0,
+            rely=0.5,
+            x=12,
+            anchor="w",
+        )
     except Exception:
         checkbox.pack(side="left", padx=(12, 0))
     app._fx_wm_word_fallback_pdf_checkbox = checkbox
@@ -12104,6 +12106,7 @@ def _get_watermark_copy_guard_strength(app):
         return raw_value
     return WATERMARK_COPY_GUARD_LABEL_TO_VALUE.get(raw_value, "standard")
 WATERMARK_WORD_EXTS = {".doc", ".docx"}
+WATERMARK_WORD_PROCESS_TIMEOUT_SECONDS = 60
 WATERMARK_PPT_EXTS = {".ppt", ".pptx"}
 WATERMARK_PDF_EXTS = {".pdf"}
 WATERMARK_SUPPORTED_EXTS = WATERMARK_PDF_EXTS | WATERMARK_WORD_EXTS | WATERMARK_PPT_EXTS
@@ -14178,16 +14181,73 @@ def _run_watermark_task(app, input_value):
         word_app = None
 
     def process_word_with_recovery(src_path, output_path):
-        status = _watermark_process_word(src_path, output_path, settings, get_word_app())
-        if _watermark_status_kind(status) == "failed":
-            reset_word_app()
-            status = _watermark_process_word(src_path, output_path, settings, get_word_app())
-        return status
+        """Run direct Word processing with failure and hang detection."""
+
+        attempt = {"status": None, "error": None, "word_app": None}
+
+        def run_attempt():
+            local_word_app = None
+            com_initialized = False
+            try:
+                pythoncom.CoInitialize()
+                com_initialized = True
+                local_word_app = _create_hidden_word_app()
+                attempt["word_app"] = local_word_app
+                attempt["status"] = _watermark_process_word(
+                    src_path,
+                    output_path,
+                    settings,
+                    local_word_app,
+                )
+            except Exception as exc:
+                attempt["error"] = exc
+            finally:
+                try:
+                    if local_word_app is not None:
+                        local_word_app.Quit()
+                except Exception:
+                    pass
+                if com_initialized:
+                    try:
+                        pythoncom.CoUninitialize()
+                    except Exception:
+                        pass
+
+        worker = threading.Thread(
+            target=run_attempt,
+            name="fx-word-watermark",
+            daemon=True,
+        )
+        worker.start()
+        worker.join(WATERMARK_WORD_PROCESS_TIMEOUT_SECONDS)
+        if worker.is_alive():
+            hung_word_app = attempt.get("word_app")
+            try:
+                if hung_word_app is not None:
+                    hung_word_app.Quit()
+            except Exception:
+                pass
+            return (
+                "ERROR:Word 处理超过 "
+                f"{WATERMARK_WORD_PROCESS_TIMEOUT_SECONDS} 秒，判定为卡死"
+            )
+        if attempt.get("error") is not None:
+            return f"ERROR:Word 处理失败: {attempt['error']}"
+        return attempt.get("status") or "ERROR:Word 处理未返回结果"
 
     def process_word_fallback_to_pdf(src_path, output_path):
         """Use a PDF result only after both direct Word attempts fail."""
 
         fallback_output = output_path.with_suffix(".pdf")
+        try:
+            if output_path.resolve() != src_path.resolve() and output_path.exists():
+                output_path.unlink()
+        except Exception as exc:
+            _watermark_log(
+                app,
+                logs,
+                f"[批量水印] 清理失败的 Word 临时输出失败: {output_path.name} | {exc}",
+            )
         raw_fd, raw_pdf_name = tempfile.mkstemp(
             prefix="fx_wm_word_fallback_",
             suffix=".pdf",
@@ -14196,10 +14256,57 @@ def _run_watermark_task(app, input_value):
         os.close(raw_fd)
         raw_pdf = Path(raw_pdf_name)
         try:
-            convert_status = _watermark_convert_doc_to_pdf(src_path, raw_pdf, get_word_app())
-            if str(convert_status).strip() != "SUCCESS" or not raw_pdf.exists():
-                reset_word_app()
-                convert_status = _watermark_convert_doc_to_pdf(src_path, raw_pdf, get_word_app())
+            convert_attempt = {"status": None, "error": None, "word_app": None}
+
+            def convert_in_worker():
+                local_word_app = None
+                com_initialized = False
+                try:
+                    pythoncom.CoInitialize()
+                    com_initialized = True
+                    local_word_app = _create_hidden_word_app()
+                    convert_attempt["word_app"] = local_word_app
+                    convert_attempt["status"] = _watermark_convert_doc_to_pdf(
+                        src_path,
+                        raw_pdf,
+                        local_word_app,
+                    )
+                except Exception as exc:
+                    convert_attempt["error"] = exc
+                finally:
+                    try:
+                        if local_word_app is not None:
+                            local_word_app.Quit()
+                    except Exception:
+                        pass
+                    if com_initialized:
+                        try:
+                            pythoncom.CoUninitialize()
+                        except Exception:
+                            pass
+
+            convert_worker = threading.Thread(
+                target=convert_in_worker,
+                name="fx-word-to-pdf-fallback",
+                daemon=True,
+            )
+            convert_worker.start()
+            convert_worker.join(WATERMARK_WORD_PROCESS_TIMEOUT_SECONDS)
+            if convert_worker.is_alive():
+                hung_word_app = convert_attempt.get("word_app")
+                try:
+                    if hung_word_app is not None:
+                        hung_word_app.Quit()
+                except Exception:
+                    pass
+                return (
+                    "ERROR:Word 转 PDF 超过 "
+                    f"{WATERMARK_WORD_PROCESS_TIMEOUT_SECONDS} 秒，判定为卡死"
+                ), fallback_output
+            if convert_attempt.get("error") is not None:
+                convert_status = f"ERROR:Word 转 PDF 失败: {convert_attempt['error']}"
+            else:
+                convert_status = convert_attempt.get("status") or "ERROR:Word 转 PDF 未返回结果"
             if str(convert_status).strip() != "SUCCESS" or not raw_pdf.exists():
                 return f"ERROR:Word 转 PDF 失败: {convert_status}", fallback_output
             pdf_settings = dict(settings)
@@ -14503,6 +14610,11 @@ def _run_watermark_task(app, input_value):
                     else:
                         status = process_word_with_recovery(src, stage_path)
                         if _watermark_status_kind(status) == "failed" and settings.get("word_fallback_pdf"):
+                            _watermark_log(
+                                app,
+                                logs,
+                                f"[批量水印] Word 直接处理失败，转 PDF 继续处理: {src.name} | {status}",
+                            )
                             fallback_status, fallback_output = process_word_fallback_to_pdf(src, output_path)
                             if _watermark_status_kind(fallback_status) == "success":
                                 output_path = fallback_output
@@ -18306,20 +18418,30 @@ WATERMARK_UNIFIED_SLIDER_STYLE = {
 
 
 def _apply_watermark_unified_slider_style(app):
-    """Keep watermark size, opacity, and angle sliders visually identical."""
+    """Match the size slider to the native opacity/angle slider style."""
 
-    configured = []
-    for name in ("slider_size", "slider_opacity", "slider_angle"):
-        slider = getattr(app, name, None)
-        if not isinstance(slider, customtkinter.CTkSlider):
-            continue
-        try:
-            slider.configure(**WATERMARK_UNIFIED_SLIDER_STYLE)
-            slider._fx_wm_unified_slider_style = True
-            configured.append(name)
-        except Exception as exc:
-            _debug(f"watermark_slider_style:{name}:{exc}")
-    return configured
+    reference = getattr(app, "slider_opacity", None)
+    target = getattr(app, "slider_size", None)
+    if not isinstance(reference, customtkinter.CTkSlider) or not isinstance(target, customtkinter.CTkSlider):
+        return []
+    style_keys = (
+        "height",
+        "corner_radius",
+        "button_corner_radius",
+        "border_width",
+        "button_length",
+        "fg_color",
+        "progress_color",
+        "button_color",
+        "button_hover_color",
+    )
+    try:
+        target.configure(**{key: reference.cget(key) for key in style_keys})
+        target._fx_wm_unified_slider_style = True
+        return ["slider_size"]
+    except Exception as exc:
+        _debug(f"watermark_slider_style:size:{exc}")
+        return []
 
 
 def _patch_watermark_unified_slider_style():
