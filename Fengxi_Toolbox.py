@@ -6332,6 +6332,140 @@ def _format_progress_eta(seconds):
     return f"{minutes:02d}:{sec:02d}"
 
 
+def _begin_watermark_eta_estimate(app, total):
+    """Start a per-run ETA model after watermark input scanning has finished."""
+
+    if app is None:
+        return
+    try:
+        total_units = max(1, int(total or 1))
+    except Exception:
+        total_units = 1
+    now = time.monotonic()
+    try:
+        app._fx_watermark_eta_state = {
+            "total": total_units,
+            "started_at": now,
+            "last_at": now,
+            "last_completed": 0,
+            "sample_seconds": [],
+        }
+    except Exception:
+        pass
+
+
+def _estimate_watermark_eta(app, completed, total):
+    """Estimate remaining batch time from global and recent aggregate throughput."""
+
+    state = getattr(app, "_fx_watermark_eta_state", None)
+    if not isinstance(state, dict):
+        return None
+    try:
+        total_units = max(1, int(total or 1))
+        completed_units = max(0, min(total_units, int(completed or 0)))
+    except Exception:
+        return None
+    if state.get("total") != total_units:
+        _begin_watermark_eta_estimate(app, total_units)
+        state = getattr(app, "_fx_watermark_eta_state", None)
+        if not isinstance(state, dict):
+            return None
+    if completed_units >= total_units:
+        return 0.0
+    if completed_units <= 0:
+        return None
+
+    now = time.monotonic()
+    previous_completed = int(state.get("last_completed") or 0)
+    if completed_units > previous_completed:
+        delta_units = completed_units - previous_completed
+        elapsed_since_last = max(0.001, now - float(state.get("last_at") or now))
+        samples = list(state.get("sample_seconds") or [])
+        # Parallel PDF completions are sampled as aggregate file throughput.
+        samples.append(elapsed_since_last / delta_units)
+        state["sample_seconds"] = samples[-12:]
+        state["last_completed"] = completed_units
+        state["last_at"] = now
+
+    elapsed = max(0.001, now - float(state.get("started_at") or now))
+    global_seconds_per_file = elapsed / completed_units
+    samples = list(state.get("sample_seconds") or [])
+    if len(samples) >= 3:
+        recent_seconds_per_file = sum(samples) / len(samples)
+        # Recent throughput adapts to document type changes; the global rate
+        # prevents a short burst of tiny files from producing wild estimates.
+        seconds_per_file = global_seconds_per_file * 0.55 + recent_seconds_per_file * 0.45
+    else:
+        seconds_per_file = global_seconds_per_file
+    return max(0.0, seconds_per_file * (total_units - completed_units))
+
+
+def _estimate_generic_progress_eta(app, fraction):
+    """Return a smoothed ETA for task paths without a dedicated tracker."""
+
+    state = getattr(app, "_fx_generic_progress_eta_state", None)
+    if not isinstance(state, dict):
+        return None
+    current_fraction = _clamp_progress_value(fraction)
+    if current_fraction <= 0.01 or current_fraction >= 0.999:
+        return 0.0 if current_fraction >= 0.999 else None
+    now = time.monotonic()
+    previous_fraction = _clamp_progress_value(state.get("last_fraction", 0.0))
+    if current_fraction > previous_fraction:
+        elapsed_since_last = max(0.001, now - float(state.get("last_at") or now))
+        samples = list(state.get("sample_seconds") or [])
+        samples.append(elapsed_since_last / (current_fraction - previous_fraction))
+        state["sample_seconds"] = samples[-12:]
+        state["last_fraction"] = current_fraction
+        state["last_at"] = now
+    elapsed = max(0.001, now - float(state.get("started_at") or now))
+    global_seconds_per_fraction = elapsed / current_fraction
+    samples = list(state.get("sample_seconds") or [])
+    if len(samples) >= 3:
+        recent_seconds_per_fraction = sum(samples) / len(samples)
+        seconds_per_fraction = global_seconds_per_fraction * 0.55 + recent_seconds_per_fraction * 0.45
+    else:
+        seconds_per_fraction = global_seconds_per_fraction
+    return max(0.0, seconds_per_fraction * (1.0 - current_fraction))
+
+
+def _update_generic_progress_eta_state(app, fraction, stage=""):
+    """Create/reset the generic ETA clock at task boundaries."""
+
+    if app is None:
+        return
+    current_fraction = _clamp_progress_value(fraction)
+    state = getattr(app, "_fx_generic_progress_eta_state", None)
+    reset_stages = {"准备中", "队列任务准备", "任务准备", ""}
+    should_reset = not isinstance(state, dict)
+    if isinstance(state, dict):
+        previous_fraction = _clamp_progress_value(state.get("last_fraction", 0.0))
+        previous_stage = str(state.get("stage") or "")
+        should_reset = (
+            current_fraction <= 0.001
+            and (
+                previous_fraction >= 0.999
+                or stage in reset_stages
+                or previous_stage != str(stage or "")
+            )
+        )
+    if should_reset and current_fraction <= 0.001:
+        now = time.monotonic()
+        state = {
+            "started_at": now,
+            "last_at": now,
+            "last_fraction": 0.0,
+            "sample_seconds": [],
+            "stage": str(stage or ""),
+        }
+        try:
+            app._fx_generic_progress_eta_state = state
+        except Exception:
+            return
+    elif isinstance(state, dict):
+        state["stage"] = str(stage or state.get("stage") or "")
+
+
 def _shorten_progress_name(value, max_chars=34):
     text = str(value or "").strip()
     if not text:
@@ -6357,6 +6491,9 @@ def _set_progress_status(
 ):
     if app is None:
         return ""
+    _update_generic_progress_eta_state(app, fraction, stage)
+    if eta_seconds is None and fraction is not None:
+        eta_seconds = _estimate_generic_progress_eta(app, fraction)
     parts = []
     if current_file:
         parts.append(f"当前：{_shorten_progress_name(current_file)}")
@@ -6371,7 +6508,11 @@ def _set_progress_status(
             pass
     if fraction is not None:
         percent = int(round(_clamp_progress_value(fraction) * 100))
-        parts.append(f"总进度：{percent}%")
+        parts.append(f"已完成：{percent}%")
+        try:
+            app._fx_last_progress_fraction = _clamp_progress_value(fraction)
+        except Exception:
+            pass
     if eta_seconds is not None:
         parts.append(f"预计剩余：{_format_progress_eta(eta_seconds)}")
     text = " | ".join(parts) if parts else PROGRESS_STATUS_IDLE_TEXT
@@ -6386,6 +6527,45 @@ def _set_progress_status(
         except Exception:
             pass
     return text
+
+
+def _finish_task_ui_state(app, *, stopped=False, message=""):
+    """Restore the controls after a worker thread leaves, including stop paths."""
+
+    if app is None:
+        return
+    try:
+        app.is_running = False
+    except Exception:
+        pass
+    try:
+        app.btn_run.configure(
+            state="normal",
+            text="🚀 立即开始处理",
+            fg_color=globals().get("COLOR_ACCENT", "#8FA9B8"),
+        )
+    except Exception:
+        pass
+    try:
+        app.btn_stop.configure(state="disabled")
+    except Exception:
+        pass
+    try:
+        _set_watermark_checkpoint_action_state(app, "normal")
+    except Exception:
+        pass
+    if stopped:
+        _set_progress_status(
+            app,
+            stage="已暂停，可断点续传",
+            fraction=getattr(app, "_fx_last_progress_fraction", None),
+        )
+        try:
+            app.log(message or "[停止] 任务已暂停，已保存断点；下次开始将从未完成文件继续。")
+        except Exception:
+            pass
+    else:
+        _set_progress_status(app, stage="已完成", fraction=1.0, eta_seconds=0.0)
 
 
 def _extract_progress_path_from_call(args, kwargs):
@@ -12107,6 +12287,7 @@ def _get_watermark_copy_guard_strength(app):
     return WATERMARK_COPY_GUARD_LABEL_TO_VALUE.get(raw_value, "standard")
 WATERMARK_WORD_EXTS = {".doc", ".docx"}
 WATERMARK_WORD_PROCESS_TIMEOUT_SECONDS = 60
+WATERMARK_WORD_PDF_RETRY_COUNT = 2
 WATERMARK_PPT_EXTS = {".ppt", ".pptx"}
 WATERMARK_PDF_EXTS = {".pdf"}
 WATERMARK_SUPPORTED_EXTS = WATERMARK_PDF_EXTS | WATERMARK_WORD_EXTS | WATERMARK_PPT_EXTS
@@ -13562,6 +13743,7 @@ def _watermark_update_progress(app, current_file="", stage="添加水印", compl
         completed=completed,
         total=total,
         fraction=progress_fraction,
+        eta_seconds=_estimate_watermark_eta(app, completed, total),
     )
 
 
@@ -14093,6 +14275,7 @@ def _run_watermark_task(app, input_value):
     result["resumed_count"] = resumed_count
     total = len(all_files)
     overall_total = total + resumed_count + len(rule_skipped_files) + len(type_skipped_files) + len(unsupported_skipped_files)
+    _begin_watermark_eta_estimate(app, overall_total)
     if total <= 0 and resumed_count <= 0 and not rule_skipped_files and not type_skipped_files and not unsupported_skipped_files:
         _watermark_log(app, logs, "[批量水印] 未找到可处理文件")
         _set_task_result_counts(result, processed=0, success=0, failed=0, skipped=1)
@@ -14235,27 +14418,11 @@ def _run_watermark_task(app, input_value):
             return f"ERROR:Word 处理失败: {attempt['error']}"
         return attempt.get("status") or "ERROR:Word 处理未返回结果"
 
-    def process_word_fallback_to_pdf(src_path, output_path):
-        """Use a PDF result only after both direct Word attempts fail."""
+    def convert_word_to_pdf_with_recovery(src_path, raw_pdf):
+        """Convert only the current Word file, with bounded independent retries."""
 
-        fallback_output = output_path.with_suffix(".pdf")
-        try:
-            if output_path.resolve() != src_path.resolve() and output_path.exists():
-                output_path.unlink()
-        except Exception as exc:
-            _watermark_log(
-                app,
-                logs,
-                f"[批量水印] 清理失败的 Word 临时输出失败: {output_path.name} | {exc}",
-            )
-        raw_fd, raw_pdf_name = tempfile.mkstemp(
-            prefix="fx_wm_word_fallback_",
-            suffix=".pdf",
-            dir=str(output_path.parent),
-        )
-        os.close(raw_fd)
-        raw_pdf = Path(raw_pdf_name)
-        try:
+        last_status = "ERROR:Word 转 PDF 未返回结果"
+        for attempt_index in range(1, WATERMARK_WORD_PDF_RETRY_COUNT + 1):
             convert_attempt = {"status": None, "error": None, "word_app": None}
 
             def convert_in_worker():
@@ -14285,9 +14452,13 @@ def _run_watermark_task(app, input_value):
                         except Exception:
                             pass
 
+            try:
+                raw_pdf.unlink(missing_ok=True)
+            except Exception:
+                pass
             convert_worker = threading.Thread(
                 target=convert_in_worker,
-                name="fx-word-to-pdf-fallback",
+                name=f"fx-word-to-pdf-retry-{attempt_index}",
                 daemon=True,
             )
             convert_worker.start()
@@ -14299,16 +14470,57 @@ def _run_watermark_task(app, input_value):
                         hung_word_app.Quit()
                 except Exception:
                     pass
-                return (
-                    "ERROR:Word 转 PDF 超过 "
+                last_status = (
+                    f"ERROR:Word 转 PDF 第 {attempt_index}/{WATERMARK_WORD_PDF_RETRY_COUNT} 次超过 "
                     f"{WATERMARK_WORD_PROCESS_TIMEOUT_SECONDS} 秒，判定为卡死"
-                ), fallback_output
-            if convert_attempt.get("error") is not None:
-                convert_status = f"ERROR:Word 转 PDF 失败: {convert_attempt['error']}"
+                )
+            elif convert_attempt.get("error") is not None:
+                last_status = f"ERROR:Word 转 PDF 第 {attempt_index} 次失败: {convert_attempt['error']}"
             else:
                 convert_status = convert_attempt.get("status") or "ERROR:Word 转 PDF 未返回结果"
+                if str(convert_status).strip() == "SUCCESS" and raw_pdf.exists() and raw_pdf.stat().st_size > 0:
+                    return "SUCCESS"
+                last_status = f"ERROR:Word 转 PDF 第 {attempt_index} 次失败: {convert_status}"
+            if attempt_index < WATERMARK_WORD_PDF_RETRY_COUNT:
+                _watermark_log(
+                    app,
+                    logs,
+                    f"[批量水印] {src_path.name} 转 PDF 失败，将重试第 {attempt_index + 1}/{WATERMARK_WORD_PDF_RETRY_COUNT} 次: {last_status}",
+                )
+        return last_status
+
+    def process_word_fallback_to_pdf(src_path, output_path):
+        """Try PDF fallback for the current Word file, then direct Word once."""
+
+        fallback_output = output_path.with_suffix(".pdf")
+        try:
+            if output_path.resolve() != src_path.resolve() and output_path.exists():
+                output_path.unlink()
+        except Exception as exc:
+            _watermark_log(
+                app,
+                logs,
+                f"[批量水印] 清理失败的 Word 临时输出失败: {output_path.name} | {exc}",
+            )
+        raw_fd, raw_pdf_name = tempfile.mkstemp(
+            prefix="fx_wm_word_fallback_",
+            suffix=".pdf",
+            dir=str(output_path.parent),
+        )
+        os.close(raw_fd)
+        raw_pdf = Path(raw_pdf_name)
+        try:
+            convert_status = convert_word_to_pdf_with_recovery(src_path, raw_pdf)
             if str(convert_status).strip() != "SUCCESS" or not raw_pdf.exists():
-                return f"ERROR:Word 转 PDF 失败: {convert_status}", fallback_output
+                direct_status = process_word_with_recovery(src_path, output_path)
+                if _watermark_status_kind(direct_status) == "success":
+                    _watermark_log(
+                        app,
+                        logs,
+                        f"[批量水印] {src_path.name} 转 PDF 重试仍失败，已改为直接 Word 加水印",
+                    )
+                    return direct_status, output_path
+                return f"ERROR:Word 转 PDF 失败，直接 Word 兜底也失败: {convert_status} | {direct_status}", fallback_output
             pdf_settings = dict(settings)
             status = _watermark_process_pdf(raw_pdf, fallback_output, pdf_settings)
             return status, fallback_output
@@ -14596,9 +14808,21 @@ def _run_watermark_task(app, input_value):
                         os.close(raw_fd)
                         raw_pdf = Path(raw_pdf_name)
                         try:
-                            convert_status = _watermark_convert_doc_to_pdf(src, raw_pdf, get_word_app())
+                            convert_status = convert_word_to_pdf_with_recovery(src, raw_pdf)
                             if str(convert_status).strip() != "SUCCESS" or not raw_pdf.exists():
-                                status = f"ERROR:Word 转 PDF 失败: {convert_status}"
+                                direct_output = target_path.with_suffix(src.suffix)
+                                direct_status = process_word_with_recovery(src, direct_output)
+                                if _watermark_status_kind(direct_status) == "success":
+                                    output_path = direct_output
+                                    stage_path = direct_output
+                                    status = direct_status
+                                    _watermark_log(
+                                        app,
+                                        logs,
+                                        f"[批量水印] {src.name} 转 PDF 重试仍失败，已改为直接 Word 加水印",
+                                    )
+                                else:
+                                    status = f"ERROR:Word 转 PDF 失败，直接 Word 兜底也失败: {convert_status} | {direct_status}"
                             else:
                                 status = _watermark_process_pdf(raw_pdf, stage_path, settings)
                         finally:
@@ -17746,6 +17970,19 @@ def _patch_runtime_progress_reporting():
             except Exception as exc:
                 _debug(f"patch_runtime_progress:finalize_result_error:{exc}")
             _fx_background_guard_end(self, guard_reason)
+            try:
+                final_stopped = bool(getattr(self, "stop_event", False))
+                _finish_task_ui_state(
+                    self,
+                    stopped=final_stopped,
+                    message=(
+                        "[停止] 批量水印已暂停，已保存断点；下次开始将从未完成文件继续。"
+                        if final_stopped and task_type == "watermark"
+                        else "[停止] 任务已暂停，已保存断点；下次开始将从未完成文件继续。"
+                    ),
+                )
+            except Exception as exc:
+                _debug(f"patch_runtime_progress:ui_finalize_error:{exc}")
 
     patched_run_process.__fx_runtime_progress_patch__ = True
     FengxiToolboxApp.run_process = patched_run_process

@@ -449,9 +449,35 @@ def main():
         "当前：scan.pdf" in latest_progress_status
         and "阶段：OCR 第 1/2 页" in latest_progress_status
         and "文件：0/2" in latest_progress_status
-        and "总进度：25%" in latest_progress_status
+        and "已完成：25%" in latest_progress_status
         and "预计剩余：" in latest_progress_status,
         latest_progress_status,
+    )
+    watermark_eta_app = type("FakeWatermarkEtaApp", (), {})()
+    mod._begin_watermark_eta_estimate(watermark_eta_app, 10)
+    watermark_eta_before = mod._estimate_watermark_eta(watermark_eta_app, 0, 10)
+    watermark_eta_after = mod._estimate_watermark_eta(watermark_eta_app, 2, 10)
+    record(
+        "watermark_eta_starts_after_first_completion",
+        watermark_eta_before is None and watermark_eta_after is not None and watermark_eta_after >= 0,
+        {"before": watermark_eta_before, "after": watermark_eta_after},
+    )
+    generic_eta_app = type("FakeGenericEtaApp", (), {})()
+    mod._set_progress_status(generic_eta_app, stage="准备中", fraction=0.0, completed=0, total=4)
+    generic_eta_before = mod._estimate_generic_progress_eta(generic_eta_app, 0.0)
+    generic_eta_status = mod._set_progress_status(
+        generic_eta_app,
+        stage="处理中",
+        fraction=0.25,
+        completed=1,
+        total=4,
+    )
+    record(
+        "generic_task_eta_status",
+        generic_eta_before is None
+        and "已完成：25%" in generic_eta_status
+        and "预计剩余：" in generic_eta_status,
+        generic_eta_status,
     )
     record(
         "progress_eta_format",
