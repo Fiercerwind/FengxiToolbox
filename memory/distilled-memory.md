@@ -104,3 +104,20 @@
   关联文件：Fengxi_Toolbox.py, tools\fx_user_prefs.py, full_debug_test.py, memory\categories\watermark-and-remove.md, memory\debug-status.md, tools\fx_watermark_core.py, agent.md
 - [zip] 摘要：ZIP smart root-only folder notice；ZIP smart mode revised layer semantics and max depth；fix ZIP preview count and move max-depth control right；ZIP depth control now supports selectable layer ranges；ZIP depth range uses two UI inputs；ZIP existing archive policy
   关联文件：Fengxi_Toolbox.py, full_debug_test.py, memory\categories\pdf-file-meta-zip.md, memory\debug-status.md, tools/fx_zip_core.py, tools/fx_user_prefs.py, memory/categories/pdf-file-meta-zip.md, memory/debug-status.md, tools\fx_zip_core.py, agent.md
+
+## 自动蒸馏 2026-09-29 00:08:18
+- 覆盖变更：第 185 到第 218 条
+- [convert] 摘要：Expand format conversion modes；Make PDF conversion rich and reorganize convert UI
+  关联文件：Fengxi_Toolbox.py, tools/fx_convert_core.py, tools/fx_convert_task.py, full_debug_test.py, memory/categories/convert-audio-image.md, memory/debug-status.md, requirements.txt, fx_toolbox.spec
+- [file_manager] 摘要：add batch hash variant copies
+  关联文件：Fengxi_Toolbox.py, full_debug_test.py, memory/categories/pdf-file-meta-zip.md
+- [pdf_file] 摘要：Improve PDF image compression quality for long scanned pages；PDF compression no-growth and profile-aware resume；PDF compression PDF24-inspired candidate optimization and clean cache metadata；PDF compression Ghostscript TeX Live backend fix；Add web-style raster PDF compression mode；Fix Smart Recursive ZIP mixed-content depth boundary；Ignore .DS_Store in Smart Recursive ZIP；Document complete Smart Recursive ZIP behavior in-app；PDF OCR新增页面角度修正；将PDF角度修正独立为PDF工具模式
+  关联文件：tools/fx_pdf_compress_core.py, full_debug_test.py, memory/categories/pdf-file-meta-zip.md, tools\fx_pdf_compress_core.py, Fengxi_Toolbox.py, memory\categories\pdf-file-meta-zip.md, memory\debug-status.md, tools/fx_zip_core.py, memory/debug-status.md, tools\fx_pdf_ocr.py, tools\fx_pdf_ocr_task.py, tools\fx_pdf_rotation.py, tools\fx_pdf_rotation_task.py, fx_toolbox.spec, memory.md
+- [repo] 摘要：修复打包计数同步路径参数
+  关联文件：package.bat, memory\categories\repo-sync-release.md
+- [runtime] 摘要：Optimize startup layout refresh；Stage startup post-show layout refresh；Improve startup perceived speed with default-tab lazy init；Avoid duplicate default-tab startup initialization；打包并启动独立PDF角度修正版；Packaged and opened batch watermark throughput optimization build；Fix output log mojibake and preserve manual scroll position；Package persistent batch watermark checkpoint build；Fix log scroll position being pulled to the bottom by new messages
+  关联文件：Fengxi_Toolbox.py, tools\fx_startup_patches.py, full_debug_test.py, memory\architecture.md, memory\debug-status.md, memory\recent-changes.md, tools/fx_startup_patches.py, memory/debug-status.md, memory/architecture.md, dist_release_ascii\fx_toolbox\fx_toolbox.exe, package.bat, memory\changes.jsonl, tools\fx_watermark_core.py, memory\categories\watermark-and-remove.md, dist_release_ascii/fx_toolbox/fx_toolbox.exe, tools/fx_watermark_checkpoint.py, memory/recent-changes.md, memory/changes.jsonl
+- [watermark] 摘要：Add first page plus one random page watermark range；Parallelize PDF-only batch watermark runs；PDF 复制干扰层改为单次写入路径；Batch watermark throughput optimization: bounded PDF queue, mixed PDF/Office split, fast copy-guard preflight, and batched UI logs；Speed up direct Word watermarking with copy guard enabled；Add persistent batch watermark checkpoint resume；Fix multiline watermark preview rendering；Prevent batch watermark from recursively processing result folders
+  关联文件：Fengxi_Toolbox.py, tools/fx_watermark_core.py, full_debug_test.py, memory/categories/watermark-and-remove.md, tools\fx_watermark_core.py, memory\categories\watermark-and-remove.md, memory/recent-changes.md, memory/changes.jsonl, tools/fx_watermark_checkpoint.py
+- [watermark-and-remove] 摘要：新增批量水印 PDF 复制干扰层；修复复制干扰层正文穿插顺序；复制干扰层支持 Word 段落边界与混合乱码
+  关联文件：Fengxi_Toolbox.py, tools\fx_watermark_core.py, full_debug_test.py, memory\categories\watermark-and-remove.md, memory\debug-status.md

@@ -4,6 +4,7 @@ import ctypes
 import dis
 import inspect
 import io
+import hashlib
 import json
 import marshal
 import importlib
@@ -709,6 +710,7 @@ FEATURE_REGISTRY = {
                 "dedup": ("forced_single", "文件去重需要全局哈希比对，已强制单线程。"),
                 "encrypt": ("forced_single", "文件加密按顺序写入，已强制单线程。"),
                 "decrypt": ("forced_single", "文件解密按顺序校验密码，已强制单线程。"),
+                "hash_variant": ("forced_single", "哈希变更副本按顺序写入，已强制单线程。"),
             },
         },
         "preview_modes": {
@@ -716,6 +718,7 @@ FEATURE_REGISTRY = {
             "dedup": "重复文件清理",
             "encrypt": "文件加密",
             "decrypt": "文件解密",
+            "hash_variant": "批量修改哈希",
         },
         "risk_flags": ("dedup_delete", "delete_source"),
     },
@@ -3903,7 +3906,7 @@ def _patch_task_routing():
             elif task_type == "pdf" and self.pdf_mode_var.get() == "merge":
                 force_single_thread = True
                 _debug("patch_task_routing:force_single_thread:pdf_merge")
-            elif task_type == "file" and self.file_mode_var.get() in {"dedup", "encrypt", "decrypt"}:
+            elif task_type == "file" and self.file_mode_var.get() in {"dedup", "encrypt", "decrypt", "hash_variant"}:
                 force_single_thread = True
                 _debug("patch_task_routing:force_single_thread:file_sensitive_mode")
         except Exception as exc:
@@ -4809,6 +4812,7 @@ def _build_file_manager_mode_layout(app):
         ("dedup", "重复文件清理"),
         ("encrypt", "文件加密"),
         ("decrypt", "文件解密"),
+        ("hash_variant", "批量修改哈希"),
     ):
         make_mode_button(mode, title)
 
@@ -4903,6 +4907,11 @@ def _build_file_manager_mode_layout(app):
 
     dedup_panel = make_detail_panel(
         "dedup", "重复文件清理", "按 MD5 内容哈希判断重复文件，保留一份并清理其余副本。建议先在测试文件夹确认规则。"
+    )
+    make_detail_panel(
+        "hash_variant",
+        "批量修改哈希",
+        "生成独立副本并写入随机文件标记，改变文件 MD5/SHA 哈希。原文件保留，结果输出到【处理完成】结果文件夹。",
     )
 
     if getattr(app, "file_crypto_password_var", None) is None:
@@ -5015,6 +5024,116 @@ def _patch_file_rename_range_task():
 
 
 _patch_file_rename_range_task()
+
+
+def _file_hash_variant_output_path(src, output_root):
+    source = Path(src)
+    candidate = Path(output_root) / f"{source.stem}_哈希变更{source.suffix}"
+    return _file_crypto_unique_output_path(candidate)
+
+
+def _file_hash_md5(path, chunk_size=1024 * 1024):
+    digest = hashlib.md5()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_hash_variant(src, dst):
+    """Copy a file and append a private random marker to change its byte hash."""
+    marker = b"\r\nFX-HASH-VARIANT-" + os.urandom(32) + b"\r\n"
+    with open(src, "rb") as source, open(dst, "wb") as target:
+        shutil.copyfileobj(source, target, length=1024 * 1024)
+        target.write(marker)
+    try:
+        shutil.copystat(src, dst)
+    except OSError:
+        pass
+    return dst
+
+
+def _run_file_hash_variant_task(app, input_value):
+    normalized, input_root, output_root = _resolve_result_output_folder(input_value)
+    files = list(app.collect_input_files(normalized, "file"))
+    if normalized and os.path.isfile(normalized):
+        files = [normalized]
+    files = [
+        str(path)
+        for path in files
+        if os.path.isfile(path) and RESULT_FOLDER_NAME not in Path(str(path)).parts
+    ]
+    result = _get_last_task_result(app) or _start_task_result(app, normalized, "file")
+    result["output_strategy_requested"] = "result_folder"
+    result["output_strategy"] = "result_folder"
+    result["output_strategy_label"] = _get_output_strategy_label("result_folder")
+    Path(output_root).mkdir(parents=True, exist_ok=True)
+    _set_task_result_output_root(result, output_root)
+    success = 0
+    failed = []
+    tracker = _get_active_progress_tracker(app)
+    for src in files:
+        if getattr(app, "stop_event", False):
+            break
+        try:
+            relative_parent = Path(os.path.relpath(os.path.dirname(src), input_root))
+            if str(relative_parent) == "." or str(relative_parent).startswith(".."):
+                relative_parent = Path()
+            item_output_root = Path(output_root) / relative_parent
+            item_output_root.mkdir(parents=True, exist_ok=True)
+            dst = _file_hash_variant_output_path(src, item_output_root)
+            old_hash = _file_hash_md5(src)
+            output = _write_hash_variant(src, dst)
+            new_hash = _file_hash_md5(output)
+            if old_hash == new_hash:
+                raise IOError("生成后的哈希未发生变化")
+            _add_task_result_output(result, output)
+            success += 1
+            app.log(f"[文件管家] 哈希已修改: {os.path.basename(src)} | {old_hash} -> {new_hash}")
+        except Exception as exc:
+            failed.append(f"{src}: {exc}")
+            app.log(f"[文件管家] 哈希修改失败: {os.path.basename(src)} | {exc}")
+        if tracker is not None:
+            tracker.set_current_item(src, "修改文件哈希")
+            tracker.complete_units(1)
+    result["failed_items"] = failed
+    _set_task_result_counts(result, processed=success + len(failed), success=success, failed=len(failed), skipped=0)
+    if getattr(app, "stop_event", False):
+        _set_task_result_finished(result, "stopped", message="哈希修改任务已停止", stopped=True)
+    elif failed:
+        _set_task_result_finished(result, "failed", message=f"完成 {success} 个，失败 {len(failed)} 个", error=f"失败 {len(failed)} 个")
+    else:
+        _set_task_result_finished(result, "success", message="文件哈希修改完成", detail=f"成功 {success} 个文件")
+    return result
+
+
+def _patch_file_hash_variant_task():
+    original_run_process = FengxiToolboxApp.run_process
+    if getattr(original_run_process, "__fx_file_hash_variant_task_patch__", False):
+        return
+
+    def patched_run_process(self, input_folder, task_type):
+        mode = str(_safe_var_get(self, "file_mode_var", "") or "").lower()
+        if task_type == "file" and mode == "hash_variant":
+            try:
+                return _run_file_hash_variant_task(self, input_folder)
+            except Exception as exc:
+                self.log(f"[文件管家] 哈希修改失败: {exc}")
+                _finalize_current_task_result(self, "failed", message=str(exc), error=str(exc))
+            finally:
+                self.reset_ui()
+            return None
+        return original_run_process(self, input_folder, task_type)
+
+    patched_run_process.__fx_file_hash_variant_task_patch__ = True
+    patched_run_process.__wrapped__ = original_run_process
+    FengxiToolboxApp.run_process = patched_run_process
+
+
+_patch_file_hash_variant_task()
 
 
 def _run_file_crypto_task(app, input_value, mode):
@@ -11019,7 +11138,7 @@ def _ensure_watermark_type_skip_controls(app, controls_parent, after_widget=None
         ).pack(side="left")
         customtkinter.CTkCheckBox(
             header_row,
-            text="\u8df3\u8fc7\u6587\u4ef6\u590d\u5236\u5230\u8f93\u51fa\u6587\u4ef6\u5939",
+            text="\u8df3\u8fc7/\u5931\u8d25\u6587\u4ef6\u590d\u5236\u5230\u8f93\u51fa\u6587\u4ef6\u5939",
             variable=app.wm_copy_skipped_var,
             height=22,
             font=customtkinter.CTkFont(size=11),
@@ -14049,6 +14168,13 @@ def _run_watermark_pdf_parallel_task_impl(
         copied_skipped, failed_copies = _copy_watermark_skipped_files(app, deferred_skipped_copy_items, input_root, output_root, actual_strategy, logs, result)
         copied_skipped_outputs.extend(copied_skipped)
         failed_items.extend(failed_copies)
+    # Preserve sources whose watermark operation failed when requested.
+    if failed_items and _get_watermark_copy_skipped_to_output(app):
+        copied_failed, failed_copies = _copy_watermark_skipped_files(
+            app, failed_items, input_root, output_root, actual_strategy, logs, result
+        )
+        copied_skipped_outputs.extend(copied_failed)
+        failed_items.extend(failed_copies)
     if unsupported_skipped_files:
         copied_skipped, failed_copies = _copy_watermark_skipped_files(app, unsupported_skipped_files, input_root, output_root, actual_strategy, logs, result)
         copied_skipped_outputs.extend(copied_skipped)
@@ -14971,6 +15097,19 @@ def _run_watermark_task(app, input_value):
                 result,
             )
             copied_skipped_outputs.extend(copied_skipped)
+            failed_items.extend(failed_copies)
+        # Preserve sources whose watermark operation failed when requested.
+        if failed_items and _get_watermark_copy_skipped_to_output(app):
+            copied_failed, failed_copies = _copy_watermark_skipped_files(
+                app,
+                failed_items,
+                input_root,
+                output_root,
+                actual_strategy,
+                logs,
+                result,
+            )
+            copied_skipped_outputs.extend(copied_failed)
             failed_items.extend(failed_copies)
         if unsupported_skipped_files:
             copied_skipped, failed_copies = _copy_watermark_skipped_files(

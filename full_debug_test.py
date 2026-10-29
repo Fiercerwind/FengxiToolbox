@@ -2010,7 +2010,7 @@ def main():
         file_manager_modes_visible_ok = (
             getattr(app, "current_task", None) == "file"
             and app.file_mode_var.get() == "encrypt"
-            and set(file_mode_buttons) == {"rename", "dedup", "encrypt", "decrypt"}
+            and set(file_mode_buttons) == {"rename", "dedup", "encrypt", "decrypt", "hash_variant"}
             and all(widget.winfo_ismapped() for widget in file_mode_buttons.values())
             and len({int(widget.winfo_x()) for widget in file_mode_buttons.values()}) == 1
             and not hasattr(app, "btn_nav_crypto")

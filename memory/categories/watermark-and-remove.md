@@ -110,6 +110,11 @@
 - 实现边界：只改 `Fengxi_Toolbox.py` 的 UI/偏好保存绑定，不改 `tools/fx_watermark_core.py` 和水印处理核心逻辑。
 - 回归：`watermark_parameters_auto_memory` 覆盖截图参数的自动写入；`last_settings_watermark_save_restore` 继续覆盖恢复。
 
+## 2026-10-29 Copy option label and failed-file preservation
+- The watermark checkbox label is `跳过/失败文件复制到输出文件夹`.
+- Batch watermark applies the copy-skipped-to-output option to every source whose watermark operation fails, including Word COM/PDF conversion failures.
+- The loader fix covers serial Word/PPT processing and parallel PDF processing, using the same output-folder layout as skipped files while retaining failed_items.
+
 ## 去水印
 - 任务类型：`remove_wm`
 - Word 去水印通过扫描页眉中的艺术字 / 图片水印处理
