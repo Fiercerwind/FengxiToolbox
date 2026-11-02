@@ -3476,15 +3476,15 @@ def _tighten_watermark_tab_layout(app, tab):
                 right_children[4].pack_configure(fill="x", padx=24, pady=(0, 2))
         except Exception:
             pass
-    for index in (8, 9, 10):
-        if index < len(right_children):
+    for slider_name in ("slider_size", "slider_opacity", "slider_angle"):
+        slider = getattr(app, slider_name, None)
+        slider_row = getattr(slider, "master", None)
+        if slider_row is not None:
             try:
-                if right_children[index] is filename_rule_controls:
-                    continue
-                right_children[index].configure(height=36)
-                right_children[index].pack_propagate(False)
-                right_children[index].pack_configure(fill="x", padx=24, pady=(0, 1))
-                slider_parts = list(right_children[index].winfo_children())
+                slider_row.configure(height=36)
+                slider_row.pack_propagate(False)
+                slider_row.pack_configure(fill="x", padx=24, pady=(0, 1))
+                slider_parts = list(slider_row.winfo_children())
                 if slider_parts:
                     try:
                         slider_parts[0].configure(height=18)
@@ -3497,12 +3497,8 @@ def _tighten_watermark_tab_layout(app, tab):
                                 pass
                     except Exception:
                         pass
-                if len(slider_parts) > 1:
-                    try:
-                        slider_parts[1].configure(height=16)
-                        slider_parts[1].pack_configure(fill="x", pady=(0, 0))
-                    except Exception:
-                        pass
+                slider.configure(height=16)
+                slider.pack_configure(fill="x", pady=(0, 0))
             except Exception:
                 pass
     if filename_rule_controls is not None:

@@ -1,5 +1,10 @@
 # 最近变更
 
+## 2026-11-02 23:59:47 | watermark
+- 摘要：Fix clipped watermark size slider by locating rows through controls
+- 文件：Fengxi_Toolbox.py, memory/categories/watermark-and-remove.md
+- 说明：Replaced positional slider-row layout with named-control parent lookup. All three rendered sliders now measure 24px high within 54px rows. Visual and value checks passed; smoke 17/17 passed.
+
 ## 2026-11-02 23:15:15 | watermark
 - 摘要：Combine watermark finishing before encryption and align parameter controls
 - 文件：Fengxi_Toolbox.py, tools/fx_watermark_core.py, tools/fx_watermark_finish.py, tools/fx_edit_password.py, tools/fx_watermark_finish_regression.py, tools/fx_edit_password_regression.py, full_debug_test.py, memory/categories/watermark-and-remove.md
