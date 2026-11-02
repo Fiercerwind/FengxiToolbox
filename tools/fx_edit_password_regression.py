@@ -114,9 +114,13 @@ def run_edit_password_tests(mod, app, root, record):
         row = app._fx_wm_edit_password_row
         siblings = row.master.pack_slaves()
         before = siblings[siblings.index(row) - 1]
-        record("watermark_edit_password_ui_position_and_mask",
-               getattr(before, "_fx_wm_filename_rule_controls", False)
-               and app.wm_edit_password_entry.cget("show") == "*")
+        rule_row = before
+        insert_row = next(child for child in siblings if getattr(child, "_fx_wm_insert_page_controls", False))
+        record("watermark_edit_password_ui_position_and_plaintext",
+               getattr(rule_row, "_fx_wm_filename_rule_controls", False)
+               and row.winfo_rootx() == rule_row.winfo_rootx() == insert_row.winfo_rootx()
+               and int(row.pack_info().get("padx", 0)) == int(rule_row.pack_info().get("padx", 0)) == int(insert_row.pack_info().get("padx", 0))
+               and not app.wm_edit_password_entry.cget("show"))
 
         import pythoncom
         pythoncom.CoInitialize()
@@ -130,6 +134,25 @@ def run_edit_password_tests(mod, app, root, record):
             doc.Close(False)
             settings = mod._get_watermark_settings(app)
             settings["force_mode"] = True
+            settings.update(insert_page_enabled=True, insert_page_path=str(template))
+            settings = mod._prepare_watermark_insert_page_settings(settings)
+            import tools.fx_watermark_core as core
+            original_open = core.open_word_document_safely
+            word_counts = {"open": 0, "save": 0}
+            class CountedDocument:
+                def __init__(self, doc):
+                    self.doc = doc
+                def __getattr__(self, name):
+                    attr = getattr(self.doc, name)
+                    if name in {"Save", "SaveAs", "SaveAs2"}:
+                        def save(*args, **kwargs):
+                            word_counts["save"] += 1
+                            return attr(*args, **kwargs)
+                        return save
+                    return attr
+            def counted_open(*args, **kwargs):
+                word_counts["open"] += 1
+                return CountedDocument(original_open(*args, **kwargs))
             for suffix in (".docx", ".doc"):
                 dst = folder / ("word_protected" + suffix)
                 source = word_src
@@ -138,7 +161,11 @@ def run_edit_password_tests(mod, app, root, record):
                     source = folder / "word_source.doc"
                     legacy.SaveAs2(str(source), FileFormat=0)
                     legacy.Close(False)
-                status = mod._watermark_process_word(source, dst, settings, word)
+                core.open_word_document_safely = counted_open
+                try:
+                    status = mod._watermark_process_word(source, dst, settings, word)
+                finally:
+                    core.open_word_document_safely = original_open
                 check = word.Documents.Open(str(dst), ReadOnly=False, AddToRecentFiles=False)
                 try:
                     read_ok = "Word edit password source" in check.Content.Text
@@ -156,6 +183,8 @@ def run_edit_password_tests(mod, app, root, record):
                            status == "SUCCESS" and read_ok and restricted and wrong_rejected and editable)
                 finally:
                     check.Close(False)
+            record("watermark_word_single_open_save_with_insert_and_password",
+                   word_counts == {"open": 2, "save": 2}, word_counts)
 
             # Exercise the real Word-to-PDF task path, including final encryption.
             mod._safe_var_set(app, "wm_skip_word_type_var", False)
@@ -190,22 +219,26 @@ def run_edit_password_tests(mod, app, root, record):
                 ppt.Quit()
             pythoncom.CoUninitialize()
 
-        original_protect = mod.protect_pdf_editing
+        original_verify = mod.verify_pdf_output
         def fail_protection(*args):
             raise OSError("simulated protection failure")
         fail_source = folder / "fail.pdf"
         pdf(fail_source)
+        fail_output = output / "fail.pdf"
+        fail_output.write_bytes(b"previous valid result must not be overwritten")
         mod._safe_var_set(app, "wm_delete_var", True)
         mod._safe_var_set(app, "wm_overwrite_var", "force")
-        mod.protect_pdf_editing = fail_protection
+        mod.verify_pdf_output = fail_protection
         try:
             app.run_process(str(fail_source), "watermark")
             failed = mod._get_last_task_result(app)
             record("watermark_edit_password_failure_keeps_source",
                    failed.get("status") == "failed" and failed.get("success_count") == 0
-                   and fail_source.exists())
+                   and fail_source.exists()
+                   and fail_output.read_bytes() == b"previous valid result must not be overwritten"
+                   and (output / "fail_处理失败原件.pdf").read_bytes() == fail_source.read_bytes())
         finally:
-            mod.protect_pdf_editing = original_protect
+            mod.verify_pdf_output = original_verify
     finally:
         mod._apply_preset_settings(app, {"category": "watermark", "settings": saved}, switch_task=False)
         app.enable_multithread.set(old_parallel)

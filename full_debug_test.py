@@ -2402,6 +2402,8 @@ def main():
 
     from tools.fx_edit_password_regression import run_edit_password_tests
     run_edit_password_tests(mod, app, root, record)
+    from tools.fx_watermark_finish_regression import run_watermark_finish_tests
+    run_watermark_finish_tests(mod, app, root, record)
 
     wm_unsupported_copy_root = root / "watermark_unsupported_copy"
     wm_unsupported_copy_root.mkdir()

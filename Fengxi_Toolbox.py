@@ -5,7 +5,7 @@ import dis
 import inspect
 import io
 import hashlib
-from tools.fx_edit_password import protect_pdf_editing, protect_word_editing
+from tools.fx_watermark_finish import publish_watermark_output, verify_pdf_output, verify_word_output
 import json
 import marshal
 import importlib
@@ -3532,6 +3532,13 @@ def _tighten_watermark_tab_layout(app, tab):
                     pass
         except Exception:
             pass
+    edit_password_controls = getattr(app, "_fx_wm_edit_password_row", None)
+    if edit_password_controls is not None:
+        try:
+            edit_password_controls.configure(height=32)
+            edit_password_controls.pack_configure(fill="x", padx=24, pady=(0, 3))
+        except Exception:
+            pass
 
 
 def _tighten_layout(app, task_name=None):
@@ -3803,6 +3810,9 @@ def add_watermark_to_pdf(
     copy_guard_strength="standard",
     adaptive_page_size=False,
     watermark_spec=None,
+    insert_page_pdf_bytes=None,
+    insert_page_position="end",
+    edit_password=None,
 ):
     return _watermark_core_add_watermark_to_pdf(
         src,
@@ -3816,6 +3826,9 @@ def add_watermark_to_pdf(
         adaptive_page_size=adaptive_page_size,
         watermark_spec=watermark_spec,
         font_path_resolver=get_font_path_by_name,
+        insert_page_pdf_bytes=insert_page_pdf_bytes,
+        insert_page_position=insert_page_position,
+        edit_password=edit_password,
     )
 
 
@@ -3836,6 +3849,8 @@ def add_watermark_to_word(
     english_font_name=None,
     insert_page_pdf_bytes=None,
     insert_page_position="end",
+    insert_page_image_cache=None,
+    edit_password=None,
 ):
     return _watermark_core_add_watermark_to_word(
         word_app,
@@ -3856,6 +3871,8 @@ def add_watermark_to_word(
         english_font_name=english_font_name,
         insert_page_pdf_bytes=insert_page_pdf_bytes,
         insert_page_position=insert_page_position,
+        insert_page_image_cache=insert_page_image_cache,
+        edit_password=edit_password,
     )
 
 
@@ -10672,6 +10689,16 @@ def _get_option_menu_style(combo_style):
     return {key: value for key, value in dict(combo_style or {}).items() if key in allowed_keys}
 
 
+def _watermark_rule_switch_style(app):
+    try:
+        style = dict(app._get_switch_style())
+    except Exception:
+        style = {}
+    style.update(width=220, height=28, switch_width=34, switch_height=18,
+                 font=customtkinter.CTkFont(size=12))
+    return style
+
+
 def _create_watermark_filename_rule_controls(app, controls_parent, option_menu_style=None, skip_switch=None):
     if controls_parent is None:
         return None
@@ -10715,7 +10742,7 @@ def _create_watermark_filename_rule_controls(app, controls_parent, option_menu_s
         text="按文件名规则跳过",
         variable=app.wm_skip_hyphen_var,
         command=switch_command,
-        **switch_style,
+        **_watermark_rule_switch_style(app),
     )
     app._fx_wm_filename_rule_skip_switch.pack(side="left", padx=(0, 16))
     app._fx_wm_filename_rule_skip_switch._fx_wm_filename_rule_skip_switch = True
@@ -10723,6 +10750,8 @@ def _create_watermark_filename_rule_controls(app, controls_parent, option_menu_s
     customtkinter.CTkLabel(
         controls_row,
         text="匹配位置",
+        width=48,
+        anchor="w",
         text_color=globals().get("COLOR_TEXT_SOFT"),
         font=customtkinter.CTkFont(size=11),
         height=30,
@@ -10835,11 +10864,13 @@ def _install_watermark_insert_page_ui(app, controls_parent, after_widget=None):
             active,
             text="添加水印页",
             variable=app.wm_insert_page_enabled_var,
-            **switch_style,
+            **_watermark_rule_switch_style(app),
         ).pack(side="left", padx=(0, 16))
         customtkinter.CTkLabel(
             active,
             text="添加位置",
+            width=48,
+            anchor="w",
             text_color=globals().get("COLOR_TEXT_SOFT"),
             font=customtkinter.CTkFont(size=11),
             height=30,
@@ -11012,6 +11043,7 @@ def _install_watermark_edit_password_ui(app, parent, after_widget):
     row = getattr(app, "_fx_wm_edit_password_row", None)
     if row is None or not row.winfo_exists():
         row = customtkinter.CTkFrame(parent, fg_color="transparent", height=32)
+        row._fx_wm_edit_password_row = True
         row.pack_propagate(False)
         try:
             switch_style = app._get_switch_style()
@@ -11020,10 +11052,10 @@ def _install_watermark_edit_password_ui(app, parent, after_widget):
         customtkinter.CTkSwitch(
             row, text="添加文件编辑密码",
             variable=app.wm_edit_password_enabled_var,
-            **switch_style,
+            **_watermark_rule_switch_style(app),
         ).pack(side="left", padx=(0, 16))
         entry = customtkinter.CTkEntry(
-            row, textvariable=app.wm_edit_password_var, show="*",
+            row, textvariable=app.wm_edit_password_var,
             placeholder_text="输入编辑密码（无需密码即可查看）",
             height=30, font=customtkinter.CTkFont(size=12),
         )
@@ -13706,7 +13738,7 @@ def _watermark_make_pdf_packet(settings):
     packet_bytes = settings.get("_pdf_packet_bytes") if isinstance(settings, dict) else None
     if packet_bytes:
         return io.BytesIO(packet_bytes)
-    return create_watermark_packet(
+    packet = create_watermark_packet(
         settings["text"],
         settings["font_name"],
         settings["font_size"],
@@ -13715,6 +13747,9 @@ def _watermark_make_pdf_packet(settings):
         color=settings.get("color", WATERMARK_DEFAULT_COLOR),
         english_font_name=settings.get("english_font_name", ""),
     )
+    if isinstance(settings, dict):
+        settings["_pdf_packet_bytes"] = packet.getvalue()
+    return packet
 
 
 WATERMARK_INSERT_PAGE_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
@@ -13760,6 +13795,7 @@ def _prepare_watermark_insert_page_settings(settings):
     prepared["insert_page_position"] = _normalize_watermark_insert_page_position(
         prepared.get("insert_page_position")
     )
+    prepared["_insert_page_image_cache"] = {}
     return prepared
 
 
@@ -13815,6 +13851,15 @@ def _insert_watermark_page_into_pdf(output_path, settings):
 
 
 def _watermark_process_pdf(src, dst, settings):
+    password = settings.get("edit_password") if settings.get("edit_password_enabled") else None
+    return publish_watermark_output(
+        dst,
+        lambda staging: _watermark_render_pdf(src, staging, settings),
+        lambda staging: verify_pdf_output(staging, password),
+    )
+
+
+def _watermark_render_pdf(src, dst, settings):
     packet = _watermark_make_pdf_packet(settings)
     watermark_spec = {
         "content": settings["text"],
@@ -13836,20 +13881,23 @@ def _watermark_process_pdf(src, dst, settings):
         copy_guard_strength=settings.get("copy_guard_strength", "standard"),
         adaptive_page_size=settings.get("adaptive_page_size", True),
         watermark_spec=watermark_spec,
+        insert_page_pdf_bytes=settings.get("_insert_page_pdf_bytes") if settings.get("insert_page_enabled") else None,
+        insert_page_position=_normalize_watermark_insert_page_position(settings.get("insert_page_position")),
+        edit_password=settings.get("edit_password") if settings.get("edit_password_enabled") else None,
     )
-    if _watermark_insert_page_enabled(settings) and _watermark_status_kind(status) == "success":
-        insert_status = _insert_watermark_page_into_pdf(dst, settings)
-        if _watermark_status_kind(insert_status) == "failed":
-            return insert_status
-    if settings.get("edit_password_enabled") and _watermark_status_kind(status) == "success":
-        try:
-            protect_pdf_editing(dst, settings["edit_password"])
-        except Exception:
-            return "ERROR:设置 PDF 编辑密码失败"
     return status
 
 
 def _watermark_process_word(src, dst, settings, word_app):
+    password = settings.get("edit_password") if settings.get("edit_password_enabled") else None
+    return publish_watermark_output(
+        dst,
+        lambda staging: _watermark_render_word(src, staging, settings, word_app),
+        lambda staging: verify_word_output(staging, password),
+    )
+
+
+def _watermark_render_word(src, dst, settings, word_app):
     status = add_watermark_to_word(
         word_app,
         str(src),
@@ -13867,12 +13915,9 @@ def _watermark_process_word(src, dst, settings, word_app):
         english_font_name=settings.get("english_font_name", ""),
         insert_page_pdf_bytes=settings.get("_insert_page_pdf_bytes"),
         insert_page_position=settings.get("insert_page_position", "结尾"),
+        insert_page_image_cache=settings.get("_insert_page_image_cache"),
+        edit_password=settings.get("edit_password") if settings.get("edit_password_enabled") else None,
     )
-    if settings.get("edit_password_enabled") and _watermark_status_kind(status) == "success":
-        try:
-            protect_word_editing(dst, settings["edit_password"], word_app, _watermark_core_open_word_document_safely)
-        except Exception:
-            return "ERROR:设置 Word 编辑密码失败"
     return status
 
 
@@ -13916,7 +13961,7 @@ def _watermark_update_progress(app, current_file="", stage="添加水印", compl
     )
 
 
-def _copy_watermark_skipped_files(app, skipped_files, input_root, output_root, actual_strategy, logs, result):
+def _copy_watermark_skipped_files(app, skipped_files, input_root, output_root, actual_strategy, logs, result, *, preserve_existing=False):
     if not skipped_files or not _get_watermark_copy_skipped_to_output(app):
         return [], []
 
@@ -13949,6 +13994,13 @@ def _copy_watermark_skipped_files(app, skipped_files, input_root, output_root, a
                 _add_task_result_output(result, str(dst))
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
+            if preserve_existing and dst.exists():
+                original_dst = dst
+                dst = original_dst.with_name(f"{original_dst.stem}_处理失败原件{original_dst.suffix}")
+                index = 2
+                while dst.exists():
+                    dst = original_dst.with_name(f"{original_dst.stem}_处理失败原件_{index}{original_dst.suffix}")
+                    index += 1
             shutil.copy2(str(src), str(dst))
             copied.append(str(dst))
             _add_task_result_output(result, str(dst))
@@ -14221,7 +14273,7 @@ def _run_watermark_pdf_parallel_task_impl(
     # Preserve sources whose watermark operation failed when requested.
     if failed_items and _get_watermark_copy_skipped_to_output(app):
         copied_failed, failed_copies = _copy_watermark_skipped_files(
-            app, failed_items, input_root, output_root, actual_strategy, logs, result
+            app, failed_items, input_root, output_root, actual_strategy, logs, result, preserve_existing=True
         )
         copied_skipped_outputs.extend(copied_failed)
         failed_items.extend(failed_copies)
@@ -14678,15 +14730,6 @@ def _run_watermark_task(app, input_value):
         """Try PDF fallback for the current Word file, then direct Word once."""
 
         fallback_output = output_path.with_suffix(".pdf")
-        try:
-            if output_path.resolve() != src_path.resolve() and output_path.exists():
-                output_path.unlink()
-        except Exception as exc:
-            _watermark_log(
-                app,
-                logs,
-                f"[批量水印] 清理失败的 Word 临时输出失败: {output_path.name} | {exc}",
-            )
         raw_fd, raw_pdf_name = tempfile.mkstemp(
             prefix="fx_wm_word_fallback_",
             suffix=".pdf",
@@ -15167,6 +15210,7 @@ def _run_watermark_task(app, input_value):
                 actual_strategy,
                 logs,
                 result,
+                preserve_existing=True,
             )
             copied_skipped_outputs.extend(copied_failed)
             failed_items.extend(failed_copies)

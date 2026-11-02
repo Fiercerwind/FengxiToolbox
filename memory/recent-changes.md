@@ -1,5 +1,10 @@
 # 最近变更
 
+## 2026-11-02 23:15:15 | watermark
+- 摘要：Combine watermark finishing before encryption and align parameter controls
+- 文件：Fengxi_Toolbox.py, tools/fx_watermark_core.py, tools/fx_watermark_finish.py, tools/fx_edit_password.py, tools/fx_watermark_finish_regression.py, tools/fx_edit_password_regression.py, full_debug_test.py, memory/categories/watermark-and-remove.md
+- 说明：Protection runs after content and page insertion; normal PDF saves once and Word opens/saves once. Verify staging before atomic output replacement; preserve old outputs and copy failed sources without clobbering. Plaintext password and aligned parameter rows. Smoke 17/17 and full regression 292/292 passed.
+
 ## 2026-11-02 22:36:23 | watermark
 - 摘要：Add optional editing passwords to batch watermark outputs
 - 文件：Fengxi_Toolbox.py, tools/fx_edit_password.py, tools/fx_edit_password_regression.py, full_debug_test.py, memory/categories/watermark-and-remove.md

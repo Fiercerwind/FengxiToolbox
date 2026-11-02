@@ -14,6 +14,7 @@ import secrets
 import tempfile
 from contextlib import nullcontext
 from pathlib import Path
+from tools.fx_watermark_finish import finish_pikepdf, finish_pypdf
 
 from pypdf import PdfReader, PdfWriter
 from reportlab.lib.pagesizes import A4
@@ -622,7 +623,7 @@ def _fast_copy_guard_preflight(src_path, check_text):
     return visible_exists, guard_exists
 
 
-def _add_interleaved_copy_guard_to_pdf(src_path, dst_path, strength, document_token):
+def _add_interleaved_copy_guard_to_pdf(src_path, dst_path, strength, document_token, **finish_options):
     """Interleave invisible blocks between existing text blocks using pikepdf."""
 
     try:
@@ -633,7 +634,8 @@ def _add_interleaved_copy_guard_to_pdf(src_path, dst_path, strength, document_to
     try:
         with pikepdf.Pdf.open(str(src_path)) as pdf:
             _inject_copy_guard_into_pikepdf(pdf, pikepdf, strength, document_token)
-            pdf.save(str(dst_path))
+            save_options = finish_pikepdf(pdf, **finish_options)
+            pdf.save(str(dst_path), **save_options)
         return "SUCCESS"
     except Exception as exc:
         return f"ERROR:copy guard interleave failed: {exc}"
@@ -649,6 +651,7 @@ def _add_watermark_and_copy_guard_to_pdf(
     adaptive_page_size=False,
     watermark_spec=None,
     font_path_resolver=None,
+    **finish_options,
 ):
     """Apply the visible overlay and copy guard in one pikepdf write."""
 
@@ -699,7 +702,8 @@ def _add_watermark_and_copy_guard_to_pdf(
             pdf.docinfo[pikepdf.Name("/Keywords")] = WATERMARK_MARKER
             pdf.docinfo[pikepdf.Name("/Creator")] = WATERMARK_CREATOR
             pdf.docinfo[pikepdf.Name(COPY_GUARD_METADATA_KEY)] = COPY_GUARD_METADATA_VALUE
-            pdf.save(str(dst_path))
+            save_options = finish_pikepdf(pdf, **finish_options)
+            pdf.save(str(dst_path), **save_options)
         return "SUCCESS"
     except Exception as exc:
         return f"ERROR:single-pass copy guard failed: {exc}"
@@ -861,10 +865,15 @@ def add_watermark_to_pdf(
     adaptive_page_size=False,
     watermark_spec=None,
     font_path_resolver=None,
+    insert_page_pdf_bytes=None,
+    insert_page_position="end",
+    edit_password=None,
 ):
     """Apply the watermark packet to a PDF and return a runtime-compatible status."""
 
     repair_path = None
+    finish_options = dict(insert_page_pdf_bytes=insert_page_pdf_bytes,
+                          insert_page_position=insert_page_position, edit_password=edit_password)
     try:
         src_path = Path(src)
         dst_path = Path(dst)
@@ -922,6 +931,7 @@ def add_watermark_to_pdf(
                 adaptive_page_size=adaptive_page_size,
                 watermark_spec=watermark_spec,
                 font_path_resolver=font_path_resolver,
+                **finish_options,
             )
             if one_pass_status == "SUCCESS":
                 if temp_path is not None:
@@ -984,6 +994,8 @@ def add_watermark_to_pdf(
             handle.close()
             writer_output_path = guard_input_path
 
+        if not apply_copy_guard:
+            finish_pypdf(writer, **finish_options)
         with open(writer_output_path, "wb") as file_obj:
             writer.write(file_obj)
 
@@ -993,6 +1005,7 @@ def add_watermark_to_pdf(
                 output_path,
                 copy_guard_strength,
                 copy_guard_token,
+                **finish_options,
             )
             if guard_status != "SUCCESS":
                 return guard_status
@@ -1718,6 +1731,8 @@ def add_watermark_to_word(
     copy_guard_strength="standard",
     insert_page_pdf_bytes=None,
     insert_page_position="end",
+    insert_page_image_cache=None,
+    edit_password=None,
 ):
     """Apply a header watermark and optional hidden copy guard to a Word document."""
 
@@ -1804,12 +1819,15 @@ def add_watermark_to_word(
 
             if insert_page_pdf_bytes:
                 import fitz
-
-                pdf = fitz.open("pdf", bytes(insert_page_pdf_bytes))
-                if len(pdf) <= 0:
-                    return "ERROR:watermark page template has no page"
-                page = pdf[0]
-                pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                cache = insert_page_image_cache if insert_page_image_cache is not None else {}
+                image_data = cache.get("image")
+                if image_data is None:
+                    with fitz.open("pdf", bytes(insert_page_pdf_bytes)) as pdf:
+                        if len(pdf) <= 0:
+                            return "ERROR:watermark page template has no page"
+                        pixmap = pdf[0].get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                        image_data = (pixmap.tobytes("png"), pixmap.width, pixmap.height)
+                    cache["image"] = image_data
                 image_file = tempfile.NamedTemporaryFile(
                     prefix="fx_wm_insert_page_",
                     suffix=".png",
@@ -1817,16 +1835,13 @@ def add_watermark_to_word(
                 )
                 image_path = Path(image_file.name)
                 image_file.close()
-                try:
-                    pixmap.save(str(image_path))
-                finally:
-                    pdf.close()
+                image_path.write_bytes(image_data[0])
                 try:
                     insert_status = _insert_watermark_page_into_open_word_doc(
                         doc,
                         image_path,
-                        pixmap.width,
-                        pixmap.height,
+                        image_data[1],
+                        image_data[2],
                         insert_page_position,
                     )
                 finally:
@@ -1850,6 +1865,12 @@ def add_watermark_to_word(
                 elif not apply_visible_watermark:
                     return "SKIP:copy guard not applicable: no writable Word paragraphs"
 
+            if edit_password is not None:
+                if not edit_password:
+                    return "ERROR:编辑密码不能为空"
+                doc.Protect(Type=3, NoReset=True, Password=edit_password)
+                if int(doc.ProtectionType) != 3:
+                    return "ERROR:Word 只读保护设置失败"
             dst_path.parent.mkdir(parents=True, exist_ok=True)
             if _same_path(src_path, dst_path):
                 doc.Save()
@@ -1863,6 +1884,8 @@ def add_watermark_to_word(
                     doc.SaveAs2(str(dst_path))
                 except Exception:
                     doc.SaveAs(str(dst_path))
+            if edit_password is not None and (int(doc.ProtectionType) != 3 or not bool(doc.Saved)):
+                return "ERROR:Word 只读保护保存验证失败"
             return "SUCCESS"
     except Exception as exc:
         if _looks_like_unreadable_word_error(exc):
