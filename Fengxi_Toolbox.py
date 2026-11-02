@@ -5,6 +5,7 @@ import dis
 import inspect
 import io
 import hashlib
+from tools.fx_edit_password import protect_pdf_editing, protect_word_editing
 import json
 import marshal
 import importlib
@@ -10974,10 +10975,13 @@ def _ensure_active_watermark_filename_rule_controls(app, right_panel=None):
             skip_switch=skip_switch,
         )
     _hide_legacy_watermark_suffix_skip_switches(app)
+    edit_password_controls = _install_watermark_edit_password_ui(
+        app, controls_parent, after_widget=active_controls
+    )
     insert_page_controls = _install_watermark_insert_page_ui(
         app,
         controls_parent,
-        after_widget=active_controls,
+        after_widget=edit_password_controls,
     )
     try:
         active_entry = getattr(active_controls, "_fx_wm_filename_rule_entry", None)
@@ -10993,11 +10997,42 @@ def _ensure_active_watermark_filename_rule_controls(app, right_panel=None):
         _ensure_watermark_type_skip_controls(
             app,
             controls_parent,
-            after_widget=insert_page_controls or active_controls,
+            after_widget=insert_page_controls or edit_password_controls,
         )
     except Exception as exc:
         _debug(f"wm_type_skip_controls_error:{exc}")
     return active_controls
+
+
+def _install_watermark_edit_password_ui(app, parent, after_widget):
+    if getattr(app, "wm_edit_password_enabled_var", None) is None:
+        app.wm_edit_password_enabled_var = tkinter.BooleanVar(value=False)
+    if getattr(app, "wm_edit_password_var", None) is None:
+        app.wm_edit_password_var = tkinter.StringVar(value="")
+    row = getattr(app, "_fx_wm_edit_password_row", None)
+    if row is None or not row.winfo_exists():
+        row = customtkinter.CTkFrame(parent, fg_color="transparent", height=32)
+        row.pack_propagate(False)
+        try:
+            switch_style = app._get_switch_style()
+        except Exception:
+            switch_style = {}
+        customtkinter.CTkSwitch(
+            row, text="添加文件编辑密码",
+            variable=app.wm_edit_password_enabled_var,
+            **switch_style,
+        ).pack(side="left", padx=(0, 16))
+        entry = customtkinter.CTkEntry(
+            row, textvariable=app.wm_edit_password_var, show="*",
+            placeholder_text="输入编辑密码（无需密码即可查看）",
+            height=30, font=customtkinter.CTkFont(size=12),
+        )
+        entry.pack(side="left", fill="x", expand=True)
+        app.wm_edit_password_entry = entry
+        app._fx_wm_edit_password_row = row
+    row.pack_forget()
+    row.pack(after=after_widget, fill="x", padx=24, pady=(0, 3))
+    return row
 
 
 def _normalize_watermark_filename_rule_mode(value):
@@ -11995,10 +12030,15 @@ def _patch_watermark_filename_rule_ui():
                 _get_option_menu_style(combo_style),
                 skip_switch=skip_switch,
             )
-            insert_page_controls = _install_watermark_insert_page_ui(
+            edit_password_controls = _install_watermark_edit_password_ui(
                 self,
                 controls_parent if controls_parent is not None else self.tab_wm,
                 after_widget=controls_row,
+            )
+            insert_page_controls = _install_watermark_insert_page_ui(
+                self,
+                controls_parent if controls_parent is not None else self.tab_wm,
+                after_widget=edit_password_controls,
             )
             _install_watermark_word_fallback_pdf_ui(self)
             _ensure_watermark_type_skip_controls(
@@ -13552,6 +13592,8 @@ def _get_watermark_settings(app):
         "insert_page_path": insert_page_path,
         "insert_page_signature": insert_page_signature,
         "word_fallback_pdf": bool(_safe_var_get(app, "wm_word_fallback_pdf_var", False)),
+        "edit_password_enabled": bool(_safe_var_get(app, "wm_edit_password_enabled_var", False)),
+        "edit_password": str(_safe_var_get(app, "wm_edit_password_var", "") or ""),
     }
 
 
@@ -13799,8 +13841,11 @@ def _watermark_process_pdf(src, dst, settings):
         insert_status = _insert_watermark_page_into_pdf(dst, settings)
         if _watermark_status_kind(insert_status) == "failed":
             return insert_status
-        if _watermark_status_kind(insert_status) == "success":
-            return "SUCCESS"
+    if settings.get("edit_password_enabled") and _watermark_status_kind(status) == "success":
+        try:
+            protect_pdf_editing(dst, settings["edit_password"])
+        except Exception:
+            return "ERROR:设置 PDF 编辑密码失败"
     return status
 
 
@@ -13823,6 +13868,11 @@ def _watermark_process_word(src, dst, settings, word_app):
         insert_page_pdf_bytes=settings.get("_insert_page_pdf_bytes"),
         insert_page_position=settings.get("insert_page_position", "结尾"),
     )
+    if settings.get("edit_password_enabled") and _watermark_status_kind(status) == "success":
+        try:
+            protect_word_editing(dst, settings["edit_password"], word_app, _watermark_core_open_word_document_safely)
+        except Exception:
+            return "ERROR:设置 Word 编辑密码失败"
     return status
 
 
@@ -14052,7 +14102,7 @@ def _run_watermark_pdf_parallel_task_impl(
             _watermark_log(app, logs, f"[批量水印] 失败: {src.name} | 输出路径准备失败: {_watermark_format_path_error(target_path.parent, exc)}")
             _watermark_update_progress(app, current_file=str(src), stage="添加水印", completed=processed_count, total=max(overall_total, 1))
             continue
-        if is_nonempty_file(target_path):
+        if not settings.get("edit_password_enabled") and is_nonempty_file(target_path):
             success_outputs.append(str(target_path))
             skipped_items.append(str(src))
             _watermark_checkpoint_mark(checkpoint, src, target_path, "skipped")
@@ -14297,6 +14347,15 @@ def _run_watermark_task(app, input_value):
             result["failed_items"] = [settings.get("insert_page_path") or "水印页文件"]
             _set_task_result_counts(result, processed=0, success=0, failed=1, skipped=0)
             _set_task_result_finished(result, "failed", message=message, detail=message, error=str(exc))
+            return result
+
+    if settings.get("edit_password_enabled"):
+        password = settings.get("edit_password", "")
+        if not password or len(password.encode("utf-8")) > 127:
+            message = "请填写文件编辑密码（最多 127 个 UTF-8 字节）"
+            _watermark_log(app, logs, f"[批量水印] {message}")
+            _set_task_result_counts(result, processed=0, success=0, failed=1, skipped=0)
+            _set_task_result_finished(result, "failed", message=message, detail=message, error=message)
             return result
 
     filename_rule = _get_watermark_filename_rule(app)
@@ -14789,7 +14848,7 @@ def _run_watermark_task(app, input_value):
                 processed_count += 1
                 _watermark_log(app, logs, f"[批量水印] 失败: {src.name} | 源文件不存在")
                 continue
-            if is_nonempty_file(target_path):
+            if not settings.get("edit_password_enabled") and is_nonempty_file(target_path):
                 success_outputs.append(str(target_path))
                 skipped_items.append(str(src))
                 _watermark_checkpoint_mark(checkpoint, src, target_path, "skipped")
@@ -14906,7 +14965,7 @@ def _run_watermark_task(app, input_value):
                 same_file_output = output_path.resolve() == src.resolve()
             except Exception:
                 same_file_output = False
-            if not same_file_output and is_nonempty_file(output_path):
+            if not settings.get("edit_password_enabled") and not same_file_output and is_nonempty_file(output_path):
                 success_outputs.append(str(output_path))
                 skipped_items.append(str(src))
                 _watermark_checkpoint_mark(checkpoint, src, output_path, "skipped")
@@ -15450,6 +15509,8 @@ def _capture_preset_settings(app, category=None):
                 "wm_skip_name_position_var": _safe_var_get(app, "wm_skip_name_position_var", "结尾"),
                 "wm_skip_name_text_var": _safe_var_get(app, "wm_skip_name_text_var", "-"),
                 "wm_copy_skipped_var": bool(_safe_var_get(app, "wm_copy_skipped_var", False)),
+                "wm_edit_password_enabled_var": bool(_safe_var_get(app, "wm_edit_password_enabled_var", False)),
+                "wm_edit_password_var": _safe_var_get(app, "wm_edit_password_var", ""),
                 "wm_skip_pdf_type_var": bool(_safe_var_get(app, "wm_skip_pdf_type_var", False)),
                 "wm_skip_word_type_var": bool(_safe_var_get(app, "wm_skip_word_type_var", False)),
                 "wm_skip_ppt_type_var": bool(_safe_var_get(app, "wm_skip_ppt_type_var", False)),
@@ -15615,6 +15676,7 @@ def _apply_preset_settings(app, preset, switch_task=True):
             "wm_copy_guard_strength_var",
             "wm_insert_page_position_var",
             "wm_insert_page_path_var",
+            "wm_edit_password_var",
         ):
             if name in settings:
                 _safe_var_set(app, name, settings.get(name))
@@ -15633,6 +15695,7 @@ def _apply_preset_settings(app, preset, switch_task=True):
             "wm_adaptive_page_size_var",
             "wm_insert_page_enabled_var",
             "wm_word_fallback_pdf_var",
+            "wm_edit_password_enabled_var",
         ):
             if name in settings:
                 _safe_var_set(app, name, bool(settings.get(name)))
@@ -15859,6 +15922,8 @@ def _install_watermark_last_settings_memory(app):
         "wm_skip_name_position_var",
         "wm_skip_name_text_var",
         "wm_copy_skipped_var",
+        "wm_edit_password_enabled_var",
+        "wm_edit_password_var",
         "wm_skip_pdf_type_var",
         "wm_skip_word_type_var",
         "wm_skip_ppt_type_var",

@@ -1,5 +1,10 @@
 # 最近变更
 
+## 2026-11-02 22:36:23 | watermark
+- 摘要：Add optional editing passwords to batch watermark outputs
+- 文件：Fengxi_Toolbox.py, tools/fx_edit_password.py, tools/fx_edit_password_regression.py, full_debug_test.py, memory/categories/watermark-and-remove.md
+- 说明：Added password row beneath filename skip controls; PDF owner-password encryption with password-free viewing; Word read-only protection; skip preservation and password-aware output reuse. Smoke 17/17 and full debug 286/286 passed.
+
 ## 2026-10-29 15:21:08 | watermark
 - 摘要：Rename watermark copy option to include failed files
 - 文件：Fengxi_Toolbox.py, memory/categories/watermark-and-remove.md

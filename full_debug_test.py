@@ -2153,7 +2153,7 @@ def main():
                 pass
         return texts
 
-    copy_option_marker = "\u8df3\u8fc7\u6587\u4ef6\u590d\u5236\u5230\u8f93\u51fa\u6587\u4ef6\u5939"
+    copy_option_marker = "\u8df3\u8fc7/\u5931\u8d25\u6587\u4ef6\u590d\u5236\u5230\u8f93\u51fa\u6587\u4ef6\u5939"
     inline_skip_switch = getattr(app, "_fx_wm_filename_rule_skip_switch", None)
     record(
         "watermark_filename_rule_single_row_layout",
@@ -2399,6 +2399,9 @@ def main():
             "outputs": [str(path) for path in wm_watermarked_outputs],
         },
     )
+
+    from tools.fx_edit_password_regression import run_edit_password_tests
+    run_edit_password_tests(mod, app, root, record)
 
     wm_unsupported_copy_root = root / "watermark_unsupported_copy"
     wm_unsupported_copy_root.mkdir()
