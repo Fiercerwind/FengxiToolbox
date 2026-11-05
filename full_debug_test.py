@@ -2366,6 +2366,7 @@ def main():
     wm_skip_pdf = wm_skip_copy_root / "FX_skip.pdf"
     make_pdf(wm_keep_pdf, ["normal watermark target"])
     make_pdf(wm_skip_pdf, ["skip copy target"])
+    os.utime(wm_skip_pdf, (946684800, 946684800))
     mod._safe_named_widget_set(app, "wm_text", "SKIP COPY WATERMARK")
     mod._safe_var_set(app, "output_strategy_var", mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["result_folder"])
     mod._safe_var_set(app, "wm_delete_var", False)
@@ -2392,6 +2393,7 @@ def main():
         and wm_skip_copy_result.get("skipped_count") == 1
         and wm_skip_copied.exists()
         and wm_skip_copied.read_bytes() == wm_skip_pdf.read_bytes()
+        and wm_skip_copied.stat().st_mtime > wm_skip_pdf.stat().st_mtime
         and any(path.exists() and "normal" in path.name for path in wm_watermarked_outputs),
         {
             "result": wm_skip_copy_result,

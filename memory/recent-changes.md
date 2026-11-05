@@ -1,5 +1,10 @@
 # 最近变更
 
+## 2026-11-05 23:10:21 | watermark
+- 摘要：Use fresh timestamps for copied skipped and failed watermark files
+- 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/categories/watermark-and-remove.md, memory/recent-changes.md
+- 说明：Changed watermark skip/failure source-copy paths from copy2 to copyfile so copied outputs receive current filesystem times without extra scans or timestamp writes. Added regression with a 2000 source mtime. full_debug_test.py: 292/292 passed.
+
 ## 2026-11-02 23:59:47 | watermark
 - 摘要：Fix clipped watermark size slider by locating rows through controls
 - 文件：Fengxi_Toolbox.py, memory/categories/watermark-and-remove.md

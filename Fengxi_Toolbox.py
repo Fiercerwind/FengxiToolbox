@@ -13997,7 +13997,7 @@ def _copy_watermark_skipped_files(app, skipped_files, input_root, output_root, a
                 while dst.exists():
                     dst = original_dst.with_name(f"{original_dst.stem}_处理失败原件_{index}{original_dst.suffix}")
                     index += 1
-            shutil.copy2(str(src), str(dst))
+            shutil.copyfile(str(src), str(dst))
             copied.append(str(dst))
             _add_task_result_output(result, str(dst))
             _watermark_log(app, logs, f"[批量水印] 已复制跳过文件: {src.name} -> {dst}")
@@ -14176,7 +14176,7 @@ def _run_watermark_pdf_parallel_task_impl(
         if kind == "skipped" and _watermark_should_preserve_original(status) and output_path.resolve() != src.resolve():
             try:
                 output_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(src), str(output_path))
+                shutil.copyfile(str(src), str(output_path))
                 item["copied_output"] = str(output_path)
             except Exception as exc:
                 item["kind"] = "failed"
@@ -14784,7 +14784,7 @@ def _run_watermark_task(app, input_value):
         if kind == "skipped" and _watermark_should_preserve_original(status) and output_path.resolve() != src.resolve():
             try:
                 output_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(src), str(output_path))
+                shutil.copyfile(str(src), str(output_path))
                 item["copied_output"] = str(output_path)
             except Exception as exc:
                 item["kind"] = "failed"
@@ -15110,7 +15110,7 @@ def _run_watermark_task(app, input_value):
                     if _watermark_should_preserve_original(status) and not same_file_output:
                         try:
                             output_path.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(str(src), str(output_path))
+                            shutil.copyfile(str(src), str(output_path))
                             copied_skipped_outputs.append(str(output_path))
                             _add_task_result_output(result, str(output_path))
                             _watermark_log(app, logs, f"[批量水印] 受保护文件无法加水印，已保留原文件: {src.name} -> {output_path}")
