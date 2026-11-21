@@ -2703,8 +2703,10 @@ def main():
     )
     fake_legacy_repair_docs = FakeRepairDocuments()
     fake_legacy_repair_word = type("FakeLegacyRepairWord", (), {"Documents": fake_legacy_repair_docs})()
+    legacy_doc_fixture = root / "legacy_doc_probe.doc"
+    legacy_doc_fixture.write_bytes(b"{\\rtf1 legacy Word fixture}")
     legacy_repair_doc = wm_core_module.open_word_document_safely(
-        fake_legacy_repair_word, root / "legacy_repair_probe.doc"
+        fake_legacy_repair_word, legacy_doc_fixture
     )
     record(
         "word_legacy_doc_uses_open_and_repair_first",
@@ -2714,6 +2716,40 @@ def main():
         and bool(fake_legacy_repair_docs.calls[0][2])
         and bool(fake_legacy_repair_docs.calls[0][12]),
         [len(args) for args in fake_legacy_repair_docs.calls],
+    )
+
+    malformed_legacy_doc = root / "malformed_legacy_probe.doc"
+    malformed_legacy_doc.write_bytes(b"USBC\xc0\xc8\x98\x06" + b"damaged source")
+    malformed_doc_calls = []
+
+    class FakeMalformedLegacyDocuments:
+        def Open(self, *args):
+            malformed_doc_calls.append(args)
+            raise AssertionError("invalid legacy DOC must not reach Word COM")
+
+    try:
+        wm_core_module.open_word_document_safely(
+            type("FakeMalformedLegacyWord", (), {"Documents": FakeMalformedLegacyDocuments()})(),
+            malformed_legacy_doc,
+        )
+        malformed_doc_rejected = False
+    except ValueError as exc:
+        malformed_doc_rejected = "damaged word source" in str(exc).lower()
+    malformed_conversion = mod._convert_doc_to_pdf_safely(
+        type("FakeMalformedLegacyWord", (), {"Documents": FakeMalformedLegacyDocuments()})(),
+        malformed_legacy_doc,
+        root / "malformed_legacy_probe.pdf",
+    )
+    record(
+        "word_malformed_legacy_doc_is_rejected_before_com",
+        malformed_doc_rejected
+        and not malformed_doc_calls
+        and malformed_conversion == "SKIP:damaged word source",
+        {
+            "rejected": malformed_doc_rejected,
+            "com_calls": len(malformed_doc_calls),
+            "conversion": malformed_conversion,
+        },
     )
 
     recovered_text_doc = object()
@@ -2732,7 +2768,7 @@ def main():
     fake_text_recovery_word = type("FakeTextRecoveryWord", (), {"Documents": fake_text_recovery_docs})()
     try:
         text_recovery_doc = wm_core_module.open_word_document_safely(
-            fake_text_recovery_word, root / "text_recovery_probe.doc"
+            fake_text_recovery_word, legacy_doc_fixture
         )
     except Exception:
         text_recovery_doc = None
@@ -2748,7 +2784,7 @@ def main():
     forced_text_recovery_word = type("FakeForcedTextRecoveryWord", (), {"Documents": forced_text_recovery_docs})()
     forced_text_doc = wm_core_module.open_word_document_safely(
         forced_text_recovery_word,
-        root / "text_recovery_only_probe.doc",
+        legacy_doc_fixture,
         legacy_recovery_mode="text",
     )
     record(
@@ -2785,7 +2821,7 @@ def main():
     mod._FX_RUNTIME_CONVERT_DOC_TO_PDF = lambda *_args: (_ for _ in ()).throw(AssertionError("legacy DOC must use repair export"))
     try:
         legacy_pdf_status = mod._convert_doc_to_pdf_safely(
-            fake_legacy_export_word, root / "legacy_source.doc", legacy_pdf
+            fake_legacy_export_word, legacy_doc_fixture, legacy_pdf
         )
     finally:
         mod._FX_RUNTIME_CONVERT_DOC_TO_PDF = original_legacy_runtime_converter
@@ -2887,21 +2923,27 @@ def main():
     wm_retry_source = wm_retry_root / "retry.doc"
     wm_retry_source.write_bytes(b"simulated recoverable legacy Word source")
     retry_modes = []
+    direct_retry_modes = []
     original_retry_converter = mod._watermark_convert_doc_to_pdf
     original_retry_pdf_processor = mod._watermark_process_pdf
+    original_retry_word_processor = mod._watermark_process_word
     original_retry_create_word = mod._create_hidden_word_app
     original_retry_pid = mod._get_word_app_process_id
     original_retry_close_word = mod._close_word_app_instance
 
     def retry_doc_conversion(_src, raw_pdf, _word_app, *, legacy_doc_recovery_mode="auto"):
         retry_modes.append(legacy_doc_recovery_mode)
-        if legacy_doc_recovery_mode == "text":
-            Path(raw_pdf).write_bytes(b"recovered PDF")
-            return "SUCCESS"
         return "ERROR:simulated repair-open failure"
+
+    def retry_direct_word(
+        _src, _dst, _settings, _word_app, *, batch_word_task=False, legacy_doc_recovery_mode="auto"
+    ):
+        direct_retry_modes.append(legacy_doc_recovery_mode)
+        return "SUCCESS" if legacy_doc_recovery_mode == "text" else "ERROR:expected text recovery"
 
     mod._watermark_convert_doc_to_pdf = retry_doc_conversion
     mod._watermark_process_pdf = lambda *_args, **_kwargs: "SUCCESS"
+    mod._watermark_process_word = retry_direct_word
     mod._create_hidden_word_app = lambda: type("FakeRetryWord", (), {"Quit": lambda self: None})()
     mod._get_word_app_process_id = lambda _word: 7654
     mod._close_word_app_instance = lambda *_args: True
@@ -2922,13 +2964,16 @@ def main():
     finally:
         mod._watermark_convert_doc_to_pdf = original_retry_converter
         mod._watermark_process_pdf = original_retry_pdf_processor
+        mod._watermark_process_word = original_retry_word_processor
         mod._create_hidden_word_app = original_retry_create_word
         mod._get_word_app_process_id = original_retry_pid
         mod._close_word_app_instance = original_retry_close_word
     record(
-        "watermark_legacy_doc_pdf_retry_switches_to_text_recovery",
-        retry_modes == ["auto", "text"] and retry_result.get("success_count") == 1,
-        {"modes": retry_modes, "result": retry_result},
+        "watermark_legacy_doc_uses_one_pdf_attempt_then_text_recovery_directly",
+        retry_modes == ["auto"]
+        and direct_retry_modes == ["text"]
+        and retry_result.get("success_count") == 1,
+        {"pdf_modes": retry_modes, "direct_modes": direct_retry_modes, "result": retry_result},
     )
 
     word_release_events = []

@@ -195,6 +195,7 @@ from tools.fx_watermark_core import (
     add_watermark_to_pdf as _watermark_core_add_watermark_to_pdf,
     add_watermark_to_word as _watermark_core_add_watermark_to_word,
     create_watermark_packet as _watermark_core_create_watermark_packet,
+    inspect_legacy_doc_container as _watermark_core_inspect_legacy_doc_container,
     insert_watermark_page_into_word as _watermark_core_insert_page_into_word,
     normalize_watermark_page_range as _watermark_core_normalize_page_range,
     open_word_document_safely as _watermark_core_open_word_document_safely,
@@ -5817,6 +5818,10 @@ _FX_RUNTIME_CONVERT_PPT_TO_PDF = convert_ppt_to_pdf
 
 def _convert_doc_to_pdf_safely(word_app, src, dst, *, legacy_doc_recovery_mode="auto"):
     if Path(src).suffix.lower() == ".doc":
+        try:
+            _watermark_core_inspect_legacy_doc_container(src)
+        except Exception:
+            return "SKIP:damaged word source"
         return _export_word_docx_to_pdf_safely(
             src,
             dst,
@@ -14778,8 +14783,18 @@ def _run_watermark_task(app, input_value):
     def convert_word_to_pdf_with_recovery(src_path, raw_pdf):
         """Convert only the current Word file, with bounded independent retries."""
 
+        if Path(src_path).suffix.lower() == ".doc":
+            try:
+                _watermark_core_inspect_legacy_doc_container(src_path)
+            except Exception:
+                return "SKIP:damaged word source"
         last_status = "ERROR:Word 转 PDF 未返回结果"
-        for attempt_index in range(1, WATERMARK_WORD_PDF_RETRY_COUNT + 1):
+        retry_count = (
+            1
+            if Path(src_path).suffix.lower() == ".doc"
+            else WATERMARK_WORD_PDF_RETRY_COUNT
+        )
+        for attempt_index in range(1, retry_count + 1):
             legacy_doc_recovery_mode = (
                 "text"
                 if Path(src_path).suffix.lower() == ".doc" and attempt_index > 1
@@ -14846,10 +14861,12 @@ def _run_watermark_task(app, input_value):
                 last_status = f"ERROR:Word 转 PDF 第 {attempt_index} 次失败: {convert_attempt['error']}"
             else:
                 convert_status = convert_attempt.get("status") or "ERROR:Word 转 PDF 未返回结果"
+                if _watermark_status_kind(convert_status) == "skipped":
+                    return convert_status
                 if str(convert_status).strip() == "SUCCESS" and raw_pdf.exists() and raw_pdf.stat().st_size > 0:
                     return "SUCCESS"
                 last_status = f"ERROR:Word 转 PDF 第 {attempt_index} 次失败: {convert_status}"
-            if attempt_index < WATERMARK_WORD_PDF_RETRY_COUNT:
+            if attempt_index < retry_count:
                 next_recovery_note = (
                     "；下一次将优先使用 Word 文本恢复转换器"
                     if Path(src_path).suffix.lower() == ".doc"
@@ -14858,7 +14875,7 @@ def _run_watermark_task(app, input_value):
                 _watermark_log(
                     app,
                     logs,
-                    f"[批量水印] {src_path.name} 转 PDF 失败，将重试第 {attempt_index + 1}/{WATERMARK_WORD_PDF_RETRY_COUNT} 次{next_recovery_note}: {last_status}",
+                    f"[批量水印] {src_path.name} 转 PDF 失败，将重试第 {attempt_index + 1}/{retry_count} 次{next_recovery_note}: {last_status}",
                 )
         return last_status
 
@@ -14875,6 +14892,8 @@ def _run_watermark_task(app, input_value):
         raw_pdf = Path(raw_pdf_name)
         try:
             convert_status = convert_word_to_pdf_with_recovery(src_path, raw_pdf)
+            if _watermark_status_kind(convert_status) == "skipped":
+                return convert_status, fallback_output
             if str(convert_status).strip() != "SUCCESS" or not raw_pdf.exists():
                 recovery_mode = "text" if Path(src_path).suffix.lower() == ".doc" else "auto"
                 direct_status = process_word_with_recovery(
@@ -14887,6 +14906,8 @@ def _run_watermark_task(app, input_value):
                         f"[批量水印] {src_path.name} 转 PDF 重试仍失败，已改为直接 Word 加水印",
                     )
                     return direct_status, output_path
+                if _watermark_status_kind(direct_status) == "skipped":
+                    return direct_status, fallback_output
                 return f"ERROR:Word 转 PDF 失败，直接 Word 兜底也失败: {convert_status} | {direct_status}", fallback_output
             pdf_settings = dict(settings)
             status = _watermark_process_pdf(raw_pdf, fallback_output, pdf_settings)
@@ -15176,9 +15197,16 @@ def _run_watermark_task(app, input_value):
                         raw_pdf = Path(raw_pdf_name)
                         try:
                             convert_status = convert_word_to_pdf_with_recovery(src, raw_pdf)
-                            if str(convert_status).strip() != "SUCCESS" or not raw_pdf.exists():
+                            if _watermark_status_kind(convert_status) == "skipped":
+                                status = convert_status
+                            elif str(convert_status).strip() != "SUCCESS" or not raw_pdf.exists():
                                 direct_output = target_path.with_suffix(src.suffix)
-                                direct_status = process_word_with_recovery(src, direct_output)
+                                recovery_mode = "text" if suffix == ".doc" else "auto"
+                                direct_status = process_word_with_recovery(
+                                    src,
+                                    direct_output,
+                                    legacy_doc_recovery_mode=recovery_mode,
+                                )
                                 if _watermark_status_kind(direct_status) == "success":
                                     output_path = direct_output
                                     stage_path = direct_output
@@ -15186,7 +15214,7 @@ def _run_watermark_task(app, input_value):
                                     _watermark_log(
                                         app,
                                         logs,
-                                        f"[批量水印] {src.name} 转 PDF 重试仍失败，已改为直接 Word 加水印",
+                                        f"[批量水印] {src.name} 转 PDF 失败，已切换到{'文本恢复（忽略复杂嵌入）' if suffix == '.doc' else '直接 Word'}加水印",
                                     )
                                 else:
                                     status = f"ERROR:Word 转 PDF 失败，直接 Word 兜底也失败: {convert_status} | {direct_status}"

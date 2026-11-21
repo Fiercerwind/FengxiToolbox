@@ -1,5 +1,10 @@
 # 最近变更
 
+## 2026-11-21 旧 DOC 轻量兜底与坏容器预检 | watermark
+- 文件：`Fengxi_Toolbox.py`, `tools/fx_watermark_core.py`, `full_debug_test.py`, `memory/categories/watermark-and-remove.md`
+- 说明：旧 `.doc` 常规转 PDF 限为一次 60 秒尝试；失败后直接以 Word 文本恢复模式加水印文字/末尾水印页，再限时 60 秒，失败即复制源文件，不再走第三次重试。预检非法 OLE/缺少 WordDocument 流的容器，避免启动 Word 卡住。archive 中两份 nachos 文件结构无效，另外五份有效 DOC 含 24–43 个嵌入对象；仅检查结构，没有更改原件。
+- 验证：`python -m py_compile ...`、`python smoke_test.py` 17/17、`python full_debug_test.py` 301/301。
+
 ## 2026-11-21 20:20:03 | watermark
 - 摘要：Use Word Text Recovery Converter on legacy DOC retries
 - 文件：Fengxi_Toolbox.py, tools/fx_watermark_core.py, full_debug_test.py, memory/categories/watermark-and-remove.md

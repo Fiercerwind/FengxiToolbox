@@ -12,6 +12,7 @@ import os
 import random
 import secrets
 import tempfile
+import zipfile
 from contextlib import nullcontext
 from pathlib import Path
 from tools.fx_watermark_finish import finish_pikepdf, finish_pypdf
@@ -67,6 +68,7 @@ def _looks_like_unreadable_word_error(exc):
         "corrupt",
         "-2146823137",
         "-2146822496",
+        "damaged word source",
     ]
     if any(marker in text for marker in markers):
         return True
@@ -1550,6 +1552,42 @@ def _get_word_page_count(doc):
 
 
 WORD_TEXT_RECOVERY_OPEN_FORMAT = 30
+LEGACY_DOC_COMPOUND_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
+def inspect_legacy_doc_container(src_path):
+    """Validate a legacy Word container and count embedded OLE objects."""
+
+    path = Path(src_path)
+    with path.open("rb") as source_file:
+        header = source_file.read(4096)
+    if header.startswith(LEGACY_DOC_COMPOUND_SIGNATURE):
+        try:
+            import olefile
+
+            with olefile.OleFileIO(str(path)) as package:
+                if not package.exists("WordDocument"):
+                    raise ValueError("missing WordDocument stream")
+                return len(
+                    {
+                        parts[1]
+                        for parts in package.listdir()
+                        if len(parts) > 2 and parts[0].lower() == "objectpool"
+                    }
+                )
+        except Exception as exc:
+            raise ValueError(f"damaged word source: invalid OLE container ({exc})") from exc
+
+    if zipfile.is_zipfile(path):
+        return 0
+    text_header = header.lstrip(b"\xef\xbb\xbf\xff\xfe\xfe\xff\x00 \t\r\n").lower()
+    if text_header.startswith((b"{\\rtf", b"<html", b"<!doctype html", b"<?xml")):
+        return 0
+    if header and header.count(b"\x00") <= len(header) // 100 and sum(
+        byte < 32 and byte not in (9, 10, 13) for byte in header
+    ) <= len(header) // 50:
+        return 0
+    raise ValueError("damaged word source: unsupported or invalid legacy Word container")
 
 
 def open_word_document_safely(
@@ -1558,6 +1596,8 @@ def open_word_document_safely(
     """Open a Word document with repair fallbacks for damaged files."""
 
     src_value = str(Path(src_path).resolve())
+    if Path(src_value).suffix.lower() == ".doc":
+        inspect_legacy_doc_container(src_value)
     repair_open = lambda: word_app.Documents.Open(
         src_value, False, bool(legacy_read_only), False, "", "", False, "", "", 0, 0, False, True
     )
