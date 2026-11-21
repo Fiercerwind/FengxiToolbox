@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import tempfile
 import time
 import zipfile
@@ -2683,7 +2684,7 @@ def main():
 
         def Open(self, *args):
             self.calls.append(args)
-            if len(args) >= 14 and bool(args[13]):
+            if len(args) >= 13 and bool(args[12]):
                 return self.doc
             raise RuntimeError("open failed")
 
@@ -2696,9 +2697,288 @@ def main():
         and len(fake_repair_docs.calls) >= 3
         and len(fake_repair_docs.calls[0]) == 4
         and len(fake_repair_docs.calls[1]) == 1
-        and len(fake_repair_docs.calls[2]) >= 14
-        and bool(fake_repair_docs.calls[2][13]),
+        and len(fake_repair_docs.calls[2]) >= 13
+        and bool(fake_repair_docs.calls[2][12]),
         [len(args) for args in fake_repair_docs.calls],
+    )
+    fake_legacy_repair_docs = FakeRepairDocuments()
+    fake_legacy_repair_word = type("FakeLegacyRepairWord", (), {"Documents": fake_legacy_repair_docs})()
+    legacy_repair_doc = wm_core_module.open_word_document_safely(
+        fake_legacy_repair_word, root / "legacy_repair_probe.doc"
+    )
+    record(
+        "word_legacy_doc_uses_open_and_repair_first",
+        legacy_repair_doc is fake_legacy_repair_docs.doc
+        and len(fake_legacy_repair_docs.calls) == 1
+        and len(fake_legacy_repair_docs.calls[0]) == 13
+        and bool(fake_legacy_repair_docs.calls[0][2])
+        and bool(fake_legacy_repair_docs.calls[0][12]),
+        [len(args) for args in fake_legacy_repair_docs.calls],
+    )
+
+    recovered_text_doc = object()
+
+    class FakeTextRecoveryDocuments:
+        def __init__(self):
+            self.calls = []
+
+        def Open(self, *args):
+            self.calls.append(args)
+            if len(args) > 9 and args[9] == 30:
+                return recovered_text_doc
+            raise RuntimeError("Word cannot read document; try Text Recovery Converter")
+
+    fake_text_recovery_docs = FakeTextRecoveryDocuments()
+    fake_text_recovery_word = type("FakeTextRecoveryWord", (), {"Documents": fake_text_recovery_docs})()
+    try:
+        text_recovery_doc = wm_core_module.open_word_document_safely(
+            fake_text_recovery_word, root / "text_recovery_probe.doc"
+        )
+    except Exception:
+        text_recovery_doc = None
+    record(
+        "word_legacy_doc_falls_back_to_text_recovery_converter",
+        text_recovery_doc is recovered_text_doc
+        and fake_text_recovery_docs.calls[-1][9] == 30
+        and bool(fake_text_recovery_docs.calls[-1][2])
+        and not bool(fake_text_recovery_docs.calls[-1][12]),
+        [len(args) for args in fake_text_recovery_docs.calls],
+    )
+    forced_text_recovery_docs = FakeTextRecoveryDocuments()
+    forced_text_recovery_word = type("FakeForcedTextRecoveryWord", (), {"Documents": forced_text_recovery_docs})()
+    forced_text_doc = wm_core_module.open_word_document_safely(
+        forced_text_recovery_word,
+        root / "text_recovery_only_probe.doc",
+        legacy_recovery_mode="text",
+    )
+    record(
+        "word_legacy_doc_text_retry_skips_repair_open",
+        forced_text_doc is recovered_text_doc
+        and len(forced_text_recovery_docs.calls) == 1
+        and forced_text_recovery_docs.calls[0][9] == 30,
+        [len(args) for args in forced_text_recovery_docs.calls],
+    )
+    legacy_pdf = root / "legacy_repair_probe.pdf"
+
+    class FakeLegacyExportDoc:
+        def ExportAsFixedFormat(self, path, _format):
+            Path(path).write_bytes(b"repaired legacy PDF")
+
+        def Close(self, _save_changes=False):
+            return None
+
+    fake_legacy_export_doc = FakeLegacyExportDoc()
+
+    class FakeLegacyExportDocuments:
+        def __init__(self):
+            self.calls = []
+
+        def Open(self, *args):
+            self.calls.append(args)
+            if len(args) >= 13 and bool(args[12]):
+                return fake_legacy_export_doc
+            raise RuntimeError("repair open required")
+
+    fake_legacy_export_docs = FakeLegacyExportDocuments()
+    fake_legacy_export_word = type("FakeLegacyExportWord", (), {"Documents": fake_legacy_export_docs})()
+    original_legacy_runtime_converter = mod._FX_RUNTIME_CONVERT_DOC_TO_PDF
+    mod._FX_RUNTIME_CONVERT_DOC_TO_PDF = lambda *_args: (_ for _ in ()).throw(AssertionError("legacy DOC must use repair export"))
+    try:
+        legacy_pdf_status = mod._convert_doc_to_pdf_safely(
+            fake_legacy_export_word, root / "legacy_source.doc", legacy_pdf
+        )
+    finally:
+        mod._FX_RUNTIME_CONVERT_DOC_TO_PDF = original_legacy_runtime_converter
+    record(
+        "watermark_legacy_doc_conversion_uses_repair_open",
+        legacy_pdf_status == "SUCCESS"
+        and legacy_pdf.read_bytes() == b"repaired legacy PDF"
+        and len(fake_legacy_export_docs.calls) == 1
+        and bool(fake_legacy_export_docs.calls[0][2])
+        and bool(fake_legacy_export_docs.calls[0][12]),
+        {"status": legacy_pdf_status, "open_calls": len(fake_legacy_export_docs.calls)},
+    )
+
+    word_kill_calls = []
+    original_word_process_lookup = getattr(mod, "_get_word_app_process_id", None)
+    original_word_timeout_terminate = getattr(mod, "_terminate_timed_out_word_process", None)
+    original_word_run = mod.subprocess.run
+    mod._get_word_app_process_id = lambda word_app: 4321 if getattr(word_app, "Hwnd", 0) == 123 else None
+    mod.subprocess.run = lambda args, **kwargs: word_kill_calls.append((args, kwargs)) or types.SimpleNamespace(returncode=0)
+    try:
+        fake_timeout_word = type("FakeTimeoutWord", (), {"Hwnd": 123})()
+        fake_timeout_pid = mod._get_word_app_process_id(fake_timeout_word)
+        mod._terminate_timed_out_word_process(fake_timeout_pid)
+        mod._terminate_timed_out_word_process(None)
+    finally:
+        mod.subprocess.run = original_word_run
+        if original_word_process_lookup is None:
+            delattr(mod, "_get_word_app_process_id")
+        else:
+            mod._get_word_app_process_id = original_word_process_lookup
+        if original_word_timeout_terminate is None:
+            delattr(mod, "_terminate_timed_out_word_process")
+        else:
+            mod._terminate_timed_out_word_process = original_word_timeout_terminate
+    record(
+        "watermark_word_timeout_terminates_only_owned_process",
+        fake_timeout_pid == 4321
+        and len(word_kill_calls) == 1
+        and word_kill_calls[0][0] == ["taskkill", "/PID", "4321", "/T", "/F"],
+        word_kill_calls,
+    )
+
+    wm_timeout_root = root / "watermark_word_timeout_cleanup"
+    wm_timeout_root.mkdir()
+    wm_timeout_source = wm_timeout_root / "timeout.docx"
+    wm_timeout_source.write_bytes(b"simulated Word source")
+    timeout_entered = threading.Event()
+    timeout_release = threading.Event()
+    timeout_killed_pids = []
+    original_timeout_process_word = mod._watermark_process_word
+    original_timeout_create_word = mod._create_hidden_word_app
+    original_timeout_pid_lookup = mod._get_word_app_process_id
+    original_timeout_terminate = mod._terminate_timed_out_word_process
+    original_timeout_seconds = mod.WATERMARK_WORD_PROCESS_TIMEOUT_SECONDS
+
+    def block_word_watermark(*_args, **_kwargs):
+        timeout_entered.set()
+        timeout_release.wait(2)
+        return "ERROR:simulated Word prompt hang"
+
+    def release_timed_out_word(pid):
+        timeout_killed_pids.append(pid)
+        timeout_release.set()
+        return True
+
+    mod._watermark_process_word = block_word_watermark
+    mod._create_hidden_word_app = lambda: type("FakeHungWord", (), {"Hwnd": 987})()
+    mod._get_word_app_process_id = lambda _word: 9876
+    mod._terminate_timed_out_word_process = release_timed_out_word
+    mod.WATERMARK_WORD_PROCESS_TIMEOUT_SECONDS = 0.05
+    mod._safe_var_set(app, "output_strategy_var", mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["result_folder"])
+    mod._safe_var_set(app, "wm_delete_var", False)
+    mod._safe_var_set(app, "wm_convert_pdf", False)
+    mod._safe_var_set(app, "wm_skip_hyphen_var", False)
+    mod._safe_var_set(app, "wm_copy_skipped_var", True)
+    try:
+        app.run_process(str(wm_timeout_root), "watermark")
+    finally:
+        timeout_release.set()
+        mod._watermark_process_word = original_timeout_process_word
+        mod._create_hidden_word_app = original_timeout_create_word
+        mod._get_word_app_process_id = original_timeout_pid_lookup
+        mod._terminate_timed_out_word_process = original_timeout_terminate
+        mod.WATERMARK_WORD_PROCESS_TIMEOUT_SECONDS = original_timeout_seconds
+    timeout_result = mod._get_last_task_result(app)
+    timeout_copy = wm_timeout_root / mod.RESULT_FOLDER_NAME / wm_timeout_source.name
+    record(
+        "watermark_word_timeout_kills_hung_worker_and_preserves_source",
+        timeout_entered.is_set()
+        and timeout_killed_pids == [9876]
+        and timeout_result.get("failed_count") == 1
+        and timeout_copy.exists()
+        and timeout_copy.read_bytes() == wm_timeout_source.read_bytes(),
+        {"pids": timeout_killed_pids, "result": timeout_result, "copy": str(timeout_copy)},
+    )
+
+    wm_retry_root = root / "watermark_word_retry_strategy"
+    wm_retry_root.mkdir()
+    wm_retry_source = wm_retry_root / "retry.doc"
+    wm_retry_source.write_bytes(b"simulated recoverable legacy Word source")
+    retry_modes = []
+    original_retry_converter = mod._watermark_convert_doc_to_pdf
+    original_retry_pdf_processor = mod._watermark_process_pdf
+    original_retry_create_word = mod._create_hidden_word_app
+    original_retry_pid = mod._get_word_app_process_id
+    original_retry_close_word = mod._close_word_app_instance
+
+    def retry_doc_conversion(_src, raw_pdf, _word_app, *, legacy_doc_recovery_mode="auto"):
+        retry_modes.append(legacy_doc_recovery_mode)
+        if legacy_doc_recovery_mode == "text":
+            Path(raw_pdf).write_bytes(b"recovered PDF")
+            return "SUCCESS"
+        return "ERROR:simulated repair-open failure"
+
+    mod._watermark_convert_doc_to_pdf = retry_doc_conversion
+    mod._watermark_process_pdf = lambda *_args, **_kwargs: "SUCCESS"
+    mod._create_hidden_word_app = lambda: type("FakeRetryWord", (), {"Quit": lambda self: None})()
+    mod._get_word_app_process_id = lambda _word: 7654
+    mod._close_word_app_instance = lambda *_args: True
+    mod._safe_var_set(app, "output_strategy_var", mod.OUTPUT_STRATEGY_VALUE_TO_LABEL["result_folder"])
+    mod._safe_var_set(app, "wm_delete_var", False)
+    mod._safe_var_set(app, "wm_convert_pdf", True)
+    mod._safe_var_set(app, "wm_skip_hyphen_var", False)
+    mod._safe_var_set(app, "wm_skip_pdf_type_var", False)
+    mod._safe_var_set(app, "wm_skip_word_type_var", False)
+    mod._safe_var_set(app, "wm_skip_ppt_type_var", False)
+    mod._safe_var_set(app, "wm_copy_skipped_var", True)
+    mod._safe_var_set(app, "wm_edit_password_enabled_var", False)
+    mod._safe_var_set(app, "wm_insert_page_enabled_var", False)
+    mod._safe_var_set(app, "wm_copy_guard_enabled_var", False)
+    try:
+        app.run_process(str(wm_retry_source), "watermark")
+        retry_result = mod._get_last_task_result(app)
+    finally:
+        mod._watermark_convert_doc_to_pdf = original_retry_converter
+        mod._watermark_process_pdf = original_retry_pdf_processor
+        mod._create_hidden_word_app = original_retry_create_word
+        mod._get_word_app_process_id = original_retry_pid
+        mod._close_word_app_instance = original_retry_close_word
+    record(
+        "watermark_legacy_doc_pdf_retry_switches_to_text_recovery",
+        retry_modes == ["auto", "text"] and retry_result.get("success_count") == 1,
+        {"modes": retry_modes, "result": retry_result},
+    )
+
+    word_release_events = []
+    original_word_render = mod._watermark_render_word
+    original_word_verify = mod.verify_word_output
+
+    def record_word_render(
+        src, staging, settings, word_app, *, batch_word_task=False, legacy_doc_recovery_mode="auto"
+    ):
+        word_release_events.append(("render", batch_word_task, legacy_doc_recovery_mode))
+        Path(staging).write_bytes(b"processed legacy word")
+        return "SUCCESS"
+
+    mod._watermark_render_word = record_word_render
+    mod.verify_word_output = lambda _path, _password=None: word_release_events.append(("verify",))
+
+    class FakeBatchLegacyWord:
+        def Quit(self):
+            word_release_events.append(("quit",))
+
+    try:
+        plain_legacy_status = mod._watermark_process_word(
+            root / "plain_legacy.doc", root / "plain_legacy_output.doc", {}, FakeBatchLegacyWord()
+        )
+        plain_legacy_events = list(word_release_events)
+        word_release_events.clear()
+        batch_legacy_status = mod._watermark_process_word(
+            root / "batch_legacy.doc", root / "batch_legacy_output.doc", {}, FakeBatchLegacyWord(),
+            batch_word_task=True,
+        )
+        batch_legacy_events = list(word_release_events)
+        word_release_events.clear()
+        text_legacy_status = mod._watermark_process_word(
+            root / "text_legacy.doc", root / "text_legacy_output.doc", {}, FakeBatchLegacyWord(),
+            batch_word_task=True,
+            legacy_doc_recovery_mode="text",
+        )
+        text_legacy_events = list(word_release_events)
+    finally:
+        mod._watermark_render_word = original_word_render
+        mod.verify_word_output = original_word_verify
+    record(
+        "watermark_legacy_word_mode_is_explicit_and_publish_verifies_before_return",
+        plain_legacy_status == "SUCCESS"
+        and plain_legacy_events == [("render", False, "auto"), ("verify",)]
+        and batch_legacy_status == "SUCCESS"
+        and batch_legacy_events == [("render", True, "auto"), ("verify",)]
+        and text_legacy_status == "SUCCESS"
+        and text_legacy_events == [("render", True, "text"), ("verify",)],
+        {"plain": plain_legacy_events, "batch": batch_legacy_events, "text": text_legacy_events},
     )
 
     class FastWordContent:
@@ -2758,7 +3038,7 @@ def main():
     mod._safe_var_set(app, "wm_range_var", "all")
     mod._safe_var_set(app, "wm_overwrite_var", "force")
     original_process_word = mod._watermark_process_word
-    mod._watermark_process_word = lambda src, dst, settings, word_app: "SKIP:damaged word source"
+    mod._watermark_process_word = lambda src, dst, settings, word_app, **_kwargs: "SKIP:damaged word source"
     try:
         app.run_process(str(wm_damaged_word_root), "watermark")
     finally:

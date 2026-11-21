@@ -3,12 +3,24 @@
 import io
 import os
 import tempfile
+import time
 from pathlib import Path
 
 from tools.fx_edit_password import pdf_edit_encryption
 
 
 INSERT_MARKER = "Fengxi Toolbox"
+
+
+def _remove_staging_file(path):
+    for delay in (0, 0.1, 0.25, 0.5, 1):
+        if delay:
+            time.sleep(delay)
+        try:
+            Path(path).unlink(missing_ok=True)
+            return
+        except OSError:
+            continue
 
 
 def finish_pikepdf(pdf, *, insert_page_pdf_bytes=None, insert_page_position="end", edit_password=None):
@@ -105,4 +117,4 @@ def publish_watermark_output(destination, process, verify):
     except Exception:
         return "ERROR:输出处理或验证失败，未提交结果"
     finally:
-        staging.unlink(missing_ok=True)
+        _remove_staging_file(staging)

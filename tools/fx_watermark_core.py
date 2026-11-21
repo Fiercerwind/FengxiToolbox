@@ -1549,16 +1549,42 @@ def _get_word_page_count(doc):
             return 1
 
 
-def open_word_document_safely(word_app, src_path):
+WORD_TEXT_RECOVERY_OPEN_FORMAT = 30
+
+
+def open_word_document_safely(
+    word_app, src_path, *, legacy_read_only=True, legacy_recovery_mode="auto"
+):
     """Open a Word document with repair fallbacks for damaged files."""
 
     src_value = str(Path(src_path).resolve())
-    attempts = [
+    repair_open = lambda: word_app.Documents.Open(
+        src_value, False, bool(legacy_read_only), False, "", "", False, "", "", 0, 0, False, True
+    )
+    text_recovery_open = lambda: word_app.Documents.Open(
+        src_value, False, True, False, "", "", False, "", "",
+        WORD_TEXT_RECOVERY_OPEN_FORMAT, 0, False, False
+    )
+    standard_attempts = [
         lambda: word_app.Documents.Open(src_value, False, False, False),
         lambda: word_app.Documents.Open(src_value),
-        lambda: word_app.Documents.Open(src_value, False, False, False, "", "", False, "", "", 0, 0, False, False, True),
-        lambda: word_app.Documents.Open(src_value, False, True, False, "", "", False, "", "", 0, 0, False, False, True),
+        repair_open,
+        lambda: word_app.Documents.Open(
+            src_value, False, True, False, "", "", False, "", "", 0, 0, False, True
+        ),
     ]
+    if Path(src_value).suffix.lower() == ".doc":
+        if str(legacy_recovery_mode or "auto").strip().lower() == "text":
+            attempts = [text_recovery_open]
+        elif legacy_read_only:
+            read_only_open = lambda: word_app.Documents.Open(
+                src_value, False, True, False, "", "", False, "", "", 0, 0, False, False
+            )
+            attempts = [repair_open, read_only_open, text_recovery_open]
+        else:
+            attempts = [repair_open, *standard_attempts[0:2], standard_attempts[3], text_recovery_open]
+    else:
+        attempts = standard_attempts
     last_exc = None
     for attempt in attempts:
         try:
@@ -1733,6 +1759,8 @@ def add_watermark_to_word(
     insert_page_position="end",
     insert_page_image_cache=None,
     edit_password=None,
+    legacy_doc_read_only=False,
+    legacy_doc_recovery_mode="auto",
 ):
     """Apply a header watermark and optional hidden copy guard to a Word document."""
 
@@ -1743,6 +1771,7 @@ def add_watermark_to_word(
 
     context = com_context_factory() if callable(com_context_factory) else nullcontext()
     doc = None
+    doc_is_output = False
     previous_alerts = None
     try:
         with context:
@@ -1752,7 +1781,19 @@ def add_watermark_to_word(
             except Exception:
                 previous_alerts = None
 
-            doc = open_word_document_safely(word_app, src_path)
+            doc = open_word_document_safely(
+                word_app,
+                src_path,
+                legacy_read_only=legacy_doc_read_only,
+                legacy_recovery_mode=legacy_doc_recovery_mode,
+            )
+            if src_path.suffix.lower() == ".doc" and bool(getattr(doc, "ReadOnly", False)):
+                dst_path.parent.mkdir(parents=True, exist_ok=True)
+                dst_path.unlink(missing_ok=True)
+                doc.SaveAs2(str(dst_path), FileFormat=0)
+                doc.Close(False)
+                doc = word_app.Documents.Open(str(dst_path), False, False, False)
+                doc_is_output = True
 
             try:
                 protection_type = int(doc.ProtectionType)
@@ -1872,7 +1913,7 @@ def add_watermark_to_word(
                 if int(doc.ProtectionType) != 3:
                     return "ERROR:Word 只读保护设置失败"
             dst_path.parent.mkdir(parents=True, exist_ok=True)
-            if _same_path(src_path, dst_path):
+            if _same_path(src_path, dst_path) or doc_is_output:
                 doc.Save()
             else:
                 if dst_path.exists():

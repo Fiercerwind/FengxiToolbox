@@ -3847,6 +3847,8 @@ def add_watermark_to_word(
     insert_page_position="end",
     insert_page_image_cache=None,
     edit_password=None,
+    legacy_doc_read_only=False,
+    legacy_doc_recovery_mode="auto",
 ):
     return _watermark_core_add_watermark_to_word(
         word_app,
@@ -3869,6 +3871,8 @@ def add_watermark_to_word(
         insert_page_position=insert_page_position,
         insert_page_image_cache=insert_page_image_cache,
         edit_password=edit_password,
+        legacy_doc_read_only=legacy_doc_read_only,
+        legacy_doc_recovery_mode=legacy_doc_recovery_mode,
     )
 
 
@@ -5723,14 +5727,102 @@ def _create_hidden_word_app():
         word_app.DisplayAlerts = 0
     except Exception:
         pass
+    try:
+        word_app.Options.ConfirmConversions = False
+        word_app.Options.SaveNormalPrompt = False
+        word_app.Options.UpdateLinksAtOpen = False
+    except Exception:
+        pass
+    try:
+        blank_document = word_app.Documents.Add()
+        blank_document.Saved = True
+    except Exception:
+        pass
     return word_app
+
+
+def _get_word_app_process_id(word_app):
+    """Return the WINWORD process that owns this specific COM instance."""
+    try:
+        import win32process
+
+        hwnd = int(word_app.ActiveWindow.Hwnd)
+        if hwnd <= 0:
+            return None
+        _thread_id, process_id = win32process.GetWindowThreadProcessId(hwnd)
+        return int(process_id) if int(process_id) > 0 else None
+    except Exception:
+        return None
+
+
+def _terminate_timed_out_word_process(process_id):
+    """Kill only the Word process owned by the timed-out automation instance."""
+    try:
+        process_id = int(process_id)
+    except (TypeError, ValueError):
+        return False
+    if process_id <= 0:
+        return False
+    try:
+        completed = subprocess.run(
+            ["taskkill", "/PID", str(process_id), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        )
+        return completed.returncode == 0
+    except Exception as exc:
+        _debug(f"watermark_word_timeout:process_terminate_failed:{process_id}:{exc}")
+        return False
+
+
+def _close_word_app_instance(word_app, process_id):
+    """Close one dedicated Word instance and force-stop it only if Quit hangs."""
+    try:
+        word_app.Quit()
+    except Exception:
+        pass
+    try:
+        process_id = int(process_id)
+    except (TypeError, ValueError):
+        return False
+    if process_id <= 0:
+        return False
+
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {process_id}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                check=False,
+            )
+            if f'"{process_id}"' not in result.stdout:
+                return True
+        except Exception as exc:
+            _debug(f"watermark_word_close:process_probe_failed:{process_id}:{exc}")
+            break
+        time.sleep(0.1)
+    return _terminate_timed_out_word_process(process_id)
 
 
 _FX_RUNTIME_CONVERT_DOC_TO_PDF = convert_doc_to_pdf
 _FX_RUNTIME_CONVERT_PPT_TO_PDF = convert_ppt_to_pdf
 
 
-def _convert_doc_to_pdf_safely(word_app, src, dst):
+def _convert_doc_to_pdf_safely(word_app, src, dst, *, legacy_doc_recovery_mode="auto"):
+    if Path(src).suffix.lower() == ".doc":
+        return _export_word_docx_to_pdf_safely(
+            src,
+            dst,
+            word_app=word_app,
+            legacy_doc_recovery_mode=legacy_doc_recovery_mode,
+        )
     status = ""
     try:
         with _DisableWin32ComGenCache():
@@ -5885,16 +5977,21 @@ def _convert_pdf_to_ppt_safely(ppt_app, src, dst):
 _install_safe_office_dispatch_patch()
 
 
-def _export_word_docx_to_pdf_safely(docx_path, pdf_path):
+def _export_word_docx_to_pdf_safely(
+    docx_path, pdf_path, word_app=None, *, legacy_doc_recovery_mode="auto"
+):
     doc = None
-    word_app = None
+    owns_word_app = word_app is None
     docx_abs = os.path.abspath(docx_path)
     pdf_abs = os.path.abspath(pdf_path)
     try:
         os.makedirs(os.path.dirname(pdf_abs), exist_ok=True)
-        word_app = _create_hidden_word_app()
+        if word_app is None:
+            word_app = _create_hidden_word_app()
         with _DisableWin32ComGenCache():
-            doc = _watermark_core_open_word_document_safely(word_app, docx_abs)
+            doc = _watermark_core_open_word_document_safely(
+                word_app, docx_abs, legacy_recovery_mode=legacy_doc_recovery_mode
+            )
             doc.ExportAsFixedFormat(pdf_abs, 17)
             doc.Close(False)
             doc = None
@@ -5911,7 +6008,7 @@ def _export_word_docx_to_pdf_safely(docx_path, pdf_path):
         except Exception:
             pass
         try:
-            if word_app is not None:
+            if owns_word_app and word_app is not None:
                 word_app.Quit()
         except Exception:
             pass
@@ -13884,16 +13981,27 @@ def _watermark_render_pdf(src, dst, settings):
     return status
 
 
-def _watermark_process_word(src, dst, settings, word_app):
+def _watermark_process_word(
+    src, dst, settings, word_app, *, batch_word_task=False, legacy_doc_recovery_mode="auto"
+):
     password = settings.get("edit_password") if settings.get("edit_password_enabled") else None
     return publish_watermark_output(
         dst,
-        lambda staging: _watermark_render_word(src, staging, settings, word_app),
+        lambda staging: _watermark_render_word(
+            src,
+            staging,
+            settings,
+            word_app,
+            batch_word_task=batch_word_task,
+            legacy_doc_recovery_mode=legacy_doc_recovery_mode,
+        ),
         lambda staging: verify_word_output(staging, password),
     )
 
 
-def _watermark_render_word(src, dst, settings, word_app):
+def _watermark_render_word(
+    src, dst, settings, word_app, *, batch_word_task=False, legacy_doc_recovery_mode="auto"
+):
     status = add_watermark_to_word(
         word_app,
         str(src),
@@ -13913,12 +14021,21 @@ def _watermark_render_word(src, dst, settings, word_app):
         insert_page_position=settings.get("insert_page_position", "结尾"),
         insert_page_image_cache=settings.get("_insert_page_image_cache"),
         edit_password=settings.get("edit_password") if settings.get("edit_password_enabled") else None,
+        legacy_doc_read_only=(batch_word_task or Path(src).suffix.lower() == ".doc"),
+        legacy_doc_recovery_mode=legacy_doc_recovery_mode,
     )
     return status
 
 
-def _watermark_convert_doc_to_pdf(src, raw_pdf, word_app):
-    return _convert_doc_to_pdf_safely(word_app, str(src), str(raw_pdf))
+def _watermark_convert_doc_to_pdf(
+    src, raw_pdf, word_app, *, legacy_doc_recovery_mode="auto"
+):
+    return _convert_doc_to_pdf_safely(
+        word_app,
+        str(src),
+        str(raw_pdf),
+        legacy_doc_recovery_mode=legacy_doc_recovery_mode,
+    )
 
 
 def _watermark_convert_ppt_to_pdf(src, raw_pdf, ppt_app):
@@ -14596,10 +14713,12 @@ def _run_watermark_task(app, input_value):
                 pass
         word_app = None
 
-    def process_word_with_recovery(src_path, output_path):
+    def process_word_with_recovery(
+        src_path, output_path, legacy_doc_recovery_mode="auto"
+    ):
         """Run direct Word processing with failure and hang detection."""
 
-        attempt = {"status": None, "error": None, "word_app": None}
+        attempt = {"status": None, "error": None, "word_app": None, "word_pid": None}
 
         def run_attempt():
             local_word_app = None
@@ -14609,18 +14728,21 @@ def _run_watermark_task(app, input_value):
                 com_initialized = True
                 local_word_app = _create_hidden_word_app()
                 attempt["word_app"] = local_word_app
+                attempt["word_pid"] = _get_word_app_process_id(local_word_app)
                 attempt["status"] = _watermark_process_word(
                     src_path,
                     output_path,
                     settings,
                     local_word_app,
+                    batch_word_task=True,
+                    legacy_doc_recovery_mode=legacy_doc_recovery_mode,
                 )
             except Exception as exc:
                 attempt["error"] = exc
             finally:
                 try:
                     if local_word_app is not None:
-                        local_word_app.Quit()
+                        _close_word_app_instance(local_word_app, attempt.get("word_pid"))
                 except Exception:
                     pass
                 if com_initialized:
@@ -14637,12 +14759,14 @@ def _run_watermark_task(app, input_value):
         worker.start()
         worker.join(WATERMARK_WORD_PROCESS_TIMEOUT_SECONDS)
         if worker.is_alive():
-            hung_word_app = attempt.get("word_app")
-            try:
-                if hung_word_app is not None:
-                    hung_word_app.Quit()
-            except Exception:
-                pass
+            hung_word_pid = attempt.get("word_pid")
+            if not _terminate_timed_out_word_process(hung_word_pid):
+                _watermark_log(
+                    app,
+                    logs,
+                    f"[批量水印] Word 超时实例未能自动关闭（PID={hung_word_pid or '未知'}），请检查残留 Word 窗口",
+                )
+            worker.join(2)
             return (
                 "ERROR:Word 处理超过 "
                 f"{WATERMARK_WORD_PROCESS_TIMEOUT_SECONDS} 秒，判定为卡死"
@@ -14656,7 +14780,12 @@ def _run_watermark_task(app, input_value):
 
         last_status = "ERROR:Word 转 PDF 未返回结果"
         for attempt_index in range(1, WATERMARK_WORD_PDF_RETRY_COUNT + 1):
-            convert_attempt = {"status": None, "error": None, "word_app": None}
+            legacy_doc_recovery_mode = (
+                "text"
+                if Path(src_path).suffix.lower() == ".doc" and attempt_index > 1
+                else "auto"
+            )
+            convert_attempt = {"status": None, "error": None, "word_app": None, "word_pid": None}
 
             def convert_in_worker():
                 local_word_app = None
@@ -14666,17 +14795,21 @@ def _run_watermark_task(app, input_value):
                     com_initialized = True
                     local_word_app = _create_hidden_word_app()
                     convert_attempt["word_app"] = local_word_app
+                    convert_attempt["word_pid"] = _get_word_app_process_id(local_word_app)
                     convert_attempt["status"] = _watermark_convert_doc_to_pdf(
                         src_path,
                         raw_pdf,
                         local_word_app,
+                        legacy_doc_recovery_mode=legacy_doc_recovery_mode,
                     )
                 except Exception as exc:
                     convert_attempt["error"] = exc
                 finally:
                     try:
                         if local_word_app is not None:
-                            local_word_app.Quit()
+                            _close_word_app_instance(
+                                local_word_app, convert_attempt.get("word_pid")
+                            )
                     except Exception:
                         pass
                     if com_initialized:
@@ -14697,12 +14830,14 @@ def _run_watermark_task(app, input_value):
             convert_worker.start()
             convert_worker.join(WATERMARK_WORD_PROCESS_TIMEOUT_SECONDS)
             if convert_worker.is_alive():
-                hung_word_app = convert_attempt.get("word_app")
-                try:
-                    if hung_word_app is not None:
-                        hung_word_app.Quit()
-                except Exception:
-                    pass
+                hung_word_pid = convert_attempt.get("word_pid")
+                if not _terminate_timed_out_word_process(hung_word_pid):
+                    _watermark_log(
+                        app,
+                        logs,
+                        f"[批量水印] Word 转 PDF 超时实例未能自动关闭（PID={hung_word_pid or '未知'}），请检查残留 Word 窗口",
+                    )
+                convert_worker.join(2)
                 last_status = (
                     f"ERROR:Word 转 PDF 第 {attempt_index}/{WATERMARK_WORD_PDF_RETRY_COUNT} 次超过 "
                     f"{WATERMARK_WORD_PROCESS_TIMEOUT_SECONDS} 秒，判定为卡死"
@@ -14715,10 +14850,15 @@ def _run_watermark_task(app, input_value):
                     return "SUCCESS"
                 last_status = f"ERROR:Word 转 PDF 第 {attempt_index} 次失败: {convert_status}"
             if attempt_index < WATERMARK_WORD_PDF_RETRY_COUNT:
+                next_recovery_note = (
+                    "；下一次将优先使用 Word 文本恢复转换器"
+                    if Path(src_path).suffix.lower() == ".doc"
+                    else ""
+                )
                 _watermark_log(
                     app,
                     logs,
-                    f"[批量水印] {src_path.name} 转 PDF 失败，将重试第 {attempt_index + 1}/{WATERMARK_WORD_PDF_RETRY_COUNT} 次: {last_status}",
+                    f"[批量水印] {src_path.name} 转 PDF 失败，将重试第 {attempt_index + 1}/{WATERMARK_WORD_PDF_RETRY_COUNT} 次{next_recovery_note}: {last_status}",
                 )
         return last_status
 
@@ -14736,7 +14876,10 @@ def _run_watermark_task(app, input_value):
         try:
             convert_status = convert_word_to_pdf_with_recovery(src_path, raw_pdf)
             if str(convert_status).strip() != "SUCCESS" or not raw_pdf.exists():
-                direct_status = process_word_with_recovery(src_path, output_path)
+                recovery_mode = "text" if Path(src_path).suffix.lower() == ".doc" else "auto"
+                direct_status = process_word_with_recovery(
+                    src_path, output_path, legacy_doc_recovery_mode=recovery_mode
+                )
                 if _watermark_status_kind(direct_status) == "success":
                     _watermark_log(
                         app,

@@ -1,5 +1,15 @@
 # 最近变更
 
+## 2026-11-21 20:20:03 | watermark
+- 摘要：Use Word Text Recovery Converter on legacy DOC retries
+- 文件：Fengxi_Toolbox.py, tools/fx_watermark_core.py, full_debug_test.py, memory/categories/watermark-and-remove.md
+- 说明：Repeated DOC PDF retries previously repeated the same OpenAndRepair strategy. Added read-only RECOVR32.CNV (OpenFormat 30) fallback after standard repair opens fail; after a failed/timed-out first DOC conversion, the next retry and direct Word fallback use recovery-only mode. Text recovery is fallback-only because it may simplify formatting. Regression validates converter arguments and full batch retry mode transition auto->text. py_compile passed, smoke 17/17, full_debug 300/300; real Word text-recovery-to-PDF probe passed.
+
+## 2026-11-21 19:20:28 | watermark
+- 摘要：Stabilize legacy DOC watermarking and release Word instances
+- 文件：Fengxi_Toolbox.py, tools/fx_watermark_core.py, tools/fx_watermark_finish.py, full_debug_test.py, memory/categories/watermark-and-remove.md
+- 说明：Legacy .doc uses correctly-positioned OpenAndRepair in read-only mode, saves a separate output copy, and uses repair-based PDF export. Batch behavior is an explicit parameter. Batch Word/PDF conversion workers close their dedicated Word PID after success or failure and force-stop only if it remains after Quit; timeout cleanup uses the same owned PID. Real legacy DOC watermark+edit-password+source-reopen probe passed; smoke 17/17. Full debug was interrupted by full C: and Office COM activation failure after DOCX/DOC password cases passed.
+
 ## 2026-11-05 23:10:21 | watermark
 - 摘要：Use fresh timestamps for copied skipped and failed watermark files
 - 文件：Fengxi_Toolbox.py, full_debug_test.py, memory/categories/watermark-and-remove.md, memory/recent-changes.md

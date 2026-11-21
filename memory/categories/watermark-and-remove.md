@@ -561,6 +561,20 @@
 - In-place overwrite intentionally does not enable output-based checkpoint reuse because the source itself is modified.
 - Validation: `python -m py_compile Fengxi_Toolbox.py tools\\fx_watermark_checkpoint.py full_debug_test.py`; `python smoke_test.py` 14/14; `python full_debug_test.py` 246/246. No package was created.
 
+## 2026-11-21 Legacy DOC text-recovery retry
+- User logs showed two separate `.doc` failure patterns: Word's explicit unreadable/corrupt error and repeated 60-second timeouts. The bounded retry loop created a fresh Word process but repeated the same repair-open strategy, so the second attempt could hang in the same place.
+- The installed Word `RECOVR32.CNV` converter was verified locally as `OpenFormat=30`. Legacy `.doc` open now tries this read-only Text Recovery Converter after repair/read-only opens fail. If a normal PDF conversion attempt fails or times out, the next attempt uses the converter directly; the final direct-Word fallback also uses it. Normal readable `.doc` files retain the standard repair/open path.
+- Text recovery may simplify layout and recover text without all original formatting; it is only a fallback after standard repair fails or times out. If Word's converter cannot recover the file, existing damaged-source preservation behavior remains.
+- Regression coverage: recovery converter fallback and recovery-only mode; batch conversion retry path asserts `auto` then `text` and successfully publishes the retry PDF; direct mode propagation.
+- Validation: `python -m py_compile ...`; `python smoke_test.py` 17/17; `python full_debug_test.py` 300/300. Real Word `RECOVR32.CNV` opened a text fixture named `.doc` and exported a PDF.
+
+## 2026-11-21 Word batch stability and stale-instance cleanup
+- Root causes: Word `Documents.Open` positional arguments placed `OpenAndRepair` in the wrong slot for legacy `.doc`; timeout cleanup attempted cross-thread COM `Quit()` and could leave the dedicated Word process alive. The generic settings dictionary was also used to mark batch-only `.doc` behavior, coupling ordinary password tests to the batch route.
+- Fix: legacy `.doc` files use read-only repair open and are saved as a separate output before watermarking, avoiding repair/protection against the source file. This is enabled for `.doc` calls generally, not only batch mode. Legacy `.doc` to PDF uses the same repair-open/export path.
+- Batch Word mode is an explicit `_watermark_process_word(..., batch_word_task=True)` argument. Dedicated Word instances record their PID from `ActiveWindow.Hwnd`; each normal or failed Word/Word-to-PDF attempt calls `Quit()`, waits briefly for that PID to exit, then force-stops only that PID if it remains. Timeout handling also terminates only the owned PID, preventing accumulated hidden/modal Word instances from holding source files open.
+- Regression coverage: corrected `OpenAndRepair` argument positions; legacy `.doc` repair and conversion probes; explicit batch-mode propagation; timeout source preservation; Word edit-password integration for `.docx` and `.doc`.
+- Validation: Python compilation passed; `smoke_test.py` passed 17/17 with `TEMP` redirected to D: because C: had no free space. A real Word `.doc` batch probe passed watermarking, edit-password protection, source reopen after cleanup, and output protection verification. `full_debug_test.py` reached and passed `.docx`/`.doc` password checks in one run, but could not complete consistently: C: was full and later Word COM activation failed; one run also stopped in a downstream PDF output-path assertion.
+
 ## 2026-08-10 Batch watermark adaptive page-size switch
 - 批量水印页新增 `适配特殊页面尺寸` 开关，默认开启并纳入上次设置记忆与断点身份。
 - 开启后，PDF 水印按每页实际 MediaBox 宽高和方向生成尺寸变体，并按 A4 相对比例调整字号后居中叠加；关闭时保留旧固定 A4 水印行为。
