@@ -6,6 +6,7 @@
 - 批量转换前用 OLE 容器头与 `WordDocument` 流做轻量预检。无效容器被标为损坏并按跳过/失败复制选项处理，不启动 Word。RTF、HTML、XML、ZIP 容器和文本型旧格式仍允许交由 Word 打开。
 - 本机 `archive` 结构检查：`nachos01.doc` 不是支持的 Word 容器；`nachos02.doc` 有 OLE 头但缺少 `WordDocument` 流；另外五份旧 DOC 为有效 OLE Word 容器，含 24–43 个嵌入对象。未更改原件。
 - 回归：坏容器不会触发 Word COM；旧 DOC 路径验证为一次 `auto` 转换后一次 `text` 兜底。`smoke_test.py` 17/17、`full_debug_test.py` 301/301。
+- 实际旧 DOC 探针：`04无机化学期中试卷.doc` 隔离副本经文本恢复直接水印（含末尾水印页）约 9 秒成功；输出保留 `WordDocument` 并移除复杂 `ObjectPool` 对象。archive 原件与测试副本 SHA-256 一致。
 
 ## 2026-11-05 跳过/失败文件复制使用新时间
 - 水印任务的跳过、失败和受保护原文件复制路径改用 `shutil.copyfile`，只复制文件内容，不继承源文件的访问/修改时间。
